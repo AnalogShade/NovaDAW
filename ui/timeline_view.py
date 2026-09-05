@@ -2,6 +2,8 @@
 ui/timeline_view.py - Règle temporelle, grille d'arrangement, clips et tête de lecture
 """
 from typing import Optional, Tuple
+import copy
+import uuid
 from PySide6.QtWidgets import (
     QWidget, QScrollArea, QVBoxLayout, QHBoxLayout, QFrame, QMenu, QInputDialog
 )
@@ -146,9 +148,11 @@ class TimelineRuler(QWidget):
 
 class TimelineGrid(QWidget):
     """Canvas principal de la timeline contenant les pistes, clips et la tête de lecture"""
+    clip_selected = Signal(Track, object)       # (track, clip)
     clip_double_clicked = Signal(Track, object)  # (track, clip)
     project_modified = Signal()
     seek_requested = Signal(float)
+    time_range_selected = Signal(float, float)
 
     TRACK_HEIGHT = 76
 
@@ -158,10 +162,17 @@ class TimelineGrid(QWidget):
         self.pixels_per_beat = 40.0
         self.playhead_beat = 0.0
 
-        # État d'interaction
+        # Permet de recevoir les touches du clavier (Suppr, Ctrl+D, etc.)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+        # État de sélection de bloc et zone temporelle
         self.selected_clip: Optional[Tuple[Track, ClipType]] = None
+        self.time_selection: Optional[Tuple[float, float]] = None
+
         self._dragging_clip = False
         self._resizing_clip = False
+        self._is_selecting_range = False
+        self._range_anchor_beat = 0.0
         self._drag_start_x = 0
         self._drag_start_beat = 0.0
         self._drag_start_len = 0.0
@@ -185,7 +196,7 @@ class TimelineGrid(QWidget):
         self.setFixedSize(w, h)
 
     def _get_track_at_y(self, y: int) -> Tuple[Optional[Track], int]:
-        index = y // self.TRACK_HEIGHT
+        index = int(y // self.TRACK_HEIGHT)
         if 0 <= index < len(self.project.tracks):
             return self.project.tracks[index], index
         return None, -1
@@ -200,20 +211,22 @@ class TimelineGrid(QWidget):
         for clip in track.clips:
             clip_end = clip.start_beat + clip.length_beats
             if clip.start_beat <= beat <= clip_end:
-                # Vérifier si on est sur les 8 pixels du bord droit pour le redimensionnement
+                # Bord droit pour le redimensionnement (8 pixels)
                 clip_pixel_end = clip_end * self.pixels_per_beat
                 is_resize = abs(x - clip_pixel_end) <= 8
                 return track, clip, is_resize
         return track, None, False
 
     def mousePressEvent(self, event: QMouseEvent):
+        self.setFocus()
         x = event.position().x()
         y = event.position().y()
         track, clip, is_resize = self._get_clip_at(x, y)
 
         if event.button() == Qt.LeftButton:
-            if clip:
+            if clip and track:
                 self.selected_clip = (track, clip)
+                self.time_selection = None
                 self._drag_start_x = x
                 self._drag_start_beat = clip.start_beat
                 self._drag_start_len = clip.length_beats
@@ -221,15 +234,22 @@ class TimelineGrid(QWidget):
                     self._resizing_clip = True
                 else:
                     self._dragging_clip = True
+                self.clip_selected.emit(track, clip)
             else:
+                # Clic sur une zone vide : initie la sélection temporelle
                 self.selected_clip = None
-                # Déplacer la tête de lecture au clic
-                beat = x / self.pixels_per_beat
-                self.seek_requested.emit(beat)
+                self._is_selecting_range = True
+                click_beat = max(0.0, x / self.pixels_per_beat)
+                self._range_anchor_beat = click_beat
+                self.time_selection = (click_beat, click_beat)
+                self.seek_requested.emit(click_beat)
             self.update()
 
         elif event.button() == Qt.RightButton:
-            if clip:
+            if clip and track:
+                self.selected_clip = (track, clip)
+                self.clip_selected.emit(track, clip)
+                self.update()
                 self._show_clip_context_menu(event.globalPosition().toPoint(), track, clip)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
@@ -237,20 +257,24 @@ class TimelineGrid(QWidget):
         y = event.position().y()
         track, clip, _ = self._get_clip_at(x, y)
 
-        if clip:
-            # Ouvrir le Piano Roll ou l'Éditeur Audio !
+        if clip and track:
+            self.selected_clip = (track, clip)
+            self.clip_selected.emit(track, clip)
             self.clip_double_clicked.emit(track, clip)
         elif track:
-            # Double-clic sur piste vide : Créer un nouveau bloc/clip !
-            # Alignement sur la mesure ou le temps le plus proche
-            click_beat = x / self.pixels_per_beat
-            snapped_beat = max(0.0, round(click_beat / 4.0) * 4.0)
-            length = 4.0  # 1 mesure de 4 temps par défaut
+            click_beat = max(0.0, x / self.pixels_per_beat)
 
-            # Si l'intervalle de boucle englobe ce point, utiliser la boucle
-            if self.project.loop_enabled and self.project.loop_start_beat <= click_beat <= self.project.loop_end_beat:
+            # Si une zone temporelle était sélectionnée, le bloc s'adapte exactement dessus !
+            if self.time_selection and abs(self.time_selection[1] - self.time_selection[0]) >= 0.5:
+                s, e = self.time_selection
+                snapped_beat = max(0.0, round(s))
+                length = max(1.0, round(e - s))
+            elif self.project.loop_enabled and self.project.loop_start_beat <= click_beat <= self.project.loop_end_beat:
                 snapped_beat = self.project.loop_start_beat
                 length = max(1.0, self.project.loop_end_beat - self.project.loop_start_beat)
+            else:
+                snapped_beat = max(0.0, round(click_beat / 4.0) * 4.0)
+                length = 4.0
 
             if track.track_type == "midi":
                 new_clip = MidiClip(
@@ -269,10 +293,11 @@ class TimelineGrid(QWidget):
 
             track.clips.append(new_clip)
             self.selected_clip = (track, new_clip)
+            self.time_selection = None
             self.project_modified.emit()
             self.update()
 
-            # Ouvrir immédiatement l'éditeur sur ce nouveau clip créé !
+            self.clip_selected.emit(track, new_clip)
             self.clip_double_clicked.emit(track, new_clip)
 
     def mouseMoveEvent(self, event: QMouseEvent):
@@ -295,13 +320,20 @@ class TimelineGrid(QWidget):
             self.project_modified.emit()
             self.update()
 
+        elif self._is_selecting_range:
+            cur_beat = max(0.0, x / self.pixels_per_beat)
+            s = min(self._range_anchor_beat, cur_beat)
+            e = max(self._range_anchor_beat, cur_beat)
+            self.time_selection = (s, e)
+            self.time_range_selected.emit(s, e)
+            self.update()
+
         else:
-            # Curseur adaptatif selon survol du bord de clip
             _, clip, is_resize = self._get_clip_at(x, y)
             if is_resize:
                 self.setCursor(Qt.SizeHorCursor)
             elif clip:
-                self.setCursor(Qt.ArrowCursor)
+                self.setCursor(Qt.PointingHandCursor)
             else:
                 self.setCursor(Qt.CrossCursor)
 
@@ -312,16 +344,65 @@ class TimelineGrid(QWidget):
             self.project_modified.emit()
             self.update()
 
+        if self._is_selecting_range:
+            self._is_selecting_range = False
+            if self.time_selection:
+                s, e = self.time_selection
+                if abs(e - s) < 0.25:
+                    self.time_selection = None
+            self.update()
+
+    def keyPressEvent(self, event):
+        # Touche Suppr ou Backspace pour supprimer le bloc sélectionné
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            if self.selected_clip:
+                track, clip = self.selected_clip
+                track.clips = [c for c in track.clips if c.id != clip.id]
+                self.selected_clip = None
+                self.project_modified.emit()
+                self.update()
+                event.accept()
+                return
+
+        # Ctrl + D : Dupliquer le bloc sélectionné immédiatement à la suite
+        elif event.key() == Qt.Key_D and (event.modifiers() & Qt.ControlModifier):
+            if self.selected_clip:
+                track, clip = self.selected_clip
+                new_clip = copy.deepcopy(clip)
+                new_clip.id = str(uuid.uuid4())[:8]
+                new_clip.name = f"{clip.name} (Copie)"
+                new_clip.start_beat = clip.start_beat + clip.length_beats
+                track.clips.append(new_clip)
+                self.selected_clip = (track, new_clip)
+                self.project_modified.emit()
+                self.update()
+                self.clip_selected.emit(track, new_clip)
+                event.accept()
+                return
+
+        super().keyPressEvent(event)
+
     def _show_clip_context_menu(self, pos, track: Track, clip: ClipType):
         menu = QMenu(self)
         action_edit = menu.addAction("✏ Éditer le bloc")
+        action_dup = menu.addAction("📑 Dupliquer (Ctrl+D)")
         action_rename = menu.addAction("Renommer...")
         menu.addSeparator()
-        action_delete = menu.addAction("🗑 Supprimer le bloc")
+        action_delete = menu.addAction("🗑 Supprimer le bloc (Suppr)")
 
         action = menu.exec(pos)
         if action == action_edit:
             self.clip_double_clicked.emit(track, clip)
+        elif action == action_dup:
+            new_clip = copy.deepcopy(clip)
+            new_clip.id = str(uuid.uuid4())[:8]
+            new_clip.name = f"{clip.name} (Copie)"
+            new_clip.start_beat = clip.start_beat + clip.length_beats
+            track.clips.append(new_clip)
+            self.selected_clip = (track, new_clip)
+            self.project_modified.emit()
+            self.update()
+            self.clip_selected.emit(track, new_clip)
         elif action == action_rename:
             new_name, ok = QInputDialog.getText(self, "Renommer le bloc", "Nom du bloc :", text=clip.name)
             if ok and new_name.strip():
@@ -348,11 +429,8 @@ class TimelineGrid(QWidget):
         # Pistes & Lignes horizontales
         for i, track in enumerate(self.project.tracks):
             y = i * self.TRACK_HEIGHT
-            # Ligne de fond alternée subtile
             bg_col = QColor("#171821") if i % 2 == 0 else QColor("#14151c")
             painter.fillRect(0, y, width, self.TRACK_HEIGHT, bg_col)
-
-            # Ligne de séparation de piste
             painter.setPen(QPen(QColor("#232634"), 1))
             painter.drawLine(0, y + self.TRACK_HEIGHT, width, y + self.TRACK_HEIGHT)
 
@@ -362,11 +440,9 @@ class TimelineGrid(QWidget):
             bar_beat = bar * 4.0
             x = bar_beat * self.pixels_per_beat
 
-            # Ligne de mesure (Barre franche)
             painter.setPen(QPen(QColor("#2a2e3f"), 1))
             painter.drawLine(int(x), 0, int(x), height)
 
-            # Subdivisions (Temps)
             painter.setPen(QPen(QColor("#1b1d28"), 1))
             for beat in range(1, 4):
                 bx = (bar_beat + beat) * self.pixels_per_beat
@@ -377,6 +453,16 @@ class TimelineGrid(QWidget):
             lx1 = self.project.loop_start_beat * self.pixels_per_beat
             lx2 = self.project.loop_end_beat * self.pixels_per_beat
             painter.fillRect(QRectF(lx1, 0, lx2 - lx1, height), QColor(245, 158, 11, 15))
+
+        # Zone temporelle sélectionnée par glisser sur la grille
+        if self.time_selection:
+            s, e = self.time_selection
+            sx = s * self.pixels_per_beat
+            sw = max(2.0, (e - s) * self.pixels_per_beat)
+            sel_rect = QRectF(sx, 0, sw, height)
+            painter.fillRect(sel_rect, QColor(56, 189, 248, 35))
+            painter.setPen(QPen(QColor("#38bdf8"), 1, Qt.DashLine))
+            painter.drawRect(sel_rect)
 
         # Dessin des Clips / Blocs
         font_clip = QFont("Segoe UI", 9, QFont.Bold)
@@ -394,9 +480,15 @@ class TimelineGrid(QWidget):
                 clip_rect = QRectF(cx, cy, cw, ch)
                 is_selected = self.selected_clip and self.selected_clip[1].id == clip.id
 
-                # Couleur de base
                 base_color = QColor(clip.color)
-                body_color = QColor(base_color.red(), base_color.green(), base_color.blue(), 190)
+                alpha = 240 if is_selected else 180
+                body_color = QColor(base_color.red(), base_color.green(), base_color.blue(), alpha)
+
+                # Si sélectionné : Halo d'illumination ambre / or éclatant
+                if is_selected:
+                    painter.setBrush(Qt.NoBrush)
+                    painter.setPen(QPen(QColor("#fbbf24"), 3))
+                    painter.drawRoundedRect(clip_rect.adjusted(-2, -2, 2, 2), 6, 6)
 
                 # Corps du bloc
                 painter.setBrush(QBrush(body_color))
@@ -410,20 +502,22 @@ class TimelineGrid(QWidget):
                 header_col = QColor(base_color.darker(140))
                 painter.setBrush(QBrush(header_col))
                 painter.drawRoundedRect(header_rect, 5, 5)
-                # Remettre l'angle inférieur droit net
                 painter.fillRect(QRectF(cx, cy + 12, cw, 6), header_col)
 
                 # Titre du bloc
                 painter.setPen(QColor("#ffffff"))
                 painter.drawText(int(cx) + 8, int(cy) + 14, clip.name)
 
+                # Badge ou étoile si sélectionné
+                if is_selected and cw > 40:
+                    painter.setPen(QColor("#fbbf24"))
+                    painter.drawText(int(cx + cw - 20), int(cy + 14), "★")
+
                 # Aperçu du contenu à l'intérieur du clip
                 if isinstance(clip, MidiClip):
-                    # Mini représentation des notes MIDI
                     painter.setPen(Qt.NoPen)
                     painter.setBrush(QBrush(QColor("#ffffff")))
                     for note in clip.notes:
-                        # Hauteur relative (pitch 36 à 84)
                         norm_pitch = max(0.0, min(1.0, (note.pitch - 36) / 48.0))
                         ny = cy + 22 + (1.0 - norm_pitch) * (ch - 28)
                         nx = cx + (note.start_beat * self.pixels_per_beat)
@@ -431,11 +525,9 @@ class TimelineGrid(QWidget):
                         painter.drawRoundedRect(QRectF(nx, ny, nw, 3), 1, 1)
 
                 elif isinstance(clip, AudioClip):
-                    # Mini représentation d'ondes audio
                     painter.setPen(QPen(QColor("#ffffff"), 1))
                     mid_y = cy + 18 + (ch - 18) / 2
                     painter.drawLine(int(cx) + 4, int(mid_y), int(cx + cw) - 4, int(mid_y))
-                    # Ondes simulées ou réelles
                     step = 6
                     for sx in range(int(cx) + 6, int(cx + cw) - 6, step):
                         h_wave = 4 + (abs(sx % 17 - 8) * 1.5)

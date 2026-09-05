@@ -223,6 +223,7 @@ class MainWindow(QMainWindow):
 
         self.timeline_grid = TimelineGrid(self.project, self)
         self.timeline_grid.seek_requested.connect(self._on_seek)
+        self.timeline_grid.clip_selected.connect(self._on_clip_selected)
         self.timeline_grid.clip_double_clicked.connect(self._on_clip_double_clicked)
         self.timeline_grid.project_modified.connect(self._on_project_modified)
         self.timeline_scroll.setWidget(self.timeline_grid)
@@ -274,6 +275,7 @@ class MainWindow(QMainWindow):
 
         self.piano_roll = PianoRoll(self.audio_engine, self)
         self.piano_roll.notes_updated.connect(self.timeline_grid.update)
+        self.piano_roll.seek_requested.connect(self._on_seek)
         self.lower_zone.addTab(self.piano_roll, "🎹 Séquenceur MIDI (Piano Roll)")
 
         self.audio_editor = AudioEditor(self.audio_engine, self)
@@ -372,6 +374,18 @@ class MainWindow(QMainWindow):
         self.refresh_project_ui()
         self.statusBar().showMessage("Piste supprimée.", 3000)
 
+    def _on_clip_selected(self, track: Track, clip):
+        """Appelé lors d'un clic de sélection sur un bloc"""
+        self.statusBar().showMessage(f"Bloc sélectionné : {clip.name} ({track.name}) | [Suppr] pour supprimer | [Ctrl+D] pour dupliquer", 4000)
+        # Si la zone inférieure est active et non minimisée, charger directement le bloc sélectionné
+        if not self.is_lower_zone_minimized:
+            if isinstance(clip, MidiClip):
+                self.lower_zone.setCurrentWidget(self.piano_roll)
+                self.piano_roll.open_clip(track, clip)
+            elif isinstance(clip, AudioClip):
+                self.lower_zone.setCurrentWidget(self.audio_editor)
+                self.audio_editor.open_clip(track, clip)
+
     def _on_clip_double_clicked(self, track: Track, clip):
         # Auto-agrandir la zone inférieure si elle était minimisée !
         if self.is_lower_zone_minimized:
@@ -404,6 +418,7 @@ class MainWindow(QMainWindow):
         self.transport_bar.set_playing_state(False)
         self.ruler.set_playhead(self.audio_engine.current_beat)
         self.timeline_grid.set_playhead(self.audio_engine.current_beat)
+        self.piano_roll.set_playhead(self.audio_engine.current_beat)
         self.transport_bar.update_position(self.audio_engine.current_beat, self.project.bpm)
         self.statusBar().showMessage("Arrêt - Curseur réinitialisé", 2000)
 
@@ -447,6 +462,7 @@ class MainWindow(QMainWindow):
         self.audio_engine.seek_beat(beat)
         self.ruler.set_playhead(beat)
         self.timeline_grid.set_playhead(beat)
+        self.piano_roll.set_playhead(beat)
         self.transport_bar.update_position(beat, self.project.bpm)
 
     def _on_bpm_changed(self, bpm: float):
@@ -463,6 +479,7 @@ class MainWindow(QMainWindow):
             beat = self.audio_engine.current_beat
             self.ruler.set_playhead(beat)
             self.timeline_grid.set_playhead(beat)
+            self.piano_roll.set_playhead(beat)
             self.transport_bar.update_position(beat, self.project.bpm)
 
     # --- Actions Fichier ---

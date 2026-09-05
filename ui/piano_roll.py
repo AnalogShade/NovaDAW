@@ -96,6 +96,7 @@ class NoteGridWidget(QWidget):
     """Grille matricielle d'édition des notes MIDI"""
     note_added_or_edited = Signal(int)  # pitch joué
     notes_changed = Signal()
+    seek_requested = Signal(float)       # déplacement curseur
 
     def __init__(self, start_pitch=36, num_pitches=48, row_height=18, parent=None):
         super().__init__(parent)
@@ -106,6 +107,7 @@ class NoteGridWidget(QWidget):
         self.clip: Optional[MidiClip] = None
         self.pixels_per_beat = 60.0
         self.snap_beats = 0.25  # 1/16 de mesure par défaut
+        self.playhead_project_beat = 0.0
 
         # Interaction notes
         self.selected_note: Optional[MidiNote] = None
@@ -119,6 +121,10 @@ class NoteGridWidget(QWidget):
 
         self.setMouseTracking(True)
         self.update_dimensions()
+
+    def set_playhead(self, beat: float):
+        self.playhead_project_beat = beat
+        self.update()
 
     def set_clip(self, clip: Optional[MidiClip]):
         self.clip = clip
@@ -167,6 +173,15 @@ class NoteGridWidget(QWidget):
 
         x = event.position().x()
         y = event.position().y()
+
+        # Shift + Clic gauche : Déplace le curseur de lecture directement à cet endroit !
+        if event.button() == Qt.LeftButton and (event.modifiers() & Qt.ShiftModifier):
+            rel_beat = max(0.0, x / self.pixels_per_beat)
+            abs_beat = (self.clip.start_beat if self.clip else 0.0) + rel_beat
+            self.seek_requested.emit(abs_beat)
+            self.update()
+            return
+
         note, is_resize = self._get_note_at(x, y)
 
         if event.button() == Qt.LeftButton:
@@ -319,10 +334,29 @@ class NoteGridWidget(QWidget):
                     painter.setFont(font)
                     painter.drawText(int(x) + 4, int(y) + self.row_height - 5, pitch_to_name(note.pitch))
 
+        # 5. Tête de lecture / Curseur synchronisé avec la timeline principale
+        if self.clip:
+            rel_beat = self.playhead_project_beat - self.clip.start_beat
+            if 0.0 <= rel_beat <= (clip_beats + 4.0):
+                px = rel_beat * self.pixels_per_beat
+                painter.setPen(QPen(QColor("#38bdf8"), 2))
+                painter.drawLine(int(px), 0, int(px), height)
+
+                # Curseur triangulaire en haut
+                painter.setBrush(QBrush(QColor("#38bdf8")))
+                painter.setPen(Qt.NoPen)
+                tri = QPolygonF([
+                    QPointF(px - 6, 0),
+                    QPointF(px + 6, 0),
+                    QPointF(px, 12)
+                ])
+                painter.drawPolygon(tri)
+
 
 class PianoRoll(QWidget):
     """Panneau complet du Piano Roll (Zone inférieure)"""
     notes_updated = Signal()
+    seek_requested = Signal(float)
 
     def __init__(self, audio_engine: AudioEngine, parent=None):
         super().__init__(parent)
@@ -382,10 +416,11 @@ class PianoRoll(QWidget):
         self.piano_keys = PianoKeysWidget(start_pitch=36, num_pitches=48, row_height=18)
         self.note_grid = NoteGridWidget(start_pitch=36, num_pitches=48, row_height=18)
 
-        # Raccordements signaux audio
+        # Raccordements signaux audio & transport
         self.piano_keys.key_pressed.connect(self._play_sound)
         self.note_grid.note_added_or_edited.connect(self._play_sound)
         self.note_grid.notes_changed.connect(self.notes_updated.emit)
+        self.note_grid.seek_requested.connect(self.seek_requested.emit)
 
         content_layout.addWidget(self.piano_keys)
         content_layout.addWidget(self.note_grid)
@@ -395,6 +430,9 @@ class PianoRoll(QWidget):
 
         # Centrer le défilement vertical vers le milieu (Do4 / C4)
         self.scroll_area.verticalScrollBar().setValue(200)
+
+    def set_playhead(self, beat: float):
+        self.note_grid.set_playhead(beat)
 
     def open_clip(self, track: Track, clip: MidiClip):
         self.current_track = track
