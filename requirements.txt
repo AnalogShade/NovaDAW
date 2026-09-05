@@ -1,0 +1,9 @@
+# NovaDAW - Dépendances Python requises
+
+# Interface Graphique (Qt 6)
+PySide6>=6.5.0
+
+# Moteur Audio & Traitement Numérique du Signal (DSP)
+numpy>=1.24.0
+sounddevice>=0.4.6
+soundfile>=0.12.1

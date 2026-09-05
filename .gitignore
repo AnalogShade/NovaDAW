@@ -1,0 +1,97 @@
+# ==============================================================================
+# .gitignore - NovaDAW (Projet Python / PySide6 / Audio DAW)
+# ==============================================================================
+
+# --- Byte-compiled / Cache Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# --- Environnements virtuels (Virtual Environments) ---
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- Compilateurs & Packaging (PyInstaller, cx_Freeze, Nuitka, etc.) ---
+*.manifest
+*.spec
+dist/
+build/
+
+# --- Environnements de développement & Éditeurs (IDE) ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
+.settings/
+
+# --- Tests, Couverture & Linters ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+
+# --- Logs & Fichiers temporaires ---
+*.log
+*.tmp
+*.bak
+*.swp
+pip-log.txt
+pip-delete-this-directory.txt
+
+# --- Fichiers système d'exploitation ---
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux
+*~
+.directory
+
+# --- Fichiers de rendu temporaires ou exports locaux (optionnel) ---
+# Vous pouvez décommenter si vous souhaitez ignorer les gros fichiers audio de test/export :
+# *.wav
+# !assets/**/*.wav
