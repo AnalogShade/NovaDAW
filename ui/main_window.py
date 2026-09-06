@@ -21,6 +21,12 @@ from ui.piano_roll import PianoRoll
 from ui.audio_editor import AudioEditor
 from ui.dialogs import AddTrackDialog
 from ui.help_dialog import HelpDialog
+from core.ipc import NovaIpcServer
+from core.plugin_manager import global_plugin_manager
+from ui.inspector import TrackInspector
+from ui.vst_rack import VstRackWidget
+from ui.plugin_dialogs import PluginManagerDialog, PluginFolderManagerDialog, open_plugin_editor_gui
+import core.actions
 
 
 class MainWindow(QMainWindow):
@@ -51,6 +57,12 @@ class MainWindow(QMainWindow):
 
         # Recharger l'affichage avec les pistes initiales
         self.refresh_project_ui()
+        global_plugin_manager.scan_updated.connect(self.refresh_project_ui)
+
+        # 4. Serveur IPC pour le contrôle distant et protocole MCP (IA)
+        self.ipc_server = NovaIpcServer(self)
+        if self.ipc_server.start():
+            print(f"[NovaDAW] Serveur IPC actif sur le port {self.ipc_server.actual_port} (Support MCP prêt).")
 
     def _init_menus(self):
         menubar = self.menuBar()
@@ -100,6 +112,35 @@ class MainWindow(QMainWindow):
         act_add_track.triggered.connect(self.show_add_track_dialog)
         menu_track.addAction(act_add_track)
 
+        # Menu Plugins
+        menu_plugins = menubar.addMenu("&Plugins")
+
+        act_rack = QAction("🎛️ &Rack VST du Projet (Stack F11)...", self)
+        act_rack.setShortcut("F11")
+        act_rack.triggered.connect(self.show_vst_rack)
+        menu_plugins.addAction(act_rack)
+
+        menu_plugins.addSeparator()
+
+        act_scan = QAction("🔍 &Scanner les dossiers de plugins...", self)
+        act_scan.triggered.connect(self.open_plugin_manager_and_scan)
+        menu_plugins.addAction(act_scan)
+
+        act_add_plugin = QAction("➕ &Ajouter un plugin manuellement (.vst3)...", self)
+        act_add_plugin.triggered.connect(self.add_plugin_file_dialog)
+        menu_plugins.addAction(act_add_plugin)
+
+        act_folders = QAction("📁 &Gérer les dossiers de plugins...", self)
+        act_folders.triggered.connect(self.open_plugin_folders_dialog)
+        menu_plugins.addAction(act_folders)
+
+        menu_plugins.addSeparator()
+
+        act_plugin_mgr = QAction("⚙️ &Gestionnaire de plugins...", self)
+        act_plugin_mgr.setShortcut("F4")
+        act_plugin_mgr.triggered.connect(self.open_plugin_manager_dialog)
+        menu_plugins.addAction(act_plugin_mgr)
+
         # Menu Transport
         menu_transport = menubar.addMenu("&Transport")
 
@@ -130,6 +171,12 @@ class MainWindow(QMainWindow):
 
         # Menu Affichage
         menu_view = menubar.addMenu("&Affichage")
+
+        act_toggle_inspector = QAction("Afficher / Masquer &Inspecteur de Piste", self)
+        act_toggle_inspector.setShortcut("F2")
+        act_toggle_inspector.triggered.connect(self._toggle_inspector)
+        menu_view.addAction(act_toggle_inspector)
+
         act_toggle_zone = QAction("Afficher / Masquer Éditeur Inférieur", self)
         act_toggle_zone.setShortcut("F3")
         act_toggle_zone.triggered.connect(self._toggle_lower_zone)
@@ -164,7 +211,13 @@ class MainWindow(QMainWindow):
         arranger_layout.setContentsMargins(0, 0, 0, 0)
         arranger_layout.setSpacing(0)
 
-        # Panneau de gauche : En-têtes de pistes
+        # Panneau d'inspection de piste à gauche (style Cubase)
+        self.inspector = TrackInspector(self.project, self)
+        self.inspector.track_modified.connect(self._on_project_modified)
+        self.inspector.track_modified.connect(self.refresh_project_ui)
+        arranger_layout.addWidget(self.inspector)
+
+        # Panneau central-gauche : En-têtes de pistes
         left_panel = QWidget()
         left_panel.setFixedWidth(240)
         left_panel.setStyleSheet("background-color: #161820; border-right: 1px solid #282a36;")
@@ -282,6 +335,10 @@ class MainWindow(QMainWindow):
         self.audio_editor.clip_modified.connect(self.timeline_grid.update)
         self.lower_zone.addTab(self.audio_editor, "🔊 Éditeur Audio")
 
+        self.vst_rack = VstRackWidget(self.project, self)
+        self.vst_rack.rack_changed.connect(self._on_rack_changed)
+        self.lower_zone.addTab(self.vst_rack, "🎛️ Rack VST Projet (Stack F11)")
+
         bottom_layout.addWidget(self.lower_zone)
         self.main_splitter.addWidget(bottom_container)
 
@@ -338,6 +395,11 @@ class MainWindow(QMainWindow):
         self.timeline_grid.project = self.project
         self.timeline_grid.update_dimensions()
 
+        if hasattr(self, "inspector"):
+            self.inspector.project = self.project
+        if hasattr(self, "vst_rack"):
+            self.vst_rack.set_project(self.project)
+
         # Reconstruire les en-têtes
         while self.headers_layout.count() > 1:
             child = self.headers_layout.takeAt(0)
@@ -348,13 +410,54 @@ class MainWindow(QMainWindow):
             header = TrackHeaderWidget(track)
             header.track_modified.connect(self._on_project_modified)
             header.track_deleted.connect(self._on_track_deleted)
+            header.track_selected.connect(self._on_track_selected)
             self.headers_layout.insertWidget(self.headers_layout.count() - 1, header)
+
+        # Mettre à jour l'inspecteur avec la piste sélectionnée
+        if self.project.tracks:
+            sel = getattr(self, "selected_track_id", None)
+            target = self.project.get_track(sel) if sel else self.project.tracks[0]
+            if target:
+                self._on_track_selected(target.id)
 
         self.transport_bar.spin_bpm.setValue(self.project.bpm)
         self.transport_bar.btn_loop.setChecked(self.project.loop_enabled)
 
         self.timeline_grid.update()
         self.ruler.update()
+
+    def _on_track_selected(self, track_id: str):
+        """Appelé lors d'un clic sur une piste : met à jour l'Inspecteur de piste (style Cubase)"""
+        track = self.project.get_track(track_id)
+        if track:
+            self.selected_track_id = track_id
+            if hasattr(self, "inspector"):
+                self.inspector.set_track(track)
+
+            # Mise en surbrillance de l'en-tête actif
+            for i in range(self.headers_layout.count() - 1):
+                item = self.headers_layout.itemAt(i)
+                if item and item.widget() and isinstance(item.widget(), TrackHeaderWidget):
+                    item.widget().set_selected(item.widget().track.id == track_id)
+
+    def _on_rack_changed(self):
+        """Appelé lors d'un changement dans la stack de plugins du projet"""
+        if hasattr(self, "inspector") and self.inspector.current_track:
+            self.inspector.set_track(self.inspector.current_track)
+        self.refresh_project_ui()
+
+    def show_vst_rack(self):
+        """Bascule immédiatement vers l'onglet du Rack VST (F11)"""
+        if self.is_lower_zone_minimized:
+            self._expand_lower_zone()
+        self.lower_zone.setCurrentWidget(self.vst_rack)
+        self.statusBar().showMessage("Rack VST du Projet affiché (F11)", 2000)
+
+    def _toggle_inspector(self):
+        """Affiche ou masque l'Inspecteur de Piste (F2)"""
+        vis = not self.inspector.isVisible()
+        self.inspector.setVisible(vis)
+        self.statusBar().showMessage(f"Inspecteur de piste {'affiché' if vis else 'masqué'} (F2)", 2000)
 
     def show_add_track_dialog(self):
         dlg = AddTrackDialog(self)
@@ -363,11 +466,14 @@ class MainWindow(QMainWindow):
             new_track = Track(
                 name=data["name"],
                 track_type=data["track_type"],
-                color=data["color"]
+                color=data["color"],
+                plugin_path=data.get("plugin_path"),
+                plugin_name=data.get("plugin_name"),
             )
             self.project.add_track(new_track)
             self.refresh_project_ui()
-            self.statusBar().showMessage(f"Piste '{new_track.name}' ajoutée.", 3000)
+            inst_info = f" (Instrument : {new_track.plugin_name})" if new_track.plugin_name else ""
+            self.statusBar().showMessage(f"Piste '{new_track.name}'{inst_info} ajoutée.", 3000)
 
     def _on_track_deleted(self, track_id: str):
         self.project.remove_track(track_id)
@@ -376,6 +482,7 @@ class MainWindow(QMainWindow):
 
     def _on_clip_selected(self, track: Track, clip):
         """Appelé lors d'un clic de sélection sur un bloc"""
+        self._on_track_selected(track.id)
         self.statusBar().showMessage(f"Bloc sélectionné : {clip.name} ({track.name}) | [Suppr] pour supprimer | [Ctrl+D] pour dupliquer", 4000)
         # Si la zone inférieure est active et non minimisée, charger directement le bloc sélectionné
         if not self.is_lower_zone_minimized:
@@ -387,6 +494,7 @@ class MainWindow(QMainWindow):
                 self.audio_editor.open_clip(track, clip)
 
     def _on_clip_double_clicked(self, track: Track, clip):
+        self._on_track_selected(track.id)
         # Auto-agrandir la zone inférieure si elle était minimisée !
         if self.is_lower_zone_minimized:
             self._expand_lower_zone()
@@ -568,6 +676,42 @@ class MainWindow(QMainWindow):
     def show_about_dialog(self):
         self.show_help_dialog(initial_tab=2)
 
+    # --- Actions Menu Plugins ---
+
+    def open_plugin_manager_dialog(self):
+        dlg = PluginManagerDialog(self)
+        dlg.exec()
+
+    def open_plugin_manager_and_scan(self):
+        dlg = PluginManagerDialog(self)
+        dlg.show()
+        dlg.start_scan()
+        dlg.exec()
+
+    def open_plugin_folders_dialog(self):
+        dlg = PluginFolderManagerDialog(self)
+        dlg.folders_changed.connect(self.open_plugin_manager_and_scan)
+        dlg.exec()
+
+    def add_plugin_file_dialog(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Ajouter un plugin VST3",
+            "",
+            "Plugins VST3 (*.vst3);;Tous les fichiers (*.*)"
+        )
+        if file_path:
+            info = global_plugin_manager.add_plugin_file(file_path)
+            status = "compatible et prêt à l'emploi ✅" if info.is_compatible else f"incompatible ❌ ({info.error_message})"
+            QMessageBox.information(
+                self,
+                "Plugin VST3",
+                f"Plugin '{info.name}' analysé :\n{status}"
+            )
+            self.refresh_project_ui()
+
     def closeEvent(self, event):
+        if hasattr(self, "ipc_server"):
+            self.ipc_server.stop()
         self.audio_engine.close()
         super().closeEvent(event)

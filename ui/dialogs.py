@@ -3,10 +3,11 @@ ui/dialogs.py - Boîtes de dialogue pour le DAW (Ajout de piste, etc.)
 """
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QRadioButton, QButtonGroup, QColorDialog, QFrame
+    QPushButton, QRadioButton, QButtonGroup, QColorDialog, QFrame, QComboBox
 )
 from PySide6.QtGui import QColor
 from PySide6.QtCore import Qt
+from core.plugin_manager import global_plugin_manager
 
 
 class AddTrackDialog(QDialog):
@@ -51,7 +52,34 @@ class AddTrackDialog(QDialog):
         layout.addLayout(type_layout)
         layout.addWidget(self.rb_audio)
 
-        # 2. Nom de la piste
+        # 2. Sélecteur d'instrument (pour piste MIDI)
+        self.lbl_inst = QLabel("Instrument de sortie :")
+        self.lbl_inst.setStyleSheet("font-weight: bold; color: #94a3b8;")
+        layout.addWidget(self.lbl_inst)
+
+        self.combo_inst = QComboBox()
+        self.combo_inst.setStyleSheet("""
+            QComboBox {
+                background-color: #121318;
+                color: #ffffff;
+                border: 1px solid #282a36;
+                border-radius: 4px;
+                padding: 6px;
+                font-size: 12px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1a1c24;
+                color: #ffffff;
+                selection-background-color: #0284c7;
+            }
+        """)
+        self.combo_inst.addItem("🎹 Synthé Polyphonique NovaDAW (Défaut)", userData=None)
+        for inst in global_plugin_manager.get_compatible_instruments():
+            self.combo_inst.addItem(f"🎹 {inst.name} (VST3)", userData=inst.file_path)
+        self.combo_inst.currentIndexChanged.connect(self._on_instrument_selected)
+        layout.addWidget(self.combo_inst)
+
+        # 3. Nom de la piste
         name_label = QLabel("Nom de la piste :")
         name_label.setStyleSheet("font-weight: bold; color: #94a3b8;")
         layout.addWidget(name_label)
@@ -103,12 +131,21 @@ class AddTrackDialog(QDialog):
         layout.addLayout(btn_layout)
 
     def _on_type_changed(self, is_midi: bool):
+        self.lbl_inst.setVisible(is_midi)
+        self.combo_inst.setVisible(is_midi)
         if is_midi:
             if not self.txt_name.text() or "Audio" in self.txt_name.text():
                 self.txt_name.setText("Synth Lead")
         else:
             if not self.txt_name.text() or "Synth" in self.txt_name.text():
                 self.txt_name.setText("Piste Audio")
+
+    def _on_instrument_selected(self, index: int):
+        file_path = self.combo_inst.currentData()
+        if file_path:
+            inst_name = self.combo_inst.currentText().replace("🎹 ", "").replace(" (VST3)", "")
+            if not self.txt_name.text() or self.txt_name.text() in ["Synth Lead", "Piste MIDI"]:
+                self.txt_name.setText(inst_name)
 
     def _select_color(self, hex_code: str, target_btn: QPushButton):
         self.selected_color = hex_code
@@ -119,8 +156,12 @@ class AddTrackDialog(QDialog):
     def get_track_data(self) -> dict:
         track_type = "midi" if self.rb_midi.isChecked() else "audio"
         name = self.txt_name.text().strip() or ("Piste MIDI" if track_type == "midi" else "Piste Audio")
+        plugin_path = self.combo_inst.currentData() if track_type == "midi" else None
+        plugin_name = self.combo_inst.currentText().replace("🎹 ", "").replace(" (VST3)", "") if (track_type == "midi" and plugin_path) else None
         return {
             "name": name,
             "track_type": track_type,
-            "color": self.selected_color
+            "color": self.selected_color,
+            "plugin_path": plugin_path,
+            "plugin_name": plugin_name,
         }

@@ -442,7 +442,7 @@ class PianoRoll(QWidget):
 
     def _play_sound(self, pitch: int):
         if self.audio_engine:
-            self.audio_engine.preview_note(pitch, duration_sec=0.35, velocity=100)
+            self.audio_engine.preview_note(pitch, duration_sec=0.35, velocity=100, track=self.current_track)
 
     def _on_snap_changed(self, idx: int):
         snaps = [0.25, 0.5, 1.0, 2.0, 4.0]

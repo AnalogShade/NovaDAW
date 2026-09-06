@@ -119,6 +119,9 @@ class Track:
     soloed: bool = False
     armed: bool = False
     clips: List[ClipType] = field(default_factory=list)
+    plugin_path: Optional[str] = None
+    plugin_name: Optional[str] = None
+    insert_effects: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -131,6 +134,9 @@ class Track:
             "muted": self.muted,
             "soloed": self.soloed,
             "armed": self.armed,
+            "plugin_path": self.plugin_path,
+            "plugin_name": self.plugin_name,
+            "insert_effects": list(self.insert_effects),
             "clips": [c.to_dict() for c in self.clips],
         }
 
@@ -146,6 +152,9 @@ class Track:
             muted=data.get("muted", False),
             soloed=data.get("soloed", False),
             armed=data.get("armed", False),
+            plugin_path=data.get("plugin_path"),
+            plugin_name=data.get("plugin_name"),
+            insert_effects=data.get("insert_effects", []),
         )
         t.clips = []
         for c in data.get("clips", []):
@@ -166,7 +175,22 @@ class Project:
     loop_start_beat: float = 0.0
     loop_end_beat: float = 16.0  # 4 mesures par défaut
     tracks: List[Track] = field(default_factory=list)
+    plugin_rack: List[dict] = field(default_factory=list)  # VST Instrument / Effect Stack du projet
     file_path: Optional[str] = None
+
+    def add_rack_plugin(self, file_path: str, name: str, plugin_type: str = "instrument") -> dict:
+        item = {
+            "id": str(uuid.uuid4())[:8],
+            "name": name,
+            "file_path": file_path,
+            "plugin_type": plugin_type,
+            "enabled": True,
+        }
+        self.plugin_rack.append(item)
+        return item
+
+    def remove_rack_plugin(self, rack_id: str):
+        self.plugin_rack = [p for p in self.plugin_rack if p["id"] != rack_id]
 
     def add_track(self, track: Track) -> None:
         self.tracks.append(track)

@@ -18,6 +18,7 @@ def save_project(project: Project, file_path: str) -> None:
         "loop_enabled": project.loop_enabled,
         "loop_start_beat": project.loop_start_beat,
         "loop_end_beat": project.loop_end_beat,
+        "plugin_rack": list(project.plugin_rack),
         "tracks": [t.to_dict() for t in project.tracks],
     }
 
@@ -40,6 +41,7 @@ def load_project(file_path: str) -> Project:
         loop_enabled=bool(data.get("loop_enabled", True)),
         loop_start_beat=float(data.get("loop_start_beat", 0.0)),
         loop_end_beat=float(data.get("loop_end_beat", 16.0)),
+        plugin_rack=data.get("plugin_rack", []),
         file_path=file_path,
     )
 

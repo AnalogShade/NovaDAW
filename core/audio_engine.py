@@ -3,7 +3,7 @@ core/audio_engine.py - Moteur audio temps réel, synthétiseur polyphonique et m
 """
 import threading
 import time
-from typing import Optional, List, Dict, Callable
+from typing import Optional, List, Dict, Callable, Any
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
@@ -61,6 +61,9 @@ class AudioEngine:
         self.current_beat = 0.0
         self.master_volume = 0.9
 
+        # Instances VST3 chargées par piste (track_id -> plugin instance)
+        self.track_plugins: Dict[str, Any] = {}
+
         # File d'attente pour les notes de prévisualisation (clic sur piano roll)
         self._preview_lock = threading.Lock()
         self._preview_buffers: List[Dict] = []
@@ -70,6 +73,43 @@ class AudioEngine:
         self._stream: Optional[sd.OutputStream] = None
 
         self._start_stream()
+
+    def get_track_plugin(self, track: Track) -> Optional[Any]:
+        """Récupère ou initialise l'instance de plugin VST3 associée à une piste"""
+        if not track.plugin_path:
+            return None
+        current = self.track_plugins.get(track.id)
+        if current and getattr(current, "_novadaw_path", None) == track.plugin_path:
+            return current
+        try:
+            import os
+            import pedalboard
+            if os.path.exists(track.plugin_path):
+                plugin = pedalboard.load_plugin(track.plugin_path)
+                plugin._novadaw_path = track.plugin_path
+                self.track_plugins[track.id] = plugin
+                return plugin
+        except Exception as e:
+            print(f"[AudioEngine] Erreur chargement VST pour piste {track.name}: {e}")
+        return None
+
+    def get_effect_plugin(self, file_path: str) -> Optional[Any]:
+        """Récupère ou initialise l'instance d'un plugin d'effet pour inserts"""
+        if not file_path:
+            return None
+        current = self.track_plugins.get(file_path)
+        if current:
+            return current
+        try:
+            import os
+            import pedalboard
+            if os.path.exists(file_path):
+                plugin = pedalboard.load_plugin(file_path)
+                self.track_plugins[file_path] = plugin
+                return plugin
+        except Exception as e:
+            print(f"[AudioEngine] Erreur chargement effet {file_path}: {e}")
+        return None
 
     def set_project(self, project: Project):
         self.project = project
@@ -118,9 +158,29 @@ class AudioEngine:
         if self.playhead_callback:
             self.playhead_callback(self.current_beat)
 
-    def preview_note(self, pitch: int, duration_sec: float = 0.35, velocity: int = 100):
+    def preview_note(self, pitch: int, duration_sec: float = 0.35, velocity: int = 100, track: Optional[Track] = None):
         """Joue immédiatement une note (appelé par le Piano Roll lors d'un clic)"""
-        wave = SynthVoice.generate_note(pitch, duration_sec, self.sample_rate, velocity)
+        wave = None
+        if track and track.plugin_path:
+            vst_plugin = self.get_track_plugin(track)
+            if vst_plugin and getattr(vst_plugin, "is_instrument", False):
+                try:
+                    on_msg = (bytes([0x90, pitch, max(1, min(127, velocity))]), 0.0)
+                    off_msg = (bytes([0x80, pitch, 0]), duration_sec * 0.8)
+                    vst_out = vst_plugin([on_msg, off_msg], duration=duration_sec, sample_rate=self.sample_rate)
+                    if vst_out is not None and vst_out.size > 0:
+                        if vst_out.ndim == 1:
+                            wave = np.column_stack((vst_out, vst_out))
+                        elif vst_out.shape[0] == 1:
+                            wave = np.column_stack((vst_out[0], vst_out[0]))
+                        else:
+                            wave = vst_out[:2].T
+                except Exception as e:
+                    wave = None
+
+        if wave is None:
+            wave = SynthVoice.generate_note(pitch, duration_sec, self.sample_rate, velocity)
+
         with self._preview_lock:
             self._preview_buffers.append({
                 "buffer": wave,
@@ -202,41 +262,97 @@ class AudioEngine:
         beats_per_sec = bpm / 60.0
 
         if track.track_type == "midi":
-            # Parcourir les clips MIDI
-            for clip in track.clips:
-                if not isinstance(clip, MidiClip):
-                    continue
-                clip_start = clip.start_beat
-                clip_end = clip_start + clip.length_beats
+            # 1. Vérifier si la piste est routée vers un VST3 Instrument
+            vst_plugin = self.get_track_plugin(track)
+            rendered_by_vst = False
 
-                # Si le clip intersecte la fenêtre temporelle actuelle
-                if clip_end < start_b or clip_start > end_b:
-                    continue
+            if vst_plugin and getattr(vst_plugin, "is_instrument", False):
+                try:
+                    dur_sec = frames / self.sample_rate
+                    midi_messages = []
+                    has_notes = False
 
-                # Vérifier chaque note du clip
-                for note in clip.notes:
-                    abs_note_start = clip_start + note.start_beat
-                    abs_note_end = abs_note_start + note.duration
+                    for clip in track.clips:
+                        if not isinstance(clip, MidiClip):
+                            continue
+                        clip_start = clip.start_beat
+                        clip_end = clip_start + clip.length_beats
+                        if clip_end < start_b or clip_start > end_b:
+                            continue
 
-                    # Si la note intersecte la tranche
-                    if abs_note_end > start_b and abs_note_start < end_b:
-                        # Calculer où la note tombe dans le buffer [frames]
-                        note_dur_sec = note.duration / beats_per_sec
-                        wave = SynthVoice.generate_note(note.pitch, note_dur_sec, self.sample_rate, note.velocity)
+                        for note in clip.notes:
+                            abs_note_start = clip_start + note.start_beat
+                            abs_note_end = abs_note_start + note.duration
 
-                        # Offset dans le buffer
-                        note_offset_samples = int((abs_note_start - start_b) / beats_per_sec * self.sample_rate)
-                        wave_start_sample = 0
-                        buf_start_sample = note_offset_samples
+                            # Détection Note-On dans cette tranche
+                            if start_b <= abs_note_start < end_b:
+                                offset = max(0.0, min(dur_sec, (abs_note_start - start_b) / beats_per_sec))
+                                midi_messages.append((bytes([0x90, note.pitch, max(1, min(127, note.velocity))]), offset))
+                                has_notes = True
 
-                        if buf_start_sample < 0:
-                            wave_start_sample = -buf_start_sample
-                            buf_start_sample = 0
+                            # Détection Note-Off dans cette tranche
+                            if start_b <= abs_note_end < end_b:
+                                offset = max(0.0, min(dur_sec, (abs_note_end - start_b) / beats_per_sec))
+                                midi_messages.append((bytes([0x80, note.pitch, 0]), offset))
+                            elif abs_note_start < end_b and abs_note_end > start_b:
+                                has_notes = True
 
-                        if wave_start_sample < len(wave) and buf_start_sample < frames:
-                            to_copy = min(len(wave) - wave_start_sample, frames - buf_start_sample)
-                            if to_copy > 0:
-                                track_buf[buf_start_sample:buf_start_sample + to_copy] += wave[wave_start_sample:wave_start_sample + to_copy]
+                    if midi_messages or has_notes:
+                        vst_out = vst_plugin(midi_messages, duration=dur_sec, sample_rate=self.sample_rate)
+                        if vst_out is not None and vst_out.size > 0:
+                            if vst_out.ndim == 1:
+                                n = min(frames, len(vst_out))
+                                track_buf[:n, 0] += vst_out[:n]
+                                track_buf[:n, 1] += vst_out[:n]
+                            elif vst_out.shape[0] == 1:
+                                n = min(frames, vst_out.shape[1])
+                                track_buf[:n, 0] += vst_out[0, :n]
+                                track_buf[:n, 1] += vst_out[0, :n]
+                            else:
+                                n = min(frames, vst_out.shape[1])
+                                track_buf[:n, 0] += vst_out[0, :n]
+                                track_buf[:n, 1] += vst_out[1, :n]
+                        rendered_by_vst = True
+                except Exception as e:
+                    # En cas d'erreur avec le VST, le synthétiseur interne prendra le relais
+                    rendered_by_vst = False
+
+            # 2. Si pas de VST ou échec de rendu, fallback sur le synthétiseur polyphonique interne
+            if not rendered_by_vst:
+                for clip in track.clips:
+                    if not isinstance(clip, MidiClip):
+                        continue
+                    clip_start = clip.start_beat
+                    clip_end = clip_start + clip.length_beats
+
+                    # Si le clip intersecte la fenêtre temporelle actuelle
+                    if clip_end < start_b or clip_start > end_b:
+                        continue
+
+                    # Vérifier chaque note du clip
+                    for note in clip.notes:
+                        abs_note_start = clip_start + note.start_beat
+                        abs_note_end = abs_note_start + note.duration
+
+                        # Si la note intersecte la tranche
+                        if abs_note_end > start_b and abs_note_start < end_b:
+                            # Calculer où la note tombe dans le buffer [frames]
+                            note_dur_sec = note.duration / beats_per_sec
+                            wave = SynthVoice.generate_note(note.pitch, note_dur_sec, self.sample_rate, note.velocity)
+
+                            # Offset dans le buffer
+                            note_offset_samples = int((abs_note_start - start_b) / beats_per_sec * self.sample_rate)
+                            wave_start_sample = 0
+                            buf_start_sample = note_offset_samples
+
+                            if buf_start_sample < 0:
+                                wave_start_sample = -buf_start_sample
+                                buf_start_sample = 0
+
+                            if wave_start_sample < len(wave) and buf_start_sample < frames:
+                                to_copy = min(len(wave) - wave_start_sample, frames - buf_start_sample)
+                                if to_copy > 0:
+                                    track_buf[buf_start_sample:buf_start_sample + to_copy] += wave[wave_start_sample:wave_start_sample + to_copy]
 
         elif track.track_type == "audio":
             # Parcourir les clips Audio
@@ -267,6 +383,33 @@ class AudioEngine:
                             track_buf[buf_start:buf_start + to_copy, 1] += samples
                         else:
                             track_buf[buf_start:buf_start + to_copy] += samples[:, :2]
+
+        # 3. Traitement des effets d'insert (Insert FX Chain style Cubase)
+        if hasattr(track, "insert_effects") and track.insert_effects and track_buf is not None:
+            for fx_path in track.insert_effects:
+                if not fx_path:
+                    continue
+                fx_plugin = self.get_effect_plugin(fx_path)
+                if fx_plugin and getattr(fx_plugin, "is_effect", False):
+                    try:
+                        # Pedalboard attend un buffer (channels, frames)
+                        in_audio = track_buf.T
+                        fx_out = fx_plugin(in_audio, sample_rate=self.sample_rate)
+                        if fx_out is not None and fx_out.size > 0:
+                            if fx_out.ndim == 1:
+                                n = min(frames, len(fx_out))
+                                track_buf[:n, 0] = fx_out[:n]
+                                track_buf[:n, 1] = fx_out[:n]
+                            elif fx_out.shape[0] == 1:
+                                n = min(frames, fx_out.shape[1])
+                                track_buf[:n, 0] = fx_out[0, :n]
+                                track_buf[:n, 1] = fx_out[0, :n]
+                            else:
+                                n = min(frames, fx_out.shape[1])
+                                track_buf[:n, 0] = fx_out[0, :n]
+                                track_buf[:n, 1] = fx_out[1, :n]
+                    except Exception as e:
+                        pass
 
         return track_buf
 
