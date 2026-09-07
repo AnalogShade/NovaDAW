@@ -4,6 +4,11 @@ Gestionnaire de plugins, scan de dossiers avec progression en direct,
 sélection de répertoires personnalisés et ouverture de l'interface native du VST.
 """
 import os
+import sys
+import time
+import threading
+from typing import Optional
+
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit,
@@ -12,26 +17,270 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 
-from core.plugin_manager import global_plugin_manager, PluginScanWorker, PluginInfo
+from core.plugin_manager import (
+    global_plugin_manager,
+    PluginScanWorker,
+    PluginLoadWorker,
+    PluginInfo,
+)
+
+
+def _watch_and_front_plugin_window(plugin_name: str, parent_hwnd: int, close_event: threading.Event):
+    """
+    Surveille l'apparition de la fenêtre native créée par le plugin (JUCE / Pedalboard),
+    la renomme avec un titre explicite NovaDAW, la rattache comme fenêtre fille/possédée
+    par NovaDAW pour qu'elle ne disparaisse JAMAIS derrière la fenêtre maximisée,
+    et la force au premier plan avec sa barre de titre et son bouton [X].
+    """
+    if sys.platform != "win32":
+        return
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        target_hwnd = None
+        pid = os.getpid()
+
+        def enum_cb(hwnd, _):
+            nonlocal target_hwnd
+            if user32.IsWindowVisible(hwnd):
+                cur_pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(cur_pid))
+                if cur_pid.value == pid:
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    buff = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buff, length + 1)
+                    title = buff.value
+                    if title == "Pedalboard" or "pedalboard" in title.lower() or plugin_name.lower() in title.lower():
+                        target_hwnd = hwnd
+                        return False
+            return True
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+        # Attendre que la fenêtre apparaisse (jusqu'à 12 secondes, par pas de 100ms)
+        for _ in range(120):
+            if close_event.is_set():
+                return
+            user32.EnumWindows(WNDENUMPROC(enum_cb), 0)
+            if target_hwnd:
+                break
+            time.sleep(0.1)
+
+        if target_hwnd and not close_event.is_set():
+            # 1. Renommer la fenêtre pour que l'utilisateur sache exactement quel plugin est ouvert
+            user32.SetWindowTextW(target_hwnd, f"{plugin_name} — NovaDAW VST3")
+
+            # 2. Rattacher la fenêtre à NovaDAW via GWLP_HWNDPARENT
+            # En Win32, une fenêtre "owned" reste TOUJOURS au-dessus de son propriétaire,
+            # minimise avec lui, et se ferme avec lui.
+            if parent_hwnd:
+                GWLP_HWNDPARENT = -8
+                try:
+                    user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+                    user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+                    user32.SetWindowLongPtrW(target_hwnd, GWLP_HWNDPARENT, parent_hwnd)
+                except Exception:
+                    pass
+
+            # 3. Forcer la fenêtre au premier plan absolu
+            SW_RESTORE = 9
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_SHOWWINDOW = 0x0040
+            HWND_TOPMOST = -1
+            HWND_NOTOPMOST = -2
+
+            user32.ShowWindow(target_hwnd, SW_RESTORE)
+            user32.SetWindowPos(target_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+            user32.SetWindowPos(target_hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+            user32.BringWindowToTop(target_hwnd)
+            user32.SetForegroundWindow(target_hwnd)
+
+    except Exception as e:
+        print(f"[PluginWatcher] Information fenêtre native : {e}")
+
+
+class PluginLoadingDialog(QDialog):
+    """
+    Dialogue moderne affiché pendant le chargement en arrière-plan d'un plugin VST3 lourd.
+    Empêche le gel de l'interface et informe clairement l'utilisateur.
+    """
+    def __init__(self, file_path: str, plugin_name: str, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.plugin_name = plugin_name
+        self.loaded_plugin = None
+        self.error_message: Optional[str] = None
+
+        self.setWindowTitle(f"Chargement : {plugin_name}")
+        self.setFixedSize(460, 180)
+        self.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
+        self.setModal(True)
+
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #161822;
+                border: 1px solid #2e3447;
+                border-radius: 8px;
+            }
+            QLabel {
+                color: #e2e8f0;
+                font-family: 'Segoe UI', sans-serif;
+            }
+            QPushButton {
+                background-color: #242838;
+                color: #94a3b8;
+                border: 1px solid #3b4259;
+                border-radius: 4px;
+                padding: 6px 18px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #2f354a;
+                color: #ffffff;
+                border-color: #38bdf8;
+            }
+            QProgressBar {
+                background-color: #0f1118;
+                border: 1px solid #232736;
+                border-radius: 4px;
+                height: 10px;
+                text-align: center;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0284c7, stop:1 #38bdf8);
+                border-radius: 4px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
+
+        # En-tête avec icône et titre stylé
+        header = QHBoxLayout()
+        is_inst = any(w in plugin_name.lower() for w in ["tank", "kontakt", "synth", "piano", "organ", "drum"])
+        icon_lbl = QLabel("🎹" if is_inst else "🎛️")
+        icon_lbl.setStyleSheet("font-size: 28px;")
+        header.addWidget(icon_lbl)
+
+        vbox = QVBoxLayout()
+        title_lbl = QLabel(f"Chargement de {self.plugin_name}")
+        title_lbl.setStyleSheet("font-size: 15px; font-weight: bold; color: #38bdf8;")
+        sub_lbl = QLabel("Initialisation du plugin VST3 et des banques de sons...")
+        sub_lbl.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        vbox.addWidget(title_lbl)
+        vbox.addWidget(sub_lbl)
+        header.addLayout(vbox, stretch=1)
+        layout.addLayout(header)
+
+        # Barre de progression indéterminée animée
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)
+        layout.addWidget(self.progress_bar)
+
+        # Pied avec statut et bouton Annuler
+        footer = QHBoxLayout()
+        self.status_lbl = QLabel("Veuillez patienter quelques secondes...")
+        self.status_lbl.setStyleSheet("font-size: 11px; color: #64748b; font-style: italic;")
+        footer.addWidget(self.status_lbl, stretch=1)
+
+        self.btn_cancel = QPushButton("Annuler")
+        self.btn_cancel.clicked.connect(self.reject)
+        footer.addWidget(self.btn_cancel)
+        layout.addLayout(footer)
+
+        # Démarrer le worker asynchrone
+        self.worker = PluginLoadWorker(self.file_path, self)
+        self.worker.loaded.connect(self._on_loaded)
+        self.worker.error.connect(self._on_error)
+        self.worker.start()
+
+    def _on_loaded(self, path: str, plugin: object):
+        self.loaded_plugin = plugin
+        self.accept()
+
+    def _on_error(self, path: str, err: str):
+        self.error_message = err
+        self.reject()
+
+    def closeEvent(self, event):
+        if self.worker.isRunning():
+            self.worker.quit()
+        super().closeEvent(event)
 
 
 def open_plugin_editor_gui(file_path: str, parent=None):
-    """Ouvre l'interface graphique native du plugin VST3 via pedalboard"""
+    """
+    Ouvre l'interface graphique native du plugin VST3 avec :
+    1. Retour visuel pendant le chargement initial (popup avec barre de progression).
+    2. Garantie que la fenêtre native s'affiche TOUJOURS au premier plan devant NovaDAW.
+    3. Titre de fenêtre clair avec le nom du plugin et NovaDAW.
+    4. Contrôle complet de fermeture : bouton [X] natif ou re-clic sur [e].
+    """
     if not file_path or not os.path.exists(file_path):
         QMessageBox.warning(parent, "Plugin introuvable", f"Le fichier du plugin n'existe pas :\n{file_path}")
         return
 
-    try:
-        import pedalboard
-        plugin = global_plugin_manager.get_or_load_plugin(file_path)
-        if plugin is None:
-            QMessageBox.critical(parent, "Erreur de chargement", f"Impossible d'instancier le plugin :\n{file_path}")
-            return
+    # Si l'éditeur de ce plugin est déjà ouvert, re-cliquer ferme la fenêtre (toggle)
+    if global_plugin_manager.is_editor_open(file_path):
+        global_plugin_manager.close_editor(file_path)
+        return
 
-        # Affichage de l'interface native du VST
-        plugin.show_editor()
+    # Nom du plugin
+    plugin_name = os.path.splitext(os.path.basename(file_path))[0]
+    for p in global_plugin_manager.plugins:
+        if p.file_path == file_path:
+            plugin_name = p.name
+            break
+
+    # 1. Vérifier si le plugin est déjà instancié en mémoire
+    plugin = global_plugin_manager.active_instances.get(file_path)
+    if plugin is None:
+        # Afficher la boîte de dialogue de chargement en arrière-plan avec barre animée
+        load_dlg = PluginLoadingDialog(file_path, plugin_name, parent)
+        res = load_dlg.exec()
+        if res != QDialog.Accepted or load_dlg.loaded_plugin is None:
+            if load_dlg.error_message:
+                QMessageBox.critical(parent, "Erreur de chargement", f"Impossible d'instancier {plugin_name} :\n{load_dlg.error_message}")
+            return
+        plugin = load_dlg.loaded_plugin
+        global_plugin_manager.active_instances[file_path] = plugin
+
+    # 2. Préparer l'événement de fermeture et l'ancrage au premier plan
+    close_event = threading.Event()
+    global_plugin_manager.open_editors[file_path] = close_event
+    global_plugin_manager.editor_opened.emit(file_path)
+
+    # Récupérer l'identifiant Win32 de NovaDAW
+    parent_hwnd = 0
+    if parent is not None:
+        top_win = parent.window() if hasattr(parent, "window") else parent
+        if hasattr(top_win, "winId"):
+            try:
+                parent_hwnd = int(top_win.winId())
+            except Exception:
+                pass
+
+    # Démarrer le watcher qui renomme et force la fenêtre au premier plan
+    watcher_thread = threading.Thread(
+        target=_watch_and_front_plugin_window,
+        args=(plugin_name, parent_hwnd, close_event),
+        daemon=True
+    )
+    watcher_thread.start()
+
+    # 3. Affichage de l'interface native du VST
+    try:
+        plugin.show_editor(close_event)
     except Exception as e:
-        QMessageBox.critical(parent, "Erreur Plugin", f"Impossible d'afficher l'interface du plugin :\n{e}")
+        QMessageBox.critical(parent, "Erreur Plugin", f"Impossible d'afficher l'interface de {plugin_name} :\n{e}")
+    finally:
+        global_plugin_manager.open_editors.pop(file_path, None)
+        global_plugin_manager.editor_closed.emit(file_path)
 
 
 class PluginFolderManagerDialog(QDialog):

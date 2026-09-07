@@ -68,3 +68,25 @@ def test_audio_engine_fallback_with_vst():
     assert slice_buf is not None
     assert slice_buf.shape == (1024, 2)
     engine.close()
+
+
+def test_editor_tracking_and_close_helpers():
+    """Vérifie le suivi des fenêtres d'éditeurs et la fermeture programmée"""
+    import threading
+    fake_path = "C:\\Fake\\Plugin.vst3"
+    assert not global_plugin_manager.is_editor_open(fake_path)
+
+    evt = threading.Event()
+    global_plugin_manager.open_editors[fake_path] = evt
+    assert global_plugin_manager.is_editor_open(fake_path)
+
+    # Fermeture de l'éditeur ciblé
+    global_plugin_manager.close_editor(fake_path)
+    assert evt.is_set()
+
+    # Fermeture globale
+    evt2 = threading.Event()
+    global_plugin_manager.open_editors["C:\\Fake2.vst3"] = evt2
+    global_plugin_manager.close_all_editors()
+    assert evt2.is_set()
+    assert len(global_plugin_manager.open_editors) == 0

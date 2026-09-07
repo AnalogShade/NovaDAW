@@ -82,10 +82,9 @@ class AudioEngine:
         if current and getattr(current, "_novadaw_path", None) == track.plugin_path:
             return current
         try:
-            import os
-            import pedalboard
-            if os.path.exists(track.plugin_path):
-                plugin = pedalboard.load_plugin(track.plugin_path)
+            from core.plugin_manager import global_plugin_manager
+            plugin = global_plugin_manager.get_or_load_plugin(track.plugin_path)
+            if plugin:
                 plugin._novadaw_path = track.plugin_path
                 self.track_plugins[track.id] = plugin
                 return plugin
@@ -101,10 +100,9 @@ class AudioEngine:
         if current:
             return current
         try:
-            import os
-            import pedalboard
-            if os.path.exists(file_path):
-                plugin = pedalboard.load_plugin(file_path)
+            from core.plugin_manager import global_plugin_manager
+            plugin = global_plugin_manager.get_or_load_plugin(file_path)
+            if plugin:
                 self.track_plugins[file_path] = plugin
                 return plugin
         except Exception as e:
@@ -167,7 +165,7 @@ class AudioEngine:
                 try:
                     on_msg = (bytes([0x90, pitch, max(1, min(127, velocity))]), 0.0)
                     off_msg = (bytes([0x80, pitch, 0]), duration_sec * 0.8)
-                    vst_out = vst_plugin([on_msg, off_msg], duration=duration_sec, sample_rate=self.sample_rate)
+                    vst_out = vst_plugin([on_msg, off_msg], duration=duration_sec, sample_rate=self.sample_rate, reset=False)
                     if vst_out is not None and vst_out.size > 0:
                         if vst_out.ndim == 1:
                             wave = np.column_stack((vst_out, vst_out))
@@ -298,7 +296,7 @@ class AudioEngine:
                                 has_notes = True
 
                     if midi_messages or has_notes:
-                        vst_out = vst_plugin(midi_messages, duration=dur_sec, sample_rate=self.sample_rate)
+                        vst_out = vst_plugin(midi_messages, duration=dur_sec, sample_rate=self.sample_rate, reset=False)
                         if vst_out is not None and vst_out.size > 0:
                             if vst_out.ndim == 1:
                                 n = min(frames, len(vst_out))
@@ -394,7 +392,7 @@ class AudioEngine:
                     try:
                         # Pedalboard attend un buffer (channels, frames)
                         in_audio = track_buf.T
-                        fx_out = fx_plugin(in_audio, sample_rate=self.sample_rate)
+                        fx_out = fx_plugin(in_audio, sample_rate=self.sample_rate, reset=False)
                         if fx_out is not None and fx_out.size > 0:
                             if fx_out.ndim == 1:
                                 n = min(frames, len(fx_out))

@@ -711,6 +711,7 @@ class MainWindow(QMainWindow):
             self.refresh_project_ui()
 
     def closeEvent(self, event):
+        global_plugin_manager.close_all_editors()
         if hasattr(self, "ipc_server"):
             self.ipc_server.stop()
         self.audio_engine.close()

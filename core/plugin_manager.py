@@ -6,10 +6,29 @@ mise en cache JSON et support des instruments et effets.
 import os
 import sys
 import json
+import threading
 from dataclasses import dataclass, asdict
 from typing import List, Optional, Dict, Any
 
 from PySide6.QtCore import QObject, Signal, QThread
+
+
+class PluginLoadWorker(QThread):
+    """Worker asynchrone pour charger un plugin VST3 lourd sans figer l'interface"""
+    loaded = Signal(str, object)  # file_path, plugin_instance
+    error = Signal(str, str)      # file_path, error_message
+
+    def __init__(self, file_path: str, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+
+    def run(self):
+        try:
+            import pedalboard
+            plugin = pedalboard.load_plugin(self.file_path)
+            self.loaded.emit(self.file_path, plugin)
+        except Exception as e:
+            self.error.emit(self.file_path, str(e))
 
 
 @dataclass
@@ -149,6 +168,8 @@ class PluginManager(QObject):
     Gère le stockage des chemins personnalisés, le cache et les instances de plugins.
     """
     scan_updated = Signal()
+    editor_opened = Signal(str)  # file_path
+    editor_closed = Signal(str)  # file_path
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -160,9 +181,29 @@ class PluginManager(QObject):
         self.custom_directories: List[str] = []
         self.plugins: List[PluginInfo] = []
         self.active_instances: Dict[str, Any] = {}  # file_path -> pedalboard plugin instance
+        self.open_editors: Dict[str, threading.Event] = {}  # file_path -> close_event
 
         self.load_settings()
         self.load_cache()
+
+    def is_editor_open(self, file_path: str) -> bool:
+        """Indique si l'éditeur VST d'un plugin donné est actuellement ouvert"""
+        return file_path in self.open_editors and not self.open_editors[file_path].is_set()
+
+    def close_editor(self, file_path: str):
+        """Ferme programmatiquement l'interface d'un plugin VST"""
+        evt = self.open_editors.get(file_path)
+        if evt:
+            evt.set()
+
+    def close_all_editors(self):
+        """Ferme toutes les fenêtres de plugins ouvertes (appelé à la fermeture de NovaDAW)"""
+        for path, evt in list(self.open_editors.items()):
+            try:
+                evt.set()
+            except Exception:
+                pass
+        self.open_editors.clear()
 
     def get_all_directories(self) -> List[str]:
         """Combine répertoires standards du système et dossiers personnalisés de l'utilisateur"""

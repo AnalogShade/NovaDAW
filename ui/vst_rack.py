@@ -68,6 +68,8 @@ class VstRackWidget(QWidget):
         self._init_ui()
         self.refresh_rack()
         global_plugin_manager.scan_updated.connect(self.refresh_rack)
+        global_plugin_manager.editor_opened.connect(self.refresh_rack)
+        global_plugin_manager.editor_closed.connect(self.refresh_rack)
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -195,20 +197,38 @@ class VstRackWidget(QWidget):
         c_layout.addLayout(info_layout, stretch=1)
 
         # Bouton [e] Interface
-        btn_e = QPushButton("🎹 Ouvrir Interface [e]")
-        btn_e.setStyleSheet("""
-            QPushButton {
-                background-color: #1c2638;
-                color: #38bdf8;
-                font-weight: bold;
-                border: 1px solid #38bdf8;
-                padding: 4px 10px;
-            }
-            QPushButton:hover {
-                background-color: #0284c7;
-                color: #ffffff;
-            }
-        """)
+        is_open = global_plugin_manager.is_editor_open(path)
+        btn_text = "🎹 Fermer Interface [e]" if is_open else "🎹 Ouvrir Interface [e]"
+        btn_e = QPushButton(btn_text)
+        if is_open:
+            btn_e.setStyleSheet("""
+                QPushButton {
+                    background-color: #0284c7;
+                    color: #ffffff;
+                    font-weight: bold;
+                    border: 1px solid #38bdf8;
+                    padding: 4px 10px;
+                }
+                QPushButton:hover {
+                    background-color: #0369a1;
+                }
+            """)
+            btn_e.setToolTip("L'interface du plugin est ouverte (Cliquer pour fermer)")
+        else:
+            btn_e.setStyleSheet("""
+                QPushButton {
+                    background-color: #1c2638;
+                    color: #38bdf8;
+                    font-weight: bold;
+                    border: 1px solid #38bdf8;
+                    padding: 4px 10px;
+                }
+                QPushButton:hover {
+                    background-color: #0284c7;
+                    color: #ffffff;
+                }
+            """)
+            btn_e.setToolTip("Ouvrir l'interface graphique du plugin VST3")
         btn_e.clicked.connect(lambda _, p=path: open_plugin_editor_gui(p, self))
         c_layout.addWidget(btn_e)
 

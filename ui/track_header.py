@@ -189,6 +189,8 @@ class TrackHeaderWidget(QFrame):
             """)
             self.btn_edit_plugin.setEnabled(bool(self.track.plugin_path))
             self.btn_edit_plugin.clicked.connect(self._on_open_plugin_editor)
+            global_plugin_manager.editor_opened.connect(self._on_editor_state_changed)
+            global_plugin_manager.editor_closed.connect(self._on_editor_state_changed)
             row3.addWidget(self.btn_edit_plugin)
 
             content_layout.addLayout(row3)
@@ -277,6 +279,43 @@ class TrackHeaderWidget(QFrame):
             self.track.plugin_name = None
             self.btn_edit_plugin.setEnabled(False)
         self.track_modified.emit()
+
+    def _on_editor_state_changed(self, path=None):
+        if not hasattr(self, "btn_edit_plugin"):
+            return
+        is_open = global_plugin_manager.is_editor_open(self.track.plugin_path) if self.track.plugin_path else False
+        if is_open:
+            self.btn_edit_plugin.setStyleSheet("""
+                QPushButton {
+                    background-color: #0284c7;
+                    color: #ffffff;
+                    font-weight: bold;
+                    border: 1px solid #38bdf8;
+                    border-radius: 3px;
+                }
+                QPushButton:hover { background-color: #0369a1; }
+            """)
+            self.btn_edit_plugin.setToolTip("L'interface du plugin est ouverte (Cliquer pour fermer)")
+        else:
+            self.btn_edit_plugin.setStyleSheet("""
+                QPushButton {
+                    background-color: #1e2230;
+                    color: #38bdf8;
+                    font-weight: bold;
+                    border: 1px solid #38bdf8;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #38bdf8;
+                    color: #0f172a;
+                }
+                QPushButton:disabled {
+                    border-color: #282a36;
+                    color: #475569;
+                    background-color: transparent;
+                }
+            """)
+            self.btn_edit_plugin.setToolTip("Éditer l'instrument VST (Ouvrir l'interface)")
 
     def _on_open_plugin_editor(self):
         if self.track.plugin_path:

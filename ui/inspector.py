@@ -105,6 +105,8 @@ class TrackInspector(QFrame):
 
         # Mettre à jour les listes déroulantes quand des plugins sont scannés
         global_plugin_manager.scan_updated.connect(self._refresh_plugin_lists)
+        global_plugin_manager.editor_opened.connect(self._on_editor_state_changed)
+        global_plugin_manager.editor_closed.connect(self._on_editor_state_changed)
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -404,6 +406,31 @@ class TrackInspector(QFrame):
 
         self.track_modified.emit()
 
+    def _on_editor_state_changed(self, file_path: str = ""):
+        """Met à jour l'apparence des boutons d'édition selon si la fenêtre est ouverte ou fermée"""
+        if self.current_track and self.current_track.track_type == "midi":
+            is_open = global_plugin_manager.is_editor_open(self.current_track.plugin_path) if self.current_track.plugin_path else False
+            if is_open:
+                self.btn_edit_instrument.setText("🎹 Fermer Interface Plugin [e]")
+                self.btn_edit_instrument.setStyleSheet("""
+                    QPushButton {
+                        background-color: #0284c7;
+                        color: #ffffff;
+                        font-weight: bold;
+                        border: 1px solid #38bdf8;
+                        border-radius: 4px;
+                        padding: 6px;
+                    }
+                    QPushButton:hover { background-color: #0369a1; }
+                """)
+                self.btn_edit_instrument.setToolTip("L'interface du plugin est ouverte (Cliquer pour fermer)")
+            else:
+                self.btn_edit_instrument.setText("🎹 Ouvrir Interface Plugin [e]")
+                self.btn_edit_instrument.setStyleSheet("")
+                self.btn_edit_instrument.setToolTip("Éditer l'instrument VST3")
+        elif self.current_track and self.current_track.track_type == "audio":
+            self._rebuild_insert_slots()
+
     def _on_open_instrument_editor(self):
         if self.current_track and self.current_track.plugin_path:
             open_plugin_editor_gui(self.current_track.plugin_path, self)
@@ -447,17 +474,32 @@ class TrackInspector(QFrame):
             # Bouton [e] pour éditer l'effet
             btn_e = QPushButton("e")
             btn_e.setFixedSize(20, 20)
-            btn_e.setStyleSheet("""
-                QPushButton {
-                    background-color: #1e2230;
-                    color: #a855f7;
-                    font-weight: bold;
-                    border: 1px solid #a855f7;
-                    border-radius: 3px;
-                }
-                QPushButton:hover { background-color: #a855f7; color: #ffffff; }
-                QPushButton:disabled { border-color: #2b2e3e; color: #475569; background: transparent; }
-            """)
+            is_fx_open = global_plugin_manager.is_editor_open(fx_path) if fx_path else False
+            if is_fx_open:
+                btn_e.setStyleSheet("""
+                    QPushButton {
+                        background-color: #7e22ce;
+                        color: #ffffff;
+                        font-weight: bold;
+                        border: 1px solid #c084fc;
+                        border-radius: 3px;
+                    }
+                    QPushButton:hover { background-color: #9333ea; }
+                """)
+                btn_e.setToolTip("Interface de l'effet ouverte (Cliquer pour fermer)")
+            else:
+                btn_e.setStyleSheet("""
+                    QPushButton {
+                        background-color: #1e2230;
+                        color: #a855f7;
+                        font-weight: bold;
+                        border: 1px solid #a855f7;
+                        border-radius: 3px;
+                    }
+                    QPushButton:hover { background-color: #a855f7; color: #ffffff; }
+                    QPushButton:disabled { border-color: #2b2e3e; color: #475569; background: transparent; }
+                """)
+                btn_e.setToolTip("Éditer les paramètres de cet effet VST")
             btn_e.setEnabled(bool(fx_path))
             if fx_path:
                 btn_e.clicked.connect(lambda _, p=fx_path: open_plugin_editor_gui(p, self))
