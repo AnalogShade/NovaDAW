@@ -75,7 +75,9 @@ class AddTrackDialog(QDialog):
         """)
         self.combo_inst.addItem("🎹 Synthé Polyphonique NovaDAW (Défaut)", userData=None)
         for inst in global_plugin_manager.get_compatible_instruments():
-            self.combo_inst.addItem(f"🎹 {inst.name} (VST3)", userData=inst.file_path)
+            is_multibus = any(k.lower() in inst.name.lower() for k in ["kontakt", "sampletank"])
+            tag = " (Sampler Multi-bus) ⚠️" if is_multibus else " (VST3 Direct) ✅"
+            self.combo_inst.addItem(f"🎹 {inst.name}{tag}", userData=inst.file_path)
         self.combo_inst.currentIndexChanged.connect(self._on_instrument_selected)
         layout.addWidget(self.combo_inst)
 
@@ -143,7 +145,10 @@ class AddTrackDialog(QDialog):
     def _on_instrument_selected(self, index: int):
         file_path = self.combo_inst.currentData()
         if file_path:
-            inst_name = self.combo_inst.currentText().replace("🎹 ", "").replace(" (VST3)", "")
+            inst_name = self.combo_inst.currentText().replace("🎹 ", "")
+            for badge in [" (Sampler Multi-bus) ⚠️", " (VST3 Direct) ✅", " (VST3)"]:
+                inst_name = inst_name.replace(badge, "")
+            inst_name = inst_name.strip()
             if not self.txt_name.text() or self.txt_name.text() in ["Synth Lead", "Piste MIDI"]:
                 self.txt_name.setText(inst_name)
 
@@ -157,7 +162,13 @@ class AddTrackDialog(QDialog):
         track_type = "midi" if self.rb_midi.isChecked() else "audio"
         name = self.txt_name.text().strip() or ("Piste MIDI" if track_type == "midi" else "Piste Audio")
         plugin_path = self.combo_inst.currentData() if track_type == "midi" else None
-        plugin_name = self.combo_inst.currentText().replace("🎹 ", "").replace(" (VST3)", "") if (track_type == "midi" and plugin_path) else None
+        plugin_name = None
+        if track_type == "midi" and plugin_path:
+            raw = self.combo_inst.currentText().replace("🎹 ", "")
+            for badge in [" (Sampler Multi-bus) ⚠️", " (VST3 Direct) ✅", " (VST3)"]:
+                raw = raw.replace(badge, "")
+            plugin_name = raw.strip()
+
         return {
             "name": name,
             "track_type": track_type,

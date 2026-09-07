@@ -179,6 +179,11 @@ class TrackInspector(QFrame):
         self.btn_edit_instrument.clicked.connect(self._on_open_instrument_editor)
         fm_layout.addWidget(self.btn_edit_instrument)
 
+        self.lbl_inst_status = QLabel()
+        self.lbl_inst_status.setWordWrap(True)
+        self.lbl_inst_status.setVisible(False)
+        fm_layout.addWidget(self.lbl_inst_status)
+
         self.content_layout.addWidget(self.frame_midi)
 
         # 3. SECTION INSERTS (Pour pistes Audio)
@@ -331,6 +336,68 @@ class TrackInspector(QFrame):
         pan_val = int(track.pan * 100)
         self.lbl_pan_val.setText("Centre" if pan_val == 0 else (f"G{abs(pan_val)}" if pan_val < 0 else f"D{pan_val}"))
 
+    def _update_instrument_status_label(self):
+        """Affiche un badge explicatif transparent sur le mode de rendu audio de l'instrument sélectionné"""
+        if not self.current_track or self.current_track.track_type != "midi":
+            self.lbl_inst_status.setVisible(False)
+            return
+
+        plugin_path = self.current_track.plugin_path
+        plugin_name = self.current_track.plugin_name or ""
+        is_multibus = any(k.lower() in plugin_name.lower() or k.lower() in (plugin_path or "").lower() for k in ["kontakt", "sampletank"]) if plugin_path else False
+
+        if not plugin_path:
+            self.lbl_inst_status.setStyleSheet("""
+                QLabel {
+                    background-color: #1a1e29;
+                    color: #94a3b8;
+                    border: 1px solid #2d3748;
+                    border-radius: 4px;
+                    padding: 6px;
+                    font-size: 11px;
+                }
+            """)
+            self.lbl_inst_status.setText(
+                "ℹ️ <b>Synthétiseur Interne NovaDAW</b><br>"
+                "Synthèse polyphonique intégrée avec enveloppe ADSR."
+            )
+            self.lbl_inst_status.setVisible(True)
+        elif is_multibus:
+            self.lbl_inst_status.setStyleSheet("""
+                QLabel {
+                    background-color: #2e1d10;
+                    color: #fcd34d;
+                    border: 1px solid #f59e0b;
+                    border-radius: 4px;
+                    padding: 6px;
+                    font-size: 11px;
+                }
+            """)
+            self.lbl_inst_status.setText(
+                "⚠️ <b>Sampler Multi-bus (Kontakt / SampleTank)</b><br>"
+                "Ce plugin utilise 16 bus de sorties audio. Pour garantir une stabilité absolue "
+                "sans crash mémoire, le moteur audio bascule automatiquement les notes du clavier et du séquenceur "
+                "sur le synthé de secours.<br>"
+                "💡 <i>Pour un rendu audio 100% VST3 en temps réel, sélectionnez un synthé direct comme <b>Syntronik</b> ou <b>Prologue</b> !</i>"
+            )
+            self.lbl_inst_status.setVisible(True)
+        else:
+            self.lbl_inst_status.setStyleSheet("""
+                QLabel {
+                    background-color: #0f291e;
+                    color: #4ade80;
+                    border: 1px solid #16a34a;
+                    border-radius: 4px;
+                    padding: 6px;
+                    font-size: 11px;
+                }
+            """)
+            self.lbl_inst_status.setText(
+                f"✅ <b>Rendu VST3 Direct Actif ({plugin_name})</b><br>"
+                "Le signal sonore est généré directement par le moteur VST3 lors de la saisie sur le clavier ou en lecture."
+            )
+            self.lbl_inst_status.setVisible(True)
+
     def _populate_instrument_combo(self):
         if not self.current_track or self.current_track.track_type != "midi":
             return
@@ -341,18 +408,22 @@ class TrackInspector(QFrame):
         # Option 1 : Synthé interne
         self.combo_instrument.addItem("🎹 Synthé Interne NovaDAW", userData=None)
 
+        def format_inst_label(name: str) -> str:
+            is_multibus = any(k.lower() in name.lower() for k in ["kontakt", "sampletank"])
+            return f"🎹 {name} (Sampler Multi-bus) ⚠️" if is_multibus else f"🎹 {name} (VST3 Direct) ✅"
+
         # Option 2 : Instruments du Rack du projet
         rack_insts = [p for p in self.project.plugin_rack if p.get("plugin_type") == "instrument"]
         if rack_insts:
             for r in rack_insts:
-                self.combo_instrument.addItem(f"🎹 {r['name']} (Rack)", userData=r["file_path"])
+                self.combo_instrument.addItem(format_inst_label(r['name']) + " (Rack)", userData=r["file_path"])
 
         # Option 3 : Tous les instruments compatibles scannés
         all_insts = global_plugin_manager.get_compatible_instruments()
         for inst in all_insts:
             # Éviter doublons déjà dans le rack
             if not any(r.get("file_path") == inst.file_path for r in rack_insts):
-                self.combo_instrument.addItem(f"🎹 {inst.name}", userData=inst.file_path)
+                self.combo_instrument.addItem(format_inst_label(inst.name), userData=inst.file_path)
 
         # Option 4 : Charger manuellement un .vst3
         self.combo_instrument.addItem("➕ Charger un fichier .vst3...", userData="__ADD_FILE__")
@@ -368,6 +439,7 @@ class TrackInspector(QFrame):
         self.combo_instrument.setCurrentIndex(selected_idx)
         self.combo_instrument.blockSignals(False)
         self.btn_edit_instrument.setEnabled(bool(self.current_track.plugin_path))
+        self._update_instrument_status_label()
 
     def _on_instrument_changed(self, index: int):
         if not self.current_track:
@@ -397,13 +469,18 @@ class TrackInspector(QFrame):
 
         if data:
             self.current_track.plugin_path = data
-            self.current_track.plugin_name = self.combo_instrument.currentText().replace("🎹 ", "").replace(" (Rack)", "")
+            raw_text = self.combo_instrument.currentText()
+            cleaned = raw_text.replace("🎹 ", "").replace(" (Rack)", "")
+            for badge in [" (Sampler Multi-bus) ⚠️", " (VST3 Direct) ✅"]:
+                cleaned = cleaned.replace(badge, "")
+            self.current_track.plugin_name = cleaned.strip()
             self.btn_edit_instrument.setEnabled(True)
         else:
             self.current_track.plugin_path = None
             self.current_track.plugin_name = None
             self.btn_edit_instrument.setEnabled(False)
 
+        self._update_instrument_status_label()
         self.track_modified.emit()
 
     def _on_editor_state_changed(self, file_path: str = ""):

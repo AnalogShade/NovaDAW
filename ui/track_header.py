@@ -259,7 +259,9 @@ class TrackHeaderWidget(QFrame):
         instruments = global_plugin_manager.get_compatible_instruments()
         selected_idx = 0
         for idx, inst in enumerate(instruments, start=1):
-            self.combo_plugin.addItem(f"🎹 {inst.name}", userData=inst.file_path)
+            is_multibus = any(k.lower() in inst.name.lower() for k in ["kontakt", "sampletank"])
+            badge = " ⚠️" if is_multibus else " ✅"
+            self.combo_plugin.addItem(f"🎹 {inst.name}{badge}", userData=inst.file_path)
             if self.track.plugin_path and inst.file_path == self.track.plugin_path:
                 selected_idx = idx
 
@@ -272,7 +274,9 @@ class TrackHeaderWidget(QFrame):
         file_path = self.combo_plugin.currentData()
         if file_path:
             self.track.plugin_path = file_path
-            self.track.plugin_name = self.combo_plugin.currentText().replace("🎹 ", "")
+            raw = self.combo_plugin.currentText().replace("🎹 ", "")
+            raw = raw.replace(" ⚠️", "").replace(" ✅", "")
+            self.track.plugin_name = raw.strip()
             self.btn_edit_plugin.setEnabled(True)
         else:
             self.track.plugin_path = None

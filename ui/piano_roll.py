@@ -451,23 +451,37 @@ class PianoRoll(QWidget):
             self.lbl_title.setText(f"🎹 PIANO ROLL : Piste audio [{track.name}] — Ouvrez l'Éditeur Audio pour cette piste")
             return
 
+        is_multibus = any(k.lower() in (track.plugin_name or "").lower() for k in ["kontakt", "sampletank"])
+        if track.plugin_path and not is_multibus:
+            inst_tag = f"VST3 Direct : {track.plugin_name} ✅"
+        elif is_multibus:
+            inst_tag = f"{track.plugin_name} (Sampler Multi-bus ➔ Synthé secours) ⚠️"
+        else:
+            inst_tag = "Synthé Interne NovaDAW"
+
         # Piste MIDI
         if track.clips and isinstance(track.clips[0], MidiClip):
             # Si le clip actuel fait déjà partie des clips de cette piste, on le conserve
             if self.current_clip not in track.clips:
                 self.current_clip = track.clips[0]
             self.note_grid.set_clip(self.current_clip)
-            self.lbl_title.setText(f"🎹 PIANO ROLL : Piste active [{track.name}] ➔ {self.current_clip.name} — Instrument : {plugin_label}")
+            self.lbl_title.setText(f"🎹 PIANO ROLL : [{track.name}] ➔ {self.current_clip.name} — {inst_tag}")
         else:
             self.current_clip = None
             self.note_grid.set_clip(None)
-            self.lbl_title.setText(f"🎹 PIANO ROLL : Piste active [{track.name}] — Instrument : {plugin_label} (Clavier actif)")
+            self.lbl_title.setText(f"🎹 PIANO ROLL : [{track.name}] — {inst_tag} (Clavier actif)")
 
     def open_clip(self, track: Track, clip: MidiClip):
         self.current_track = track
         self.current_clip = clip
-        plugin_label = track.plugin_name if track.plugin_name else "Synthé Interne"
-        self.lbl_title.setText(f"🎹 PIANO ROLL : {track.name} ➔ {clip.name} — Instrument : {plugin_label}")
+        is_multibus = any(k.lower() in (track.plugin_name or "").lower() for k in ["kontakt", "sampletank"])
+        if track.plugin_path and not is_multibus:
+            inst_tag = f"VST3 Direct : {track.plugin_name} ✅"
+        elif is_multibus:
+            inst_tag = f"{track.plugin_name} (Sampler Multi-bus ➔ Synthé secours) ⚠️"
+        else:
+            inst_tag = "Synthé Interne NovaDAW"
+        self.lbl_title.setText(f"🎹 PIANO ROLL : [{track.name}] ➔ {clip.name} — {inst_tag}")
         self.note_grid.set_clip(clip)
 
     def _play_sound(self, pitch: int):
