@@ -16,12 +16,6 @@ def load_stylesheet(app: QApplication):
 
 
 def main():
-    # Optimisation pour les écrans haute densité (Retina / 4K)
-    if hasattr(Qt, "AA_EnableHighDpiScaling"):
-        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    if hasattr(Qt, "AA_UseHighDpiPixmaps"):
-        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
-
     app = QApplication(sys.argv)
     app.setApplicationName("NovaDAW")
     app.setOrganizationName("NovaDAW Open Source")

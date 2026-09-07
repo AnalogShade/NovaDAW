@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QComboBox, QScrollArea, QFrame, QSplitter
 )
 from PySide6.QtGui import (
-    QPainter, QColor, QPen, QBrush, QFont, QMouseEvent, QWheelEvent
+    QPainter, QColor, QPen, QBrush, QFont, QMouseEvent, QWheelEvent, QPolygonF
 )
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF
 from core.project import MidiClip, MidiNote, Track
