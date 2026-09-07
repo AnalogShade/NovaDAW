@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit,
     QProgressBar, QMessageBox, QFileDialog, QFrame, QAbstractItemView
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QColor
 
 from core.plugin_manager import (
@@ -182,35 +182,37 @@ class PluginLoadingDialog(QDialog):
         self.progress_bar.setRange(0, 0)
         layout.addWidget(self.progress_bar)
 
-        # Pied avec statut et bouton Annuler
+        # Pied avec statut
         footer = QHBoxLayout()
         self.status_lbl = QLabel("Veuillez patienter quelques secondes...")
         self.status_lbl.setStyleSheet("font-size: 11px; color: #64748b; font-style: italic;")
         footer.addWidget(self.status_lbl, stretch=1)
-
-        self.btn_cancel = QPushButton("Annuler")
-        self.btn_cancel.clicked.connect(self.reject)
-        footer.addWidget(self.btn_cancel)
         layout.addLayout(footer)
 
-        # Démarrer le worker asynchrone
-        self.worker = PluginLoadWorker(self.file_path, self)
-        self.worker.loaded.connect(self._on_loaded)
-        self.worker.error.connect(self._on_error)
-        self.worker.start()
+        # Centrer sur la fenêtre parente si disponible
+        if parent:
+            top_w = parent.window() if hasattr(parent, "window") else parent
+            if hasattr(top_w, "geometry"):
+                geo = top_w.geometry()
+                self.move(geo.center().x() - self.width() // 2, geo.center().y() - self.height() // 2)
 
-    def _on_loaded(self, path: str, plugin: object):
-        self.loaded_plugin = plugin
-        self.accept()
+        # Déclencher le chargement sur le fil principal dès que la boîte est dessinée
+        # (Pedalboard exige impérativement que le plugin soit instancié sur le fil principal
+        # pour pouvoir afficher son interface graphique sans erreur de thread)
+        QTimer.singleShot(60, self._do_load)
 
-    def _on_error(self, path: str, err: str):
-        self.error_message = err
-        self.reject()
-
-    def closeEvent(self, event):
-        if self.worker.isRunning():
-            self.worker.quit()
-        super().closeEvent(event)
+    def _do_load(self):
+        from PySide6.QtWidgets import QApplication
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            import pedalboard
+            self.loaded_plugin = pedalboard.load_plugin(self.file_path)
+            self.accept()
+        except Exception as e:
+            self.error_message = str(e)
+            self.reject()
+        finally:
+            QApplication.restoreOverrideCursor()
 
 
 def open_plugin_editor_gui(file_path: str, parent=None):
