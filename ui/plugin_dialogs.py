@@ -70,32 +70,55 @@ def _watch_and_front_plugin_window(plugin_name: str, parent_hwnd: int, close_eve
             time.sleep(0.1)
 
         if target_hwnd and not close_event.is_set():
-            # 1. Renommer la fenêtre pour que l'utilisateur sache exactement quel plugin est ouvert
+            # 1. Calculer la zone de travail de l'écran pour centrer la fenêtre
+            work_area = wintypes.RECT()
+            SPI_GETWORKAREA = 0x0030
+            user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(work_area), 0)
+            screen_w = work_area.right - work_area.left
+            screen_h = work_area.bottom - work_area.top
+
+            # Récupérer la taille actuelle de la fenêtre
+            rect = wintypes.RECT()
+            user32.GetWindowRect(target_hwnd, ctypes.byref(rect))
+            win_w = rect.right - rect.left
+            win_h = rect.bottom - rect.top
+
+            # Dimensions cibles adaptées à la résolution
+            target_w = min(win_w, max(800, screen_w - 60))
+            target_h = min(win_h, max(600, screen_h - 80))
+
+            # Positionnement centré avec une marge de sécurité garantie depuis le haut
+            # (empêche formellement la barre de titre d'être coupée à y = -31)
+            target_x = work_area.left + max(30, (screen_w - target_w) // 2)
+            target_y = work_area.top + max(50, (screen_h - target_h) // 2)
+
+            # 2. Appliquer les styles Windows standard complets :
+            # WS_OVERLAPPEDWINDOW = Titre (WS_CAPTION) + Menu système avec Fermer (WS_SYSMENU)
+            # + Bouton Réduire (WS_MINIMIZEBOX) + Bouton Agrandir (WS_MAXIMIZEBOX)
+            # + Bordures redimensionnables (WS_THICKFRAME)
+            GWL_STYLE = -16
+            GWL_EXSTYLE = -20
+            style = user32.GetWindowLongW(target_hwnd, GWL_STYLE)
+            ex_style = user32.GetWindowLongW(target_hwnd, GWL_EXSTYLE)
+
+            WS_OVERLAPPEDWINDOW = 0x00CF0000
+            WS_EX_APPWINDOW = 0x00040000
+
+            user32.SetWindowLongW(target_hwnd, GWL_STYLE, style | WS_OVERLAPPEDWINDOW)
+            user32.SetWindowLongW(target_hwnd, GWL_EXSTYLE, ex_style | WS_EX_APPWINDOW)
+
+            # 3. Renommer la fenêtre avec le nom du plugin et NovaDAW
             user32.SetWindowTextW(target_hwnd, f"{plugin_name} — NovaDAW VST3")
 
-            # 2. Rattacher la fenêtre à NovaDAW via GWLP_HWNDPARENT
-            # En Win32, une fenêtre "owned" reste TOUJOURS au-dessus de son propriétaire,
-            # minimise avec lui, et se ferme avec lui.
-            if parent_hwnd:
-                GWLP_HWNDPARENT = -8
-                try:
-                    user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
-                    user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
-                    user32.SetWindowLongPtrW(target_hwnd, GWLP_HWNDPARENT, parent_hwnd)
-                except Exception:
-                    pass
+            # 4. Déplacer la fenêtre pour rendre la barre de titre et ses boutons 100% visibles et déplaçables
+            user32.MoveWindow(target_hwnd, target_x, target_y, target_w, target_h, True)
 
-            # 3. Forcer la fenêtre au premier plan absolu
-            SW_RESTORE = 9
-            SWP_NOMOVE = 0x0002
-            SWP_NOSIZE = 0x0001
+            # 5. Forcer la mise à jour du cadre et passer au premier plan
+            SWP_FRAMECHANGED = 0x0020
             SWP_SHOWWINDOW = 0x0040
-            HWND_TOPMOST = -1
-            HWND_NOTOPMOST = -2
-
-            user32.ShowWindow(target_hwnd, SW_RESTORE)
-            user32.SetWindowPos(target_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
-            user32.SetWindowPos(target_hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+            user32.ShowWindow(target_hwnd, 9)  # SW_RESTORE
+            user32.SetWindowPos(target_hwnd, -1, 0, 0, 0, 0, 0x0002 | 0x0001 | SWP_FRAMECHANGED | SWP_SHOWWINDOW)
+            user32.SetWindowPos(target_hwnd, -2, 0, 0, 0, 0, 0x0002 | 0x0001 | SWP_FRAMECHANGED | SWP_SHOWWINDOW)
             user32.BringWindowToTop(target_hwnd)
             user32.SetForegroundWindow(target_hwnd)
 
