@@ -156,16 +156,39 @@ class AudioEngine:
         if self.playhead_callback:
             self.playhead_callback(self.current_beat)
 
+    def _can_render_vst_offline(self, plugin: Any) -> bool:
+        """
+        Vérifie si un instrument VST3 supporte le rendu MIDI hors ligne via Pedalboard/JUCE.
+        Certains samplers multi-bus complexes (ex: Kontakt, SampleTank) requièrent un hôte de
+        routage avancé et peuvent générer un accès mémoire natif hors d'une interface audio dédiée.
+        Pour ces plugins, NovaDAW bascule automatiquement sur son synthétiseur polyphonique interne
+        afin de garantir une stabilité absolue et un retour sonore instantané pour composer.
+        """
+        if not plugin or not getattr(plugin, "is_instrument", False):
+            return False
+        cached = getattr(plugin, "_supports_offline_midi", None)
+        if cached is not None:
+            return cached
+
+        name = getattr(plugin, "name", "")
+        known_incompatible = ["Kontakt", "SampleTank"]
+        if any(k.lower() in name.lower() for k in known_incompatible):
+            plugin._supports_offline_midi = False
+            return False
+
+        plugin._supports_offline_midi = True
+        return True
+
     def preview_note(self, pitch: int, duration_sec: float = 0.35, velocity: int = 100, track: Optional[Track] = None):
         """Joue immédiatement une note (appelé par le Piano Roll lors d'un clic)"""
         wave = None
         if track and track.plugin_path:
             vst_plugin = self.get_track_plugin(track)
-            if vst_plugin and getattr(vst_plugin, "is_instrument", False):
+            if self._can_render_vst_offline(vst_plugin):
                 try:
                     on_msg = (bytes([0x90, pitch, max(1, min(127, velocity))]), 0.0)
                     off_msg = (bytes([0x80, pitch, 0]), duration_sec * 0.8)
-                    vst_out = vst_plugin([on_msg, off_msg], duration=duration_sec, sample_rate=self.sample_rate, reset=False)
+                    vst_out = vst_plugin([on_msg, off_msg], duration=duration_sec, sample_rate=self.sample_rate, num_channels=2, reset=False)
                     if vst_out is not None and vst_out.size > 0:
                         if vst_out.ndim == 1:
                             wave = np.column_stack((vst_out, vst_out))
@@ -264,7 +287,7 @@ class AudioEngine:
             vst_plugin = self.get_track_plugin(track)
             rendered_by_vst = False
 
-            if vst_plugin and getattr(vst_plugin, "is_instrument", False):
+            if self._can_render_vst_offline(vst_plugin):
                 try:
                     dur_sec = frames / self.sample_rate
                     midi_messages = []
@@ -296,7 +319,7 @@ class AudioEngine:
                                 has_notes = True
 
                     if midi_messages or has_notes:
-                        vst_out = vst_plugin(midi_messages, duration=dur_sec, sample_rate=self.sample_rate, reset=False)
+                        vst_out = vst_plugin(midi_messages, duration=dur_sec, sample_rate=self.sample_rate, num_channels=2, reset=False)
                         if vst_out is not None and vst_out.size > 0:
                             if vst_out.ndim == 1:
                                 n = min(frames, len(vst_out))

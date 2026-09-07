@@ -90,3 +90,56 @@ def test_editor_tracking_and_close_helpers():
     global_plugin_manager.close_all_editors()
     assert evt2.is_set()
     assert len(global_plugin_manager.open_editors) == 0
+
+
+def test_audio_engine_offline_midi_protection():
+    """Vérifie que l'AudioEngine protège contre les crashs natifs pour les plugins multi-bus complexes"""
+    engine = AudioEngine()
+
+    class FakePlugin:
+        def __init__(self, name, is_instrument=True):
+            self.name = name
+            self.is_instrument = is_instrument
+
+    kontakt = FakePlugin("Kontakt")
+    sampletank = FakePlugin("SampleTank 4")
+    synth = FakePlugin("Syntronik")
+    fx = FakePlugin("TR5 Black 76", is_instrument=False)
+
+    assert engine._can_render_vst_offline(kontakt) is False
+    assert engine._can_render_vst_offline(sampletank) is False
+    assert engine._can_render_vst_offline(synth) is True
+    assert engine._can_render_vst_offline(fx) is False
+    assert engine._can_render_vst_offline(None) is False
+
+    engine.close()
+
+
+def test_piano_roll_track_binding():
+    """Vérifie que la sélection d'une piste met à jour le Piano Roll et son routage instrument"""
+    from PySide6.QtWidgets import QApplication
+    from ui.piano_roll import PianoRoll
+
+    app = QApplication.instance() or QApplication([])
+
+    engine = AudioEngine()
+    roll = PianoRoll(engine)
+
+    track_midi = Track(name="Synth Piste", track_type="midi", plugin_name="Syntronik", plugin_path="C:\\Fake\\Syntronik.vst3")
+    roll.set_active_track(track_midi)
+
+    assert roll.current_track == track_midi
+    assert "Synth Piste" in roll.lbl_title.text()
+    assert "Syntronik" in roll.lbl_title.text()
+
+    # Changement vers piste audio
+    track_audio = Track(name="Voix", track_type="audio")
+    roll.set_active_track(track_audio)
+    assert "Piste audio" in roll.lbl_title.text()
+
+    # Désélection
+    roll.set_active_track(None)
+    assert roll.current_track is None
+    assert "Aucune piste sélectionnée" in roll.lbl_title.text()
+
+    engine.close()

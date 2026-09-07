@@ -427,12 +427,15 @@ class MainWindow(QMainWindow):
         self.ruler.update()
 
     def _on_track_selected(self, track_id: str):
-        """Appelé lors d'un clic sur une piste : met à jour l'Inspecteur de piste (style Cubase)"""
+        """Appelé lors d'un clic sur une piste : met à jour l'Inspecteur de piste et le Piano Roll"""
         track = self.project.get_track(track_id)
         if track:
             self.selected_track_id = track_id
             if hasattr(self, "inspector"):
                 self.inspector.set_track(track)
+
+            if hasattr(self, "piano_roll"):
+                self.piano_roll.set_active_track(track)
 
             # Mise en surbrillance de l'en-tête actif
             for i in range(self.headers_layout.count() - 1):
@@ -581,6 +584,10 @@ class MainWindow(QMainWindow):
 
     def _on_project_modified(self):
         self.timeline_grid.update()
+        if hasattr(self, "piano_roll") and getattr(self, "selected_track_id", None):
+            track = self.project.get_track(self.selected_track_id)
+            if track:
+                self.piano_roll.set_active_track(track)
 
     def _update_playback_ui(self):
         if self.audio_engine.is_playing:

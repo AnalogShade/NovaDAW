@@ -434,10 +434,40 @@ class PianoRoll(QWidget):
     def set_playhead(self, beat: float):
         self.note_grid.set_playhead(beat)
 
+    def set_active_track(self, track: Optional[Track]):
+        """Lie le Piano Roll et son clavier virtuel à la piste active sélectionnée"""
+        self.current_track = track
+        if not track:
+            self.current_clip = None
+            self.lbl_title.setText("🎹 PIANO ROLL : Aucune piste sélectionnée")
+            self.note_grid.set_clip(None)
+            return
+
+        plugin_label = track.plugin_name if track.plugin_name else "Synthé Interne"
+
+        if track.track_type == "audio":
+            self.current_clip = None
+            self.note_grid.set_clip(None)
+            self.lbl_title.setText(f"🎹 PIANO ROLL : Piste audio [{track.name}] — Ouvrez l'Éditeur Audio pour cette piste")
+            return
+
+        # Piste MIDI
+        if track.clips and isinstance(track.clips[0], MidiClip):
+            # Si le clip actuel fait déjà partie des clips de cette piste, on le conserve
+            if self.current_clip not in track.clips:
+                self.current_clip = track.clips[0]
+            self.note_grid.set_clip(self.current_clip)
+            self.lbl_title.setText(f"🎹 PIANO ROLL : Piste active [{track.name}] ➔ {self.current_clip.name} — Instrument : {plugin_label}")
+        else:
+            self.current_clip = None
+            self.note_grid.set_clip(None)
+            self.lbl_title.setText(f"🎹 PIANO ROLL : Piste active [{track.name}] — Instrument : {plugin_label} (Clavier actif)")
+
     def open_clip(self, track: Track, clip: MidiClip):
         self.current_track = track
         self.current_clip = clip
-        self.lbl_title.setText(f"🎹 PIANO ROLL : {track.name} ➔ {clip.name}")
+        plugin_label = track.plugin_name if track.plugin_name else "Synthé Interne"
+        self.lbl_title.setText(f"🎹 PIANO ROLL : {track.name} ➔ {clip.name} — Instrument : {plugin_label}")
         self.note_grid.set_clip(clip)
 
     def _play_sound(self, pitch: int):
