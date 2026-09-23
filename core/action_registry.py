@@ -88,8 +88,10 @@ class ActionRegistry:
     def get_all(self) -> Dict[str, ActionDefinition]:
         return dict(self._actions)
 
-    def execute(self, action_name: str, app: Any, params: Dict[str, Any]) -> Any:
+    def execute(self, action_name: str, app: Any, params: Optional[Dict[str, Any]] = None) -> Any:
         """Exécute une action en lui injectant l'application `app`."""
+        if params is None:
+            params = {}
         action = self.get(action_name)
         if not action:
             raise KeyError(f"Action inconnue dans NovaDAW : '{action_name}'")

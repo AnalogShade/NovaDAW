@@ -4,7 +4,7 @@ ui/piano_roll.py - Séquenceur MIDI / Piano Roll interactif avec clavier virtuel
 from typing import Optional, List, Tuple
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QComboBox, QScrollArea, QFrame, QSplitter
+    QComboBox, QScrollArea, QFrame, QSplitter, QSizePolicy
 )
 from PySide6.QtGui import (
     QPainter, QColor, QPen, QBrush, QFont, QMouseEvent, QWheelEvent, QPolygonF
@@ -381,6 +381,7 @@ class PianoRoll(QWidget):
 
         self.lbl_title = QLabel("🎹 PIANO ROLL : Aucun bloc sélectionné")
         self.lbl_title.setStyleSheet("font-weight: bold; color: #38bdf8; font-size: 12px;")
+        self.lbl_title.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         tb_layout.addWidget(self.lbl_title)
 
         # Sélecteur de quantification / Snap
@@ -397,6 +398,8 @@ class PianoRoll(QWidget):
 
         # Bouton Vider
         self.btn_clear = QPushButton("🗑 Tout effacer")
+        self.btn_clear.setMinimumWidth(110)
+        self.btn_clear.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.btn_clear.clicked.connect(self._clear_notes)
         tb_layout.addWidget(self.btn_clear)
 
@@ -452,7 +455,9 @@ class PianoRoll(QWidget):
             return
 
         is_multibus = any(k.lower() in (track.plugin_name or "").lower() for k in ["kontakt", "sampletank"])
-        if track.plugin_path and not is_multibus:
+        if track.plugin_path == "novadaw.drum_machine" or "drums" in (track.plugin_name or "").lower():
+            inst_tag = f"🥁 {track.plugin_name} (Échantillonneur FP32) ✅"
+        elif track.plugin_path and not is_multibus:
             inst_tag = f"VST3 Direct : {track.plugin_name} ✅"
         elif is_multibus:
             inst_tag = f"{track.plugin_name} (Sampler Multi-bus ➔ Synthé secours) ⚠️"
@@ -471,11 +476,17 @@ class PianoRoll(QWidget):
             self.note_grid.set_clip(None)
             self.lbl_title.setText(f"🎹 PIANO ROLL : [{track.name}] — {inst_tag} (Clavier actif)")
 
-    def open_clip(self, track: Track, clip: MidiClip):
+    def open_clip(self, track: Optional[Track], clip: Optional[MidiClip]):
+        if not track or not clip:
+            self.set_active_track(None)
+            return
+
         self.current_track = track
         self.current_clip = clip
         is_multibus = any(k.lower() in (track.plugin_name or "").lower() for k in ["kontakt", "sampletank"])
-        if track.plugin_path and not is_multibus:
+        if track.plugin_path == "novadaw.drum_machine" or "drums" in (track.plugin_name or "").lower():
+            inst_tag = f"🥁 {track.plugin_name} (Échantillonneur FP32) ✅"
+        elif track.plugin_path and not is_multibus:
             inst_tag = f"VST3 Direct : {track.plugin_name} ✅"
         elif is_multibus:
             inst_tag = f"{track.plugin_name} (Sampler Multi-bus ➔ Synthé secours) ⚠️"
@@ -483,6 +494,10 @@ class PianoRoll(QWidget):
             inst_tag = "Synthé Interne NovaDAW"
         self.lbl_title.setText(f"🎹 PIANO ROLL : [{track.name}] ➔ {clip.name} — {inst_tag}")
         self.note_grid.set_clip(clip)
+
+    def clear(self):
+        """Réinitialise le piano roll à un état vide."""
+        self.set_active_track(None)
 
     def _play_sound(self, pitch: int):
         if self.audio_engine:

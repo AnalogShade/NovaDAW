@@ -308,6 +308,71 @@ def open_plugin_editor_gui(file_path: str, parent=None):
         global_plugin_manager.editor_closed.emit(file_path)
 
 
+# Fenêtres d'éditeurs natifs ouvertes (instance_id -> NativePluginDialog)
+_open_native_editors: dict = {}
+
+
+class NativePluginDialog(QDialog):
+    """Fenêtre autonome pour héberger l'interface graphique d'un plugin natif NovaDAW"""
+    def __init__(self, plugin, parent=None):
+        super().__init__(parent)
+        self.plugin = plugin
+        self.setWindowTitle(f"{plugin.icon} {plugin.name} - NovaDAW")
+        
+        # Dimensions par défaut adaptées au type de plugin
+        if getattr(plugin, "plugin_type_id", "") == "novadaw.mixer":
+            self.resize(880, 480)
+        elif getattr(plugin, "plugin_type_id", "") == "novadaw.equalizer":
+            self.resize(760, 480)
+        elif getattr(plugin, "plugin_type_id", "") == "novadaw.compressor":
+            self.resize(680, 460)
+        elif getattr(plugin, "plugin_type_id", "") == "novadaw.drum_machine":
+            self.resize(800, 640)
+        else:
+            self.resize(650, 450)
+
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #12141a;
+                color: #e2e8f0;
+            }
+        """)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        editor = plugin.create_editor(self)
+        if editor:
+            layout.addWidget(editor)
+
+    def closeEvent(self, event):
+        _open_native_editors.pop(self.plugin.instance_id, None)
+        super().closeEvent(event)
+
+
+def open_native_plugin_editor(plugin, parent=None):
+    """Ouvre ou bascule l'interface d'un plugin natif NovaDAW (Égaliseur, Compresseur, Mixeur)"""
+    if not plugin:
+        return None
+    instance_id = getattr(plugin, "instance_id", None)
+    if not instance_id:
+        return None
+
+    existing = _open_native_editors.get(instance_id)
+    if existing:
+        if existing.isVisible() and existing.isActiveWindow():
+            existing.close()
+            return None
+        else:
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return existing
+
+    dlg = NativePluginDialog(plugin, parent)
+    _open_native_editors[instance_id] = dlg
+    dlg.show()
+    return dlg
+
+
 class PluginFolderManagerDialog(QDialog):
     """Dialogue pour visualiser et gérer les dossiers de scan VST3"""
     folders_changed = Signal()
@@ -315,7 +380,9 @@ class PluginFolderManagerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Dossiers de Plugins VST3")
+        self.setMinimumSize(540, 320)
         self.resize(600, 380)
+        self.setSizeGripEnabled(True)
         self.setStyleSheet("""
             QDialog { background-color: #1a1c24; color: #e2e8f0; }
             QLabel { color: #94a3b8; font-size: 12px; }
@@ -356,10 +423,13 @@ class PluginFolderManagerDialog(QDialog):
 
         btn_layout = QHBoxLayout()
         self.btn_add = QPushButton("📁 Ajouter un dossier...")
+        self.btn_add.setMinimumWidth(150)
         self.btn_add.clicked.connect(self._add_folder)
         self.btn_remove = QPushButton("✕ Supprimer le dossier")
+        self.btn_remove.setMinimumWidth(150)
         self.btn_remove.clicked.connect(self._remove_folder)
         self.btn_close = QPushButton("Fermer")
+        self.btn_close.setMinimumWidth(80)
         self.btn_close.clicked.connect(self.accept)
 
         btn_layout.addWidget(self.btn_add)
@@ -419,7 +489,9 @@ class PluginManagerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Gestionnaire de Plugins VST3 - NovaDAW")
+        self.setMinimumSize(780, 420)
         self.resize(850, 520)
+        self.setSizeGripEnabled(True)
         self.setStyleSheet("""
             QDialog { background-color: #161820; color: #f1f5f9; }
             QLabel { color: #94a3b8; font-size: 12px; }
@@ -492,14 +564,17 @@ class PluginManagerDialog(QDialog):
 
         self.btn_scan = QPushButton("🔍 Scanner les dossiers")
         self.btn_scan.setObjectName("btn_accent")
+        self.btn_scan.setMinimumWidth(150)
         self.btn_scan.clicked.connect(self.start_scan)
         top_bar.addWidget(self.btn_scan)
 
         self.btn_add_file = QPushButton("➕ Ajouter un .vst3...")
+        self.btn_add_file.setMinimumWidth(130)
         self.btn_add_file.clicked.connect(self._add_single_file)
         top_bar.addWidget(self.btn_add_file)
 
         self.btn_folders = QPushButton("📁 Gérer dossiers...")
+        self.btn_folders.setMinimumWidth(125)
         self.btn_folders.clicked.connect(self._open_folders_dialog)
         top_bar.addWidget(self.btn_folders)
 
@@ -542,10 +617,12 @@ class PluginManagerDialog(QDialog):
         bottom_bar.addStretch()
 
         self.btn_open_gui = QPushButton("🎹 Ouvrir l'interface du plugin [e]")
+        self.btn_open_gui.setMinimumWidth(215)
         self.btn_open_gui.clicked.connect(self._open_selected_editor)
         bottom_bar.addWidget(self.btn_open_gui)
 
         self.btn_close = QPushButton("Fermer")
+        self.btn_close.setMinimumWidth(80)
         self.btn_close.clicked.connect(self.accept)
         bottom_bar.addWidget(self.btn_close)
 

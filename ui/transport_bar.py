@@ -6,6 +6,8 @@ from PySide6.QtWidgets import (
     QSlider, QFrame, QSpacerItem, QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal, QTimer
+from ui.track_header import ResetableSlider
+from ui.glow_effects import set_button_glow
 
 
 class TransportBar(QWidget):
@@ -25,7 +27,7 @@ class TransportBar(QWidget):
         self.setFixedHeight(50)
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet("""
-            QWidget {
+            TransportBar {
                 background-color: #171822;
                 border-top: 1px solid #282a38;
                 border-bottom: 1px solid #282a38;
@@ -47,12 +49,14 @@ class TransportBar(QWidget):
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(16, 4, 16, 4)
         main_layout.setSpacing(12)
+        self.main_layout = main_layout
 
         # Centrage : Stretch à gauche
         main_layout.addStretch(1)
 
         # --- GROUPE NAVIGATION (Aller au début, Reculer, Stop, Play, Avancer, Aller à la fin) ---
         nav_container = QWidget()
+        nav_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         nav_layout = QHBoxLayout(nav_container)
         nav_layout.setContentsMargins(0, 0, 0, 0)
         nav_layout.setSpacing(5)
@@ -112,9 +116,9 @@ class TransportBar(QWidget):
         self.btn_record = QPushButton("●")
         self.btn_record.setObjectName("btn_record")
         self.btn_record.setCheckable(True)
-        self.btn_record.setFixedSize(34, 32)
-        self.btn_record.setToolTip("Armer l'enregistrement audio")
-        self.btn_record.clicked.connect(self.record_toggled.emit)
+        self.btn_record.setFixedSize(36, 32)
+        self.btn_record.setToolTip("Enregistrer (Record) - Démarre la lecture et l'enregistrement sur les pistes armées (R)")
+        self.btn_record.clicked.connect(self._on_record)
         nav_layout.addWidget(self.btn_record)
 
         # 8. Boucle
@@ -122,9 +126,12 @@ class TransportBar(QWidget):
         self.btn_loop.setObjectName("btn_loop")
         self.btn_loop.setCheckable(True)
         self.btn_loop.setChecked(True)
+        set_button_glow(self.btn_loop, True, "#d97706", blur_radius=15, alpha=210)
         self.btn_loop.setFixedHeight(32)
+        self.btn_loop.setMinimumWidth(84)
+        self.btn_loop.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.btn_loop.setToolTip("Activer / Désactiver la lecture en boucle (Raccourci: L)")
-        self.btn_loop.clicked.connect(self.loop_toggled.emit)
+        self.btn_loop.toggled.connect(self._on_loop)
         nav_layout.addWidget(self.btn_loop)
 
         main_layout.addWidget(nav_container)
@@ -190,11 +197,12 @@ class TransportBar(QWidget):
         lbl_vol.setStyleSheet("font-size: 9px; font-weight: bold; color: #94a3b8;")
         vol_layout.addWidget(lbl_vol)
 
-        self.slider_master = QSlider(Qt.Horizontal)
+        self.slider_master = ResetableSlider(Qt.Horizontal, default_value=90)
         self.slider_master.setRange(0, 120)
         self.slider_master.setValue(90)
         self.slider_master.setFixedWidth(90)
-        self.slider_master.valueChanged.connect(lambda val: self.master_volume_changed.emit(val / 100.0))
+        self.slider_master.setToolTip("Volume Master : 90% (Double-cliquer pour réinitialiser à 90%)")
+        self.slider_master.valueChanged.connect(self._on_master_slider_changed)
         vol_layout.addWidget(self.slider_master)
 
         main_layout.addWidget(vol_container)
@@ -227,11 +235,33 @@ class TransportBar(QWidget):
         self._forward_timer.stop()
 
     def _on_play(self, checked: bool):
+        set_button_glow(self.btn_play, checked, "#10b981", blur_radius=20, alpha=240)
         self.play_toggled.emit(checked)
 
+    def _on_record(self, checked: bool):
+        set_button_glow(self.btn_record, checked, "#ff2244", blur_radius=20, alpha=240)
+        self.record_toggled.emit(checked)
+
+    def _on_loop(self, checked: bool):
+        set_button_glow(self.btn_loop, checked, "#d97706", blur_radius=15, alpha=210)
+        self.loop_toggled.emit(checked)
+
     def _on_stop(self):
+        self.btn_play.blockSignals(True)
         self.btn_play.setChecked(False)
+        self.btn_play.blockSignals(False)
+        set_button_glow(self.btn_play, False, "#10b981")
+
+        self.btn_record.blockSignals(True)
+        self.btn_record.setChecked(False)
+        self.btn_record.blockSignals(False)
+        set_button_glow(self.btn_record, False, "#ff2244")
+
         self.stop_clicked.emit()
+
+    def _on_master_slider_changed(self, val: int):
+        self.slider_master.setToolTip(f"Volume Master : {val}% (Double-cliquer pour réinitialiser à 90%)")
+        self.master_volume_changed.emit(val / 100.0)
 
     def update_position(self, beat: float, bpm: float):
         bar = int(beat // 4) + 1
@@ -246,4 +276,21 @@ class TransportBar(QWidget):
         self.lbl_time_display.setText(f"00:{mins:02d}:{secs:02d}.{millis:02d}")
 
     def set_playing_state(self, is_playing: bool):
+        self.btn_play.blockSignals(True)
         self.btn_play.setChecked(is_playing)
+        self.btn_play.blockSignals(False)
+        set_button_glow(self.btn_play, is_playing, "#10b981", blur_radius=20, alpha=240)
+
+    def set_recording_state(self, is_recording: bool):
+        self.btn_record.blockSignals(True)
+        self.btn_record.setChecked(is_recording)
+        self.btn_record.blockSignals(False)
+        set_button_glow(self.btn_record, is_recording, "#ff2244", blur_radius=20, alpha=240)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "main_layout") and hasattr(self, "slider_master"):
+            is_compact = self.width() < 1120
+            self.main_layout.setContentsMargins(8 if is_compact else 16, 4, 8 if is_compact else 16, 4)
+            self.main_layout.setSpacing(6 if is_compact else 12)
+            self.slider_master.setFixedWidth(65 if is_compact else 90)

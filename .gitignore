@@ -92,6 +92,7 @@ $RECYCLE.BIN/
 .directory
 
 # --- Fichiers de rendu temporaires ou exports locaux (optionnel) ---
-# Vous pouvez décommenter si vous souhaitez ignorer les gros fichiers audio de test/export :
-# *.wav
-# !assets/**/*.wav
+recordings/
+scratch/
+settings.json
+

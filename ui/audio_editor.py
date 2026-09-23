@@ -13,6 +13,7 @@ from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QPaintEvent
 from PySide6.QtCore import Qt, Signal, QRectF
 from core.project import AudioClip, Track
 from core.audio_engine import AudioEngine
+from core.audio_importer import load_audio_file, QT_FILE_DIALOG_FILTER
 
 
 class WaveformWidget(QWidget):
@@ -86,6 +87,14 @@ class AudioEditor(QWidget):
         self.audio_engine = audio_engine
         self.current_track: Optional[Track] = None
         self.current_clip: Optional[AudioClip] = None
+        self.setObjectName("audio_editor")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet("""
+            QWidget#audio_editor {
+                background-color: #14151b;
+                color: #e2e8f0;
+            }
+        """)
 
         self._init_ui()
 
@@ -102,7 +111,10 @@ class AudioEditor(QWidget):
 
         top_bar.addStretch()
 
-        self.btn_load_wav = QPushButton("📁 Importer fichier WAV...")
+        self.btn_load_wav = QPushButton("📥 Importer Fichier Audio...")
+        self.btn_load_wav.setToolTip("Importer n'importe quel fichier audio (WAV, MP3, FLAC, OGG, AIFF, M4A, etc.)")
+        self.btn_load_wav.setMinimumWidth(180)
+        self.btn_load_wav.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.btn_load_wav.clicked.connect(self._import_wav)
         top_bar.addWidget(self.btn_load_wav)
 
@@ -129,7 +141,8 @@ class AudioEditor(QWidget):
         self.slider_gain = QSlider(Qt.Horizontal)
         self.slider_gain.setRange(0, 200)
         self.slider_gain.setValue(100)
-        self.slider_gain.setFixedWidth(140)
+        self.slider_gain.setMinimumWidth(100)
+        self.slider_gain.setMaximumWidth(160)
         self.slider_gain.valueChanged.connect(self._on_gain_changed)
         ctrl_layout.addWidget(self.slider_gain)
 
@@ -139,9 +152,18 @@ class AudioEditor(QWidget):
 
         layout.addLayout(ctrl_layout)
 
-    def open_clip(self, track: Track, clip: AudioClip):
+    def open_clip(self, track: Optional[Track], clip: Optional[AudioClip]):
         self.current_track = track
         self.current_clip = clip
+
+        if track is None or clip is None:
+            self.lbl_title.setText("🔊 ÉDITEUR AUDIO : Aucun clip sélectionné")
+            self.slider_gain.setValue(100)
+            self.lbl_gain_val.setText("100%")
+            self.waveform.set_audio_data(None)
+            self.lbl_info.setText("Sélectionnez ou double-cliquez sur un clip audio pour l'éditer.")
+            return
+
         self.lbl_title.setText(f"🔊 ÉDITEUR AUDIO : {track.name} ➔ {clip.name}")
 
         self.slider_gain.setValue(int(clip.gain * 100))
@@ -150,10 +172,15 @@ class AudioEditor(QWidget):
         if clip.audio_data is not None:
             self.waveform.set_audio_data(clip.audio_data, clip.sample_rate)
             dur_sec = len(clip.audio_data) / clip.sample_rate
-            self.lbl_info.setText(f"Échantillonnage : {clip.sample_rate} Hz | Durée : {dur_sec:.2f}s | Fichier : {os.path.basename(clip.file_path or '')}")
+            fmt = os.path.splitext(clip.file_path or "")[1].upper().replace(".", "") or "AUDIO"
+            self.lbl_info.setText(f"Format : {fmt} | Échantillonnage : {clip.sample_rate} Hz | Durée : {dur_sec:.2f}s | Fichier : {os.path.basename(clip.file_path or '')}")
         else:
             self.waveform.set_audio_data(None)
             self.lbl_info.setText("Aucun fichier audio chargé")
+
+    def clear(self):
+        """Réinitialise l'éditeur audio à un état vide."""
+        self.open_clip(None, None)
 
     def _import_wav(self):
         if not self.current_clip:
@@ -161,13 +188,14 @@ class AudioEditor(QWidget):
 
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Sélectionner un fichier audio",
+            "Sélectionner un fichier audio (WAV, MP3, FLAC, OGG, AIFF, M4A...)",
             "",
-            "Fichiers Audio (*.wav *.flac *.ogg *.mp3);;Tous les fichiers (*.*)"
+            QT_FILE_DIALOG_FILTER
         )
         if file_path:
             try:
-                data, sr = sf.read(file_path, dtype="float32")
+                target_sr = self.audio_engine.sample_rate if hasattr(self.audio_engine, "sample_rate") else 44100
+                data, sr, dur_sec = load_audio_file(file_path, target_sr=target_sr)
                 self.current_clip.audio_data = data
                 self.current_clip.sample_rate = sr
                 self.current_clip.file_path = file_path
@@ -177,14 +205,13 @@ class AudioEditor(QWidget):
                 bpm = 120.0
                 if hasattr(self.current_track, "bpm"):
                     bpm = self.current_track.bpm
-                dur_sec = len(data) / sr
                 beats = (dur_sec / 60.0) * bpm
-                self.current_clip.length_beats = max(1.0, round(beats))
+                self.current_clip.length_beats = max(1.0, round(beats, 2))
 
                 self.open_clip(self.current_track, self.current_clip)
                 self.clip_modified.emit()
             except Exception as e:
-                print(f"Erreur chargement audio: {e}")
+                print(f"[AudioEditor] Erreur chargement audio: {e}")
 
     def _on_gain_changed(self, val: int):
         if self.current_clip:

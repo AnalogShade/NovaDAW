@@ -5,18 +5,21 @@ Affiche les réglages complets de la piste sélectionnée :
 - Chaîne d'effets d'insert et boutons [e] pour les pistes Audio
 - Faders Volume, Panoramique, Mute, Solo, Record
 """
-from typing import Optional
+from typing import Optional, Any
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QSlider, QComboBox, QFrame, QScrollArea,
-    QFileDialog, QMessageBox
+    QFileDialog, QMessageBox, QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 
 from core.project import Track, Project
 from core.plugin_manager import global_plugin_manager
-from ui.plugin_dialogs import open_plugin_editor_gui
+from ui.plugin_dialogs import open_plugin_editor_gui, open_native_plugin_editor
+from plugins.registry import plugin_registry, ensure_plugins_loaded
+from ui.track_header import ResetableSlider, CompactNumEdit, TrackHeaderWidget
+from ui.glow_effects import set_button_glow
 
 
 class TrackInspector(QFrame):
@@ -31,7 +34,9 @@ class TrackInspector(QFrame):
         self.project = project
         self.current_track: Optional[Track] = None
 
-        self.setFixedWidth(230)
+        self.setMinimumWidth(200)
+        self.setMaximumWidth(550)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.setObjectName("track_inspector")
         self.setStyleSheet("""
             QFrame#track_inspector {
@@ -65,14 +70,18 @@ class TrackInspector(QFrame):
                 selection-background-color: #0284c7;
                 font-size: 11px;
             }
+            QComboBox::drop-down {
+                border: none;
+                width: 16px;
+            }
             QPushButton#btn_edit_plugin {
-                background-color: #1c2638;
+                background-color: #1b2230;
                 color: #38bdf8;
+                border: 1px solid #0284c7;
+                border-radius: 4px;
+                padding: 5px 8px;
                 font-weight: bold;
                 font-size: 11px;
-                border: 1px solid #38bdf8;
-                border-radius: 3px;
-                padding: 5px;
             }
             QPushButton#btn_edit_plugin:hover {
                 background-color: #0284c7;
@@ -124,6 +133,7 @@ class TrackInspector(QFrame):
         # Zone scrollable
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setStyleSheet("border: none; background: transparent;")
         self.content_widget = QWidget()
         self.content_layout = QVBoxLayout(self.content_widget)
@@ -171,11 +181,16 @@ class TrackInspector(QFrame):
         fm_layout.addWidget(lbl_inst_desc)
 
         self.combo_instrument = QComboBox()
+        self.combo_instrument.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.combo_instrument.setMinimumContentsLength(10)
+        self.combo_instrument.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.combo_instrument.currentIndexChanged.connect(self._on_instrument_changed)
         fm_layout.addWidget(self.combo_instrument)
 
-        self.btn_edit_instrument = QPushButton("🎹 Ouvrir Interface Plugin [e]")
+        self.btn_edit_instrument = QPushButton("🎹 Ouvrir Interface [e]")
         self.btn_edit_instrument.setObjectName("btn_edit_plugin")
+        self.btn_edit_instrument.setToolTip("Ouvrir l'interface graphique de l'instrument virtuel [e]")
+        self.btn_edit_instrument.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_edit_instrument.clicked.connect(self._on_open_instrument_editor)
         fm_layout.addWidget(self.btn_edit_instrument)
 
@@ -186,45 +201,47 @@ class TrackInspector(QFrame):
 
         self.content_layout.addWidget(self.frame_midi)
 
-        # 3. SECTION INSERTS (Pour pistes Audio)
-        self.frame_audio = QFrame()
-        self.frame_audio.setStyleSheet("background-color: #181a24; border: 1px solid #232634; border-radius: 4px;")
-        fa_layout = QVBoxLayout(self.frame_audio)
-        fa_layout.setContentsMargins(8, 8, 8, 8)
-        fa_layout.setSpacing(6)
+        # 3. SECTION PILE DE PLUGINS & EFFETS (Pour toutes les pistes : MIDI, Audio, Master)
+        self.frame_plugins = QFrame()
+        self.frame_plugins.setStyleSheet("background-color: #181a24; border: 1px solid #232634; border-radius: 4px;")
+        fp_layout = QVBoxLayout(self.frame_plugins)
+        fp_layout.setContentsMargins(8, 8, 8, 8)
+        fp_layout.setSpacing(6)
 
-        lbl_fx_title = QLabel("EFFETS D'INSERT (AUDIO)")
+        lbl_fx_title = QLabel("PILE DE PLUGINS & EFFETS")
         lbl_fx_title.setObjectName("section_title")
-        fa_layout.addWidget(lbl_fx_title)
+        fp_layout.addWidget(lbl_fx_title)
 
         lbl_fx_desc = QLabel("Chaîne de traitement sonore :")
-        fa_layout.addWidget(lbl_fx_desc)
+        fp_layout.addWidget(lbl_fx_desc)
 
-        self.inserts_container = QVBoxLayout()
-        self.inserts_container.setSpacing(4)
-        fa_layout.addLayout(self.inserts_container)
+        self.plugins_container = QVBoxLayout()
+        self.plugins_container.setSpacing(4)
+        fp_layout.addLayout(self.plugins_container)
 
-        self.btn_add_insert = QPushButton("+ Ajouter un effet d'insert")
-        self.btn_add_insert.setStyleSheet("""
+        self.btn_add_plugin = QPushButton("+ Ajouter un Plugin...")
+        self.btn_add_plugin.setStyleSheet("""
             QPushButton {
-                background-color: #202330;
-                color: #a855f7;
-                border: 1px dashed #a855f7;
+                background-color: #1a2233;
+                color: #38bdf8;
+                border: 1px dashed #38bdf8;
                 border-radius: 3px;
-                padding: 4px;
+                padding: 6px;
                 font-size: 11px;
+                font-weight: bold;
             }
-            QPushButton:hover { background-color: #2b3044; }
+            QPushButton:hover { background-color: #243048; color: #ffffff; }
         """)
-        self.btn_add_insert.clicked.connect(self._add_insert_slot)
-        fa_layout.addWidget(self.btn_add_insert)
+        self.btn_add_plugin.clicked.connect(self._show_add_plugin_menu)
+        fp_layout.addWidget(self.btn_add_plugin)
 
-        self.content_layout.addWidget(self.frame_audio)
+        self.content_layout.addWidget(self.frame_plugins)
 
         # 4. SECTION MIXEUR (Volume / Pan / Mute / Solo)
-        frame_mix = QFrame()
-        frame_mix.setStyleSheet("background-color: #181a24; border: 1px solid #232634; border-radius: 4px;")
-        fmix_layout = QVBoxLayout(frame_mix)
+        self.frame_mix = QFrame()
+        self.frame_mix.setObjectName("frame_mix")
+        self.frame_mix.setStyleSheet("QFrame#frame_mix { background-color: #181a24; border: 1px solid #232634; border-radius: 4px; }")
+        fmix_layout = QVBoxLayout(self.frame_mix)
         fmix_layout.setContentsMargins(8, 8, 8, 8)
         fmix_layout.setSpacing(6)
 
@@ -237,23 +254,26 @@ class TrackInspector(QFrame):
         row_msr.setSpacing(6)
 
         self.btn_mute = QPushButton("M")
+        self.btn_mute.setObjectName("btn_track_mute")
         self.btn_mute.setCheckable(True)
-        self.btn_mute.setFixedSize(24, 24)
-        self.btn_mute.setStyleSheet("font-weight: bold;")
+        self.btn_mute.setFixedSize(26, 24)
+        self.btn_mute.setToolTip("Mute (Couper le son)")
         self.btn_mute.toggled.connect(self._on_mute_toggled)
         row_msr.addWidget(self.btn_mute)
 
         self.btn_solo = QPushButton("S")
+        self.btn_solo.setObjectName("btn_track_solo")
         self.btn_solo.setCheckable(True)
-        self.btn_solo.setFixedSize(24, 24)
-        self.btn_solo.setStyleSheet("font-weight: bold;")
+        self.btn_solo.setFixedSize(26, 24)
+        self.btn_solo.setToolTip("Solo (Écouter cette piste uniquement)")
         self.btn_solo.toggled.connect(self._on_solo_toggled)
         row_msr.addWidget(self.btn_solo)
 
         self.btn_rec = QPushButton("R")
+        self.btn_rec.setObjectName("btn_track_rec")
         self.btn_rec.setCheckable(True)
-        self.btn_rec.setFixedSize(24, 24)
-        self.btn_rec.setStyleSheet("font-weight: bold;")
+        self.btn_rec.setFixedSize(26, 24)
+        self.btn_rec.setToolTip("Armer pour l'enregistrement (R)")
         self.btn_rec.toggled.connect(self._on_rec_toggled)
         row_msr.addWidget(self.btn_rec)
 
@@ -262,30 +282,40 @@ class TrackInspector(QFrame):
         # Volume
         row_v = QHBoxLayout()
         row_v.addWidget(QLabel("Volume"))
-        self.lbl_vol_val = QLabel("80%")
-        self.lbl_vol_val.setAlignment(Qt.AlignRight)
-        row_v.addWidget(self.lbl_vol_val)
+        self.txt_vol = CompactNumEdit("80%")
+        self.txt_vol.setFixedWidth(46)
+        self.txt_vol.setFixedHeight(18)
+        self.txt_vol.setToolTip("Volume manuel (ex: 80, 100%, 0.8) - Entrée pour valider")
+        self.txt_vol.editingFinished.connect(self._on_vol_text_edited)
+        self.lbl_vol_val = self.txt_vol
+        row_v.addWidget(self.txt_vol, alignment=Qt.AlignRight)
         fmix_layout.addLayout(row_v)
 
-        self.slider_vol = QSlider(Qt.Horizontal)
+        self.slider_vol = ResetableSlider(Qt.Horizontal, default_value=80)
         self.slider_vol.setRange(0, 150)
+        self.slider_vol.setToolTip("Volume (Double-cliquer pour réinitialiser à 80%)")
         self.slider_vol.valueChanged.connect(self._on_vol_changed)
         fmix_layout.addWidget(self.slider_vol)
 
         # Panoramique
         row_p = QHBoxLayout()
         row_p.addWidget(QLabel("Pan"))
-        self.lbl_pan_val = QLabel("Centre")
-        self.lbl_pan_val.setAlignment(Qt.AlignRight)
-        row_p.addWidget(self.lbl_pan_val)
+        self.txt_pan = CompactNumEdit("Centre")
+        self.txt_pan.setFixedWidth(46)
+        self.txt_pan.setFixedHeight(18)
+        self.txt_pan.setToolTip("Panoramique manuel (ex: C, L30, R40, -20) - Entrée pour valider")
+        self.txt_pan.editingFinished.connect(self._on_pan_text_edited)
+        self.lbl_pan_val = self.txt_pan
+        row_p.addWidget(self.txt_pan, alignment=Qt.AlignRight)
         fmix_layout.addLayout(row_p)
 
-        self.slider_pan = QSlider(Qt.Horizontal)
+        self.slider_pan = ResetableSlider(Qt.Horizontal, default_value=0)
         self.slider_pan.setRange(-100, 100)
+        self.slider_pan.setToolTip("Panoramique (Double-cliquer pour réinitialiser au centre)")
         self.slider_pan.valueChanged.connect(self._on_pan_changed)
         fmix_layout.addWidget(self.slider_pan)
 
-        self.content_layout.addWidget(frame_mix)
+        self.content_layout.addWidget(self.frame_mix)
         self.content_layout.addStretch()
 
         # Message aucun piste sélectionnée
@@ -300,41 +330,84 @@ class TrackInspector(QFrame):
         if track is None:
             self.card_info.setVisible(False)
             self.frame_midi.setVisible(False)
-            self.frame_audio.setVisible(False)
+            self.frame_plugins.setVisible(False)
+            if hasattr(self, "frame_mix"):
+                self.frame_mix.setVisible(False)
             self.lbl_no_track.setVisible(True)
             return
 
         self.lbl_no_track.setVisible(False)
         self.card_info.setVisible(True)
+        if hasattr(self, "frame_mix"):
+            self.frame_mix.setVisible(True)
 
         # 1. Infos générales
-        self.lbl_icon.setText("🎹" if track.track_type == "midi" else "🔊")
-        self.txt_name.setText(track.name)
-        type_desc = "Piste MIDI (Instrument Virtuel)" if track.track_type == "midi" else "Piste Audio (Enregistrement/Samples)"
-        self.lbl_type.setText(type_desc)
-        self.lbl_type.setStyleSheet("font-size: 10px; color: " + ("#38bdf8;" if track.track_type == "midi" else "#10b981;"))
+        if track.track_type == "midi":
+            icon = "🎹"
+            type_desc = "Piste MIDI (Instrument Virtuel)"
+            color_code = "#38bdf8;"
+        elif track.track_type == "master":
+            icon = "🎛️"
+            type_desc = "Piste Master (Bus Stéréo)"
+            color_code = "#ef4444;"
+        else:
+            icon = "🔊"
+            type_desc = "Piste Audio (Enregistrement/Samples)"
+            color_code = "#10b981;"
 
-        # 2. Affichage conditionnel MIDI vs Audio
+        self.lbl_icon.setText(icon)
+        self.txt_name.setText(track.name)
+        self.lbl_type.setText(type_desc)
+        self.lbl_type.setStyleSheet("font-size: 10px; color: " + color_code)
+
+        # 2. Affichage conditionnel MIDI vs Plugins
+        self.frame_plugins.setVisible(True)
         if track.track_type == "midi":
             self.frame_midi.setVisible(True)
-            self.frame_audio.setVisible(False)
             self._populate_instrument_combo()
         else:
             self.frame_midi.setVisible(False)
-            self.frame_audio.setVisible(True)
-            self._rebuild_insert_slots()
+
+        self._rebuild_plugin_stack()
 
         # 3. Contrôles de mixage
+        self.sync_controls_from_track()
+
+    def sync_controls_from_track(self):
+        """Synchronise l'ensemble des boutons et faders avec l'objet Track courant."""
+        if not self.current_track:
+            return
+        track = self.current_track
+        self.btn_mute.blockSignals(True)
         self.btn_mute.setChecked(track.muted)
+        self.btn_mute.blockSignals(False)
+        set_button_glow(self.btn_mute, track.muted, "#f59e0b", blur_radius=14, alpha=220)
+
+        self.btn_solo.blockSignals(True)
         self.btn_solo.setChecked(track.soloed)
+        self.btn_solo.blockSignals(False)
+        set_button_glow(self.btn_solo, track.soloed, "#facc15", blur_radius=14, alpha=220)
+
+        self.btn_rec.blockSignals(True)
         self.btn_rec.setChecked(track.armed)
+        self.btn_rec.blockSignals(False)
+        set_button_glow(self.btn_rec, track.armed, "#ff2244", blur_radius=16, alpha=235)
 
-        self.slider_vol.setValue(int(track.volume * 100))
-        self.lbl_vol_val.setText(f"{int(track.volume * 100)}%")
-
-        self.slider_pan.setValue(int(track.pan * 100))
-        pan_val = int(track.pan * 100)
-        self.lbl_pan_val.setText("Centre" if pan_val == 0 else (f"G{abs(pan_val)}" if pan_val < 0 else f"D{pan_val}"))
+        if hasattr(self, "slider_vol"):
+            self.slider_vol.blockSignals(True)
+            self.slider_vol.setValue(int(round(track.volume * 100)))
+            self.slider_vol.blockSignals(False)
+        if hasattr(self, "lbl_vol_val") and hasattr(self.lbl_vol_val, "hasFocus") and not self.lbl_vol_val.hasFocus():
+            self.lbl_vol_val.setText(f"{int(round(track.volume * 100))}%")
+        if hasattr(self, "slider_pan"):
+            self.slider_pan.blockSignals(True)
+            self.slider_pan.setValue(int(round(track.pan * 100)))
+            self.slider_pan.blockSignals(False)
+        if hasattr(self, "lbl_pan_val") and hasattr(self.lbl_pan_val, "hasFocus") and not self.lbl_pan_val.hasFocus():
+            pan_val = int(round(track.pan * 100))
+            self.lbl_pan_val.setText("Centre" if pan_val == 0 else (f"G{abs(pan_val)}" if pan_val < 0 else f"D{pan_val}"))
+        if hasattr(self, "txt_name") and not self.txt_name.hasFocus():
+            self.txt_name.setText(track.name)
 
     def _update_instrument_status_label(self):
         """Affiche un badge explicatif transparent sur le mode de rendu audio de l'instrument sélectionné"""
@@ -360,6 +433,22 @@ class TrackInspector(QFrame):
             self.lbl_inst_status.setText(
                 "ℹ️ <b>Synthétiseur Interne NovaDAW</b><br>"
                 "Synthèse polyphonique intégrée avec enveloppe ADSR."
+            )
+            self.lbl_inst_status.setVisible(True)
+        elif plugin_path == "novadaw.drum_machine":
+            self.lbl_inst_status.setStyleSheet("""
+                QLabel {
+                    background-color: #0f291e;
+                    color: #4ade80;
+                    border: 1px solid #16a34a;
+                    border-radius: 4px;
+                    padding: 6px;
+                    font-size: 11px;
+                }
+            """)
+            self.lbl_inst_status.setText(
+                "🥁 <b>Nova Drums VSTi Actif</b><br>"
+                "Échantillonneur de batterie FP32 avec réverbération stéréo intégrée."
             )
             self.lbl_inst_status.setVisible(True)
         elif is_multibus:
@@ -408,24 +497,27 @@ class TrackInspector(QFrame):
         # Option 1 : Synthé interne
         self.combo_instrument.addItem("🎹 Synthé Interne NovaDAW", userData=None)
 
+        # Option 2 : Nova Drums VSTi
+        self.combo_instrument.addItem("🥁 Nova Drums VSTi (Batterie IA)", userData="novadaw.drum_machine")
+
         def format_inst_label(name: str) -> str:
             is_multibus = any(k.lower() in name.lower() for k in ["kontakt", "sampletank"])
             return f"🎹 {name} (Sampler Multi-bus) ⚠️" if is_multibus else f"🎹 {name} (VST3 Direct) ✅"
 
-        # Option 2 : Instruments du Rack du projet
+        # Option 3 : Instruments du Rack du projet
         rack_insts = [p for p in self.project.plugin_rack if p.get("plugin_type") == "instrument"]
         if rack_insts:
             for r in rack_insts:
                 self.combo_instrument.addItem(format_inst_label(r['name']) + " (Rack)", userData=r["file_path"])
 
-        # Option 3 : Tous les instruments compatibles scannés
+        # Option 4 : Tous les instruments compatibles scannés
         all_insts = global_plugin_manager.get_compatible_instruments()
         for inst in all_insts:
             # Éviter doublons déjà dans le rack
             if not any(r.get("file_path") == inst.file_path for r in rack_insts):
                 self.combo_instrument.addItem(format_inst_label(inst.name), userData=inst.file_path)
 
-        # Option 4 : Charger manuellement un .vst3
+        # Option 5 : Charger manuellement un .vst3
         self.combo_instrument.addItem("➕ Charger un fichier .vst3...", userData="__ADD_FILE__")
 
         # Sélectionner le plugin actuel de la piste
@@ -467,7 +559,19 @@ class TrackInspector(QFrame):
                 self._populate_instrument_combo()
             return
 
-        if data:
+        if data == "novadaw.drum_machine":
+            self.current_track.plugin_path = "novadaw.drum_machine"
+            self.current_track.plugin_name = "Nova Drums VSTi"
+            # S'assurer que le plugin est dans track.plugins
+            has_drums = any(getattr(p, "plugin_type_id", None) == "novadaw.drum_machine" for p in self.current_track.plugins)
+            if not has_drums:
+                ensure_plugins_loaded()
+                dp = plugin_registry.create_plugin("novadaw.drum_machine")
+                if dp:
+                    self.current_track.plugins.insert(0, dp)
+            self.btn_edit_instrument.setEnabled(True)
+            self._rebuild_plugin_stack()
+        elif data:
             self.current_track.plugin_path = data
             raw_text = self.combo_instrument.currentText()
             cleaned = raw_text.replace("🎹 ", "").replace(" (Rack)", "")
@@ -505,126 +609,328 @@ class TrackInspector(QFrame):
                 self.btn_edit_instrument.setText("🎹 Ouvrir Interface Plugin [e]")
                 self.btn_edit_instrument.setStyleSheet("")
                 self.btn_edit_instrument.setToolTip("Éditer l'instrument VST3")
-        elif self.current_track and self.current_track.track_type == "audio":
-            self._rebuild_insert_slots()
+        else:
+            self._rebuild_plugin_stack()
 
     def _on_open_instrument_editor(self):
-        if self.current_track and self.current_track.plugin_path:
+        if not self.current_track:
+            return
+        if self.current_track.plugin_path == "novadaw.drum_machine":
+            drum_plugin = None
+            for p in self.current_track.plugins:
+                if getattr(p, "plugin_type_id", None) == "novadaw.drum_machine":
+                    drum_plugin = p
+                    break
+            if not drum_plugin:
+                ensure_plugins_loaded()
+                drum_plugin = plugin_registry.create_plugin("novadaw.drum_machine")
+                if drum_plugin:
+                    self.current_track.plugins.insert(0, drum_plugin)
+            if drum_plugin:
+                open_native_plugin_editor(drum_plugin, self)
+        elif self.current_track.plugin_path:
             open_plugin_editor_gui(self.current_track.plugin_path, self)
 
-    def _rebuild_insert_slots(self):
-        """Reconstruit la liste des slots d'effets d'insert pour la piste audio"""
-        while self.inserts_container.count() > 0:
-            item = self.inserts_container.takeAt(0)
+    def _show_add_plugin_menu(self):
+        """Affiche le menu de sélection de plugin à empiler sur la piste"""
+        if not self.current_track:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1a1e29;
+                color: #f1f5f9;
+                border: 1px solid #2d3748;
+                font-size: 11px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 20px 6px 10px;
+                border-radius: 3px;
+            }
+            QMenu::item:selected {
+                background-color: #0284c7;
+                color: #ffffff;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #2d3748;
+                margin: 4px 6px;
+            }
+        """)
+
+        # 1. Plugins NovaDAW intégrés
+        act_drums = menu.addAction("🥁 Nova Drums (Instrument VSTi Batterie)")
+        act_drums.triggered.connect(self._add_drum_plugin)
+
+        act_eq = menu.addAction("📊 Égaliseur Paramétrique (3/10/12/24 bandes)")
+        act_eq.triggered.connect(self._add_equalizer_plugin)
+
+        act_comp = menu.addAction("🗜️ Compresseur Dynamique (Studio)")
+        act_comp.triggered.connect(self._add_compressor_plugin)
+
+        act_mix = menu.addAction("🎛️ Mixeur de Pistes")
+        act_mix.triggered.connect(self._add_mixer_plugin)
+
+        menu.addSeparator()
+
+        # 2. Plugins VST3 externes scannés
+        effects = global_plugin_manager.get_compatible_effects()
+        if effects:
+            menu_vst = menu.addMenu("📁 Effets VST3 externes...")
+            menu_vst.setStyleSheet(menu.styleSheet())
+            for fx in effects:
+                act_fx = menu_vst.addAction(f"🎛️ {fx.name}")
+                act_fx.triggered.connect(lambda _, path=fx.file_path: self._add_vst_plugin(path))
+
+        act_browse = menu.addAction("➕ Parcourir un fichier .vst3...")
+        act_browse.triggered.connect(self._browse_vst_insert)
+
+        menu.exec(self.btn_add_plugin.mapToGlobal(self.btn_add_plugin.rect().bottomLeft()))
+
+    def _add_drum_plugin(self):
+        if not self.current_track:
+            return
+        ensure_plugins_loaded()
+        drums = plugin_registry.create_plugin("novadaw.drum_machine")
+        if drums:
+            self.current_track.add_plugin(drums)
+            if self.current_track.track_type == "midi":
+                self.current_track.plugin_path = "novadaw.drum_machine"
+                self.current_track.plugin_name = "Nova Drums VSTi"
+                self._populate_instrument_combo()
+            self._rebuild_plugin_stack()
+            self.track_modified.emit()
+            open_native_plugin_editor(drums, self)
+
+    def _add_equalizer_plugin(self):
+        if not self.current_track:
+            return
+        ensure_plugins_loaded()
+        eq = plugin_registry.create_plugin("novadaw.equalizer")
+        if eq:
+            self.current_track.add_plugin(eq)
+            self._rebuild_plugin_stack()
+            self.track_modified.emit()
+            open_native_plugin_editor(eq, self)
+
+    def _add_compressor_plugin(self):
+        if not self.current_track:
+            return
+        ensure_plugins_loaded()
+        comp = plugin_registry.create_plugin("novadaw.compressor")
+        if comp:
+            self.current_track.add_plugin(comp)
+            self._rebuild_plugin_stack()
+            self.track_modified.emit()
+            open_native_plugin_editor(comp, self)
+
+    def _add_mixer_plugin(self):
+        if not self.current_track:
+            return
+        ensure_plugins_loaded()
+        mixer = plugin_registry.create_plugin("novadaw.mixer")
+        if mixer:
+            if hasattr(mixer, "set_project"):
+                mixer.set_project(self.project)
+            self.current_track.add_plugin(mixer)
+            self._rebuild_plugin_stack()
+            self.track_modified.emit()
+            open_native_plugin_editor(mixer, self)
+
+    def _add_vst_plugin(self, file_path: str):
+        if not self.current_track:
+            return
+        if not hasattr(self.current_track, "insert_effects"):
+            self.current_track.insert_effects = []
+        self.current_track.insert_effects.append(file_path)
+        self._rebuild_plugin_stack()
+        self.track_modified.emit()
+
+    def _browse_vst_insert(self):
+        if not self.current_track:
+            return
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Sélectionner un effet VST3",
+            "",
+            "Plugins VST3 (*.vst3);;Tous les fichiers (*.*)"
+        )
+        if file_path:
+            info = global_plugin_manager.add_plugin_file(file_path)
+            if info.is_compatible:
+                self._add_vst_plugin(file_path)
+            else:
+                QMessageBox.warning(self, "Incompatible", f"Le plugin n'a pas pu être chargé :\n{info.error_message}")
+
+    def _rebuild_plugin_stack(self):
+        """Reconstruit visuellement la pile d'effets/plugins de la piste active"""
+        while self.plugins_container.count() > 0:
+            item = self.plugins_container.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
-        if not self.current_track or self.current_track.track_type != "audio":
-            return
-
-        effects = global_plugin_manager.get_compatible_effects()
-        if not hasattr(self.current_track, "insert_effects"):
-            self.current_track.insert_effects = []
-
-        # Afficher chaque slot configuré + 1 slot vide si la liste est vide
-        slots_to_show = list(self.current_track.insert_effects)
-        if len(slots_to_show) == 0:
-            slots_to_show.append(None)
-
-        for slot_idx, fx_path in enumerate(slots_to_show):
-            row = QHBoxLayout()
-            row.setSpacing(4)
-
-            combo = QComboBox()
-            combo.setFixedHeight(22)
-            combo.addItem(f"Slot {slot_idx + 1} : [ Aucun effet ]", userData=None)
-            selected_idx = 0
-            for idx, fx in enumerate(effects, start=1):
-                combo.addItem(f"🎛️ {fx.name}", userData=fx.file_path)
-                if fx_path and fx.file_path == fx_path:
-                    selected_idx = idx
-
-            combo.setCurrentIndex(selected_idx)
-            combo.currentIndexChanged.connect(lambda idx, s=slot_idx, c=combo: self._on_insert_changed(s, c))
-            row.addWidget(combo, stretch=1)
-
-            # Bouton [e] pour éditer l'effet
-            btn_e = QPushButton("e")
-            btn_e.setFixedSize(20, 20)
-            is_fx_open = global_plugin_manager.is_editor_open(fx_path) if fx_path else False
-            if is_fx_open:
-                btn_e.setStyleSheet("""
-                    QPushButton {
-                        background-color: #7e22ce;
-                        color: #ffffff;
-                        font-weight: bold;
-                        border: 1px solid #c084fc;
-                        border-radius: 3px;
-                    }
-                    QPushButton:hover { background-color: #9333ea; }
-                """)
-                btn_e.setToolTip("Interface de l'effet ouverte (Cliquer pour fermer)")
-            else:
-                btn_e.setStyleSheet("""
-                    QPushButton {
-                        background-color: #1e2230;
-                        color: #a855f7;
-                        font-weight: bold;
-                        border: 1px solid #a855f7;
-                        border-radius: 3px;
-                    }
-                    QPushButton:hover { background-color: #a855f7; color: #ffffff; }
-                    QPushButton:disabled { border-color: #2b2e3e; color: #475569; background: transparent; }
-                """)
-                btn_e.setToolTip("Éditer les paramètres de cet effet VST")
-            btn_e.setEnabled(bool(fx_path))
-            if fx_path:
-                btn_e.clicked.connect(lambda _, p=fx_path: open_plugin_editor_gui(p, self))
-            row.addWidget(btn_e)
-
-            # Bouton [✕] pour vider le slot
-            btn_x = QPushButton("✕")
-            btn_x.setFixedSize(18, 18)
-            btn_x.setStyleSheet("background: transparent; border: none; color: #64748b; font-size: 10px;")
-            btn_x.clicked.connect(lambda _, s=slot_idx: self._remove_insert_slot(s))
-            row.addWidget(btn_x)
-
-            slot_frame = QFrame()
-            slot_frame.setLayout(row)
-            self.inserts_container.addWidget(slot_frame)
-
-    def _add_insert_slot(self):
-        if self.current_track:
-            if not hasattr(self.current_track, "insert_effects"):
-                self.current_track.insert_effects = []
-            self.current_track.insert_effects.append("")
-            self._rebuild_insert_slots()
-
-    def _on_insert_changed(self, slot_idx: int, combo: QComboBox):
         if not self.current_track:
             return
-        path = combo.currentData()
-        if not hasattr(self.current_track, "insert_effects"):
-            self.current_track.insert_effects = []
 
-        while len(self.current_track.insert_effects) <= slot_idx:
-            self.current_track.insert_effects.append("")
+        if not hasattr(self.current_track, "plugins"):
+            self.current_track.plugins = []
 
-        if path:
-            self.current_track.insert_effects[slot_idx] = path
-        else:
-            self.current_track.insert_effects[slot_idx] = ""
+        total_plugins = len(self.current_track.plugins)
 
-        # Nettoyer les slots vides à la fin
-        self.current_track.insert_effects = [p for p in self.current_track.insert_effects if p]
-        self._rebuild_insert_slots()
+        # 1. Rendu des plugins natifs empilés
+        for p_idx, plugin in enumerate(self.current_track.plugins):
+            card = QFrame()
+            card.setStyleSheet("""
+                QFrame {
+                    background-color: #1a1d29;
+                    border: 1px solid #2b3044;
+                    border-radius: 4px;
+                }
+                QFrame:hover {
+                    border-color: #38bdf8;
+                }
+            """)
+            card_layout = QHBoxLayout(card)
+            card_layout.setContentsMargins(5, 3, 5, 3)
+            card_layout.setSpacing(3)
+
+            # Numéro et Nom du plugin
+            lbl_title = QLabel(f"{p_idx + 1}. {plugin.icon} {plugin.name}")
+            lbl_title.setStyleSheet("font-size: 10px; font-weight: bold; color: #f1f5f9;")
+            lbl_title.setToolTip(getattr(plugin, "description", plugin.name))
+            card_layout.addWidget(lbl_title, stretch=1)
+
+            # Bouton On / Bypass
+            btn_bypass = QPushButton("On" if plugin.enabled else "Bypass")
+            btn_bypass.setCheckable(True)
+            btn_bypass.setChecked(plugin.enabled)
+            btn_bypass.setFixedSize(36, 18)
+            btn_bypass.setStyleSheet("""
+                QPushButton {
+                    background-color: #064e3b;
+                    color: #34d399;
+                    font-size: 9px;
+                    font-weight: bold;
+                    border: 1px solid #059669;
+                    border-radius: 2px;
+                }
+                QPushButton:!checked {
+                    background-color: #262626;
+                    color: #737373;
+                    border-color: #404040;
+                }
+            """)
+            btn_bypass.toggled.connect(lambda chk, p=plugin, b=btn_bypass: self._on_plugin_bypass_toggled(chk, p, b))
+            card_layout.addWidget(btn_bypass)
+
+            # Bouton [e] d'ouverture d'interface graphique
+            btn_e = QPushButton("e")
+            btn_e.setFixedSize(18, 18)
+            btn_e.setToolTip("Ouvrir l'interface graphique [e]")
+            btn_e.setStyleSheet("""
+                QPushButton {
+                    background-color: #1e293b;
+                    color: #38bdf8;
+                    font-weight: bold;
+                    font-size: 11px;
+                    border: 1px solid #0284c7;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #0284c7;
+                    color: #ffffff;
+                }
+            """)
+            btn_e.clicked.connect(lambda _, p=plugin: open_native_plugin_editor(p, self))
+            card_layout.addWidget(btn_e)
+
+            # Bouton Monter [▲]
+            btn_up = QPushButton("▲")
+            btn_up.setFixedSize(18, 18)
+            btn_up.setEnabled(p_idx > 0)
+            btn_up.setStyleSheet("background: transparent; border: none; color: #94a3b8; font-size: 9px; padding: 0px;")
+            btn_up.clicked.connect(lambda _, idx=p_idx: self._move_plugin_up(idx))
+            card_layout.addWidget(btn_up)
+
+            # Bouton Descendre [▼]
+            btn_down = QPushButton("▼")
+            btn_down.setFixedSize(18, 18)
+            btn_down.setEnabled(p_idx < total_plugins - 1)
+            btn_down.setStyleSheet("background: transparent; border: none; color: #94a3b8; font-size: 9px; padding: 0px;")
+            btn_down.clicked.connect(lambda _, idx=p_idx: self._move_plugin_down(idx))
+            card_layout.addWidget(btn_down)
+
+            # Bouton Supprimer [✕]
+            btn_del = QPushButton("✕")
+            btn_del.setFixedSize(18, 18)
+            btn_del.setStyleSheet("background: transparent; border: none; color: #f87171; font-size: 11px; padding: 0px;")
+            btn_del.setToolTip("Supprimer ce plugin de la pile")
+            btn_del.clicked.connect(lambda _, p=plugin: self._remove_plugin(p))
+            card_layout.addWidget(btn_del)
+
+            self.plugins_container.addWidget(card)
+
+        # 2. Rendu des effets VST3 de la piste
+        if hasattr(self.current_track, "insert_effects") and self.current_track.insert_effects:
+            for s_idx, fx_path in enumerate(self.current_track.insert_effects):
+                fx_name = os.path.splitext(os.path.basename(fx_path))[0]
+                card = QFrame()
+                card.setStyleSheet("background-color: #161822; border: 1px solid #3b3054; border-radius: 4px;")
+                row = QHBoxLayout(card)
+                row.setContentsMargins(5, 3, 5, 3)
+                row.setSpacing(3)
+
+                lbl = QLabel(f"VST: 🎛️ {fx_name}")
+                lbl.setStyleSheet("font-size: 10px; color: #c084fc; font-weight: bold;")
+                row.addWidget(lbl, stretch=1)
+
+                btn_e = QPushButton("e")
+                btn_e.setFixedSize(18, 18)
+                btn_e.setStyleSheet("background-color: #2e1065; color: #c084fc; font-weight: bold; border: 1px solid #7e22ce; border-radius: 3px;")
+                btn_e.clicked.connect(lambda _, p=fx_path: open_plugin_editor_gui(p, self))
+                row.addWidget(btn_e)
+
+                btn_del = QPushButton("✕")
+                btn_del.setFixedSize(16, 18)
+                btn_del.setStyleSheet("background: transparent; border: none; color: #64748b; font-size: 10px;")
+                btn_del.clicked.connect(lambda _, idx=s_idx: self._remove_vst_slot(idx))
+                row.addWidget(btn_del)
+
+                self.plugins_container.addWidget(card)
+
+        if total_plugins == 0 and (not hasattr(self.current_track, "insert_effects") or not self.current_track.insert_effects):
+            lbl_empty = QLabel("Aucun plugin dans la pile.\nCliquez sur '+ Ajouter un Plugin...'")
+            lbl_empty.setAlignment(Qt.AlignCenter)
+            lbl_empty.setStyleSheet("color: #64748b; font-size: 10px; font-style: italic; padding: 10px 0;")
+            self.plugins_container.addWidget(lbl_empty)
+
+    def _on_plugin_bypass_toggled(self, chk: bool, plugin: Any, btn: QPushButton):
+        plugin.enabled = chk
+        btn.setText("On" if chk else "Bypass")
         self.track_modified.emit()
 
-    def _remove_insert_slot(self, slot_idx: int):
+    def _move_plugin_up(self, idx: int):
+        if self.current_track and self.current_track.move_plugin(idx, idx - 1):
+            self._rebuild_plugin_stack()
+            self.track_modified.emit()
+
+    def _move_plugin_down(self, idx: int):
+        if self.current_track and self.current_track.move_plugin(idx, idx + 1):
+            self._rebuild_plugin_stack()
+            self.track_modified.emit()
+
+    def _remove_plugin(self, plugin: Any):
+        if self.current_track:
+            self.current_track.remove_plugin(plugin.instance_id)
+            self._rebuild_plugin_stack()
+            self.track_modified.emit()
+
+    def _remove_vst_slot(self, slot_idx: int):
         if self.current_track and hasattr(self.current_track, "insert_effects"):
             if 0 <= slot_idx < len(self.current_track.insert_effects):
                 self.current_track.insert_effects.pop(slot_idx)
-                self._rebuild_insert_slots()
+                self._rebuild_plugin_stack()
                 self.track_modified.emit()
 
     def _on_name_changed(self):
@@ -635,16 +941,19 @@ class TrackInspector(QFrame):
                 self.track_modified.emit()
 
     def _on_mute_toggled(self, checked: bool):
+        set_button_glow(self.btn_mute, checked, "#f59e0b", blur_radius=14, alpha=220)
         if self.current_track:
             self.current_track.muted = checked
             self.track_modified.emit()
 
     def _on_solo_toggled(self, checked: bool):
+        set_button_glow(self.btn_solo, checked, "#facc15", blur_radius=14, alpha=220)
         if self.current_track:
             self.current_track.soloed = checked
             self.track_modified.emit()
 
     def _on_rec_toggled(self, checked: bool):
+        set_button_glow(self.btn_rec, checked, "#ff2244", blur_radius=16, alpha=235)
         if self.current_track:
             self.current_track.armed = checked
             self.track_modified.emit()
@@ -652,14 +961,40 @@ class TrackInspector(QFrame):
     def _on_vol_changed(self, val: int):
         if self.current_track:
             self.current_track.volume = val / 100.0
-            self.lbl_vol_val.setText(f"{val}%")
+            self.slider_vol.setToolTip(f"Volume : {val}% (Double-cliquer pour réinitialiser à 80%)")
+            if hasattr(self, "txt_vol") and not self.txt_vol.hasFocus():
+                self.txt_vol.setText(f"{val}%")
             self.track_modified.emit()
+
+    def _on_vol_text_edited(self):
+        if self.current_track and hasattr(self, "txt_vol"):
+            parsed = TrackHeaderWidget._parse_vol_text(self.txt_vol.text())
+            if parsed is not None:
+                self.slider_vol.setValue(parsed)
+                self.txt_vol.setText(f"{parsed}%")
+            else:
+                self.txt_vol.setText(f"{self.slider_vol.value()}%")
 
     def _on_pan_changed(self, val: int):
         if self.current_track:
             self.current_track.pan = val / 100.0
-            self.lbl_pan_val.setText("Centre" if val == 0 else (f"G{abs(val)}" if val < 0 else f"D{val}"))
+            pan_str = "Centre" if val == 0 else (f"L{abs(val)}" if val < 0 else f"R{val}")
+            self.slider_pan.setToolTip(f"Pan : {pan_str} (Double-cliquer pour réinitialiser au centre)")
+            if hasattr(self, "txt_pan") and not self.txt_pan.hasFocus():
+                self.txt_pan.setText(pan_str)
             self.track_modified.emit()
+
+    def _on_pan_text_edited(self):
+        if self.current_track and hasattr(self, "txt_pan"):
+            parsed = TrackHeaderWidget._parse_pan_text(self.txt_pan.text())
+            if parsed is not None:
+                self.slider_pan.setValue(parsed)
+                pan_str = "Centre" if parsed == 0 else (f"L{abs(parsed)}" if parsed < 0 else f"R{parsed}")
+                self.txt_pan.setText(pan_str)
+            else:
+                v = self.slider_pan.value()
+                pan_str = "Centre" if v == 0 else (f"L{abs(v)}" if v < 0 else f"R{v}")
+                self.txt_pan.setText(pan_str)
 
     def _refresh_plugin_lists(self):
         if self.current_track:

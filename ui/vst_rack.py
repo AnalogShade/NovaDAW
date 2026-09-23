@@ -6,7 +6,7 @@ chargés globalement dans le projet indépendamment des pistes.
 from typing import Optional
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QScrollArea, QMenu, QFileDialog, QMessageBox
+    QFrame, QScrollArea, QMenu, QFileDialog, QMessageBox, QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
@@ -26,8 +26,10 @@ class VstRackWidget(QWidget):
     def __init__(self, project: Project, parent=None):
         super().__init__(parent)
         self.project = project
+        self.setObjectName("vst_rack")
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet("""
-            QWidget {
+            QWidget#vst_rack {
                 background-color: #14151c;
                 color: #e2e8f0;
             }
@@ -85,14 +87,20 @@ class VstRackWidget(QWidget):
 
         self.btn_add_inst = QPushButton("+ Charger un Instrument...")
         self.btn_add_inst.setObjectName("btn_add")
+        self.btn_add_inst.setMinimumWidth(160)
+        self.btn_add_inst.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.btn_add_inst.clicked.connect(self._show_add_instrument_menu)
         top_bar.addWidget(self.btn_add_inst)
 
         self.btn_add_fx = QPushButton("+ Charger un Effet...")
+        self.btn_add_fx.setMinimumWidth(130)
+        self.btn_add_fx.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.btn_add_fx.clicked.connect(self._show_add_effect_menu)
         top_bar.addWidget(self.btn_add_fx)
 
         self.btn_browse = QPushButton("📁 Parcourir .vst3...")
+        self.btn_browse.setMinimumWidth(130)
+        self.btn_browse.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.btn_browse.clicked.connect(self._browse_vst_file)
         top_bar.addWidget(self.btn_browse)
 
@@ -135,7 +143,8 @@ class VstRackWidget(QWidget):
 
             btn_quick_add = QPushButton("+ Charger Kontakt, SampleTank ou un autre VST")
             btn_quick_add.setObjectName("btn_add")
-            btn_quick_add.setFixedWidth(300)
+            btn_quick_add.setMinimumWidth(280)
+            btn_quick_add.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             btn_quick_add.clicked.connect(self._show_add_instrument_menu)
             ef_layout.addWidget(btn_quick_add, alignment=Qt.AlignCenter)
 
@@ -149,7 +158,8 @@ class VstRackWidget(QWidget):
     def _create_slot_card(self, index: int, rack_item: dict) -> QWidget:
         card = QFrame()
         card.setObjectName("rack_slot")
-        card.setFixedHeight(54)
+        card.setMinimumHeight(56)
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         c_layout = QHBoxLayout(card)
         c_layout.setContentsMargins(12, 6, 12, 6)
@@ -200,6 +210,7 @@ class VstRackWidget(QWidget):
         is_open = global_plugin_manager.is_editor_open(path)
         btn_text = "🎹 Fermer Interface [e]" if is_open else "🎹 Ouvrir Interface [e]"
         btn_e = QPushButton(btn_text)
+        btn_e.setMinimumWidth(150)
         if is_open:
             btn_e.setStyleSheet("""
                 QPushButton {
@@ -235,7 +246,7 @@ class VstRackWidget(QWidget):
         # Bouton Supprimer
         btn_del = QPushButton("✕")
         btn_del.setFixedSize(24, 24)
-        btn_del.setStyleSheet("background: transparent; border: none; color: #ef4444; font-size: 13px; font-weight: bold;")
+        btn_del.setStyleSheet("background: transparent; border: none; color: #ef4444; font-size: 13px; font-weight: bold; padding: 0px;")
         btn_del.setToolTip("Retirer ce plugin du projet")
         btn_del.clicked.connect(lambda _, rid=rack_item["id"]: self._remove_plugin(rid))
         c_layout.addWidget(btn_del)

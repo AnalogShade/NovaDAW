@@ -52,14 +52,34 @@ class SynthVoice:
 
 
 class AudioEngine:
-    def __init__(self, sample_rate: int = 44100, block_size: int = 1024):
-        self.sample_rate = sample_rate
-        self.block_size = block_size
+    def __init__(self, sample_rate: int = 44100, block_size: int = 512, output_device: Optional[int] = None, input_device: Optional[int] = None):
+        # Récupération des préférences matérielles si disponibles
+        try:
+            from core.hardware_manager import hardware_manager
+            audio_cfg = hardware_manager.settings.get("audio", {})
+            self.sample_rate = int(audio_cfg.get("sample_rate", sample_rate))
+            self.block_size = int(audio_cfg.get("buffer_size", block_size))
+            self.output_device = audio_cfg.get("output_device_index") if output_device is None else output_device
+            self.input_device = audio_cfg.get("input_device_index") if input_device is None else input_device
+        except Exception:
+            self.sample_rate = sample_rate
+            self.block_size = block_size
+            self.output_device = output_device
+            self.input_device = input_device
+
         self.project: Optional[Project] = None
 
         self.is_playing = False
         self.current_beat = 0.0
         self.master_volume = 0.9
+
+        # Enregistrement audio et MIDI
+        self.is_recording = False
+        self.recording_start_beat = 0.0
+        self._input_stream: Optional[sd.InputStream] = None
+        self._recorded_audio_blocks: List[np.ndarray] = []
+        self._recorded_midi_notes: List[MidiNote] = []
+        self._record_lock = threading.Lock()
 
         # Instances VST3 chargées par piste (track_id -> plugin instance)
         self.track_plugins: Dict[str, Any] = {}
@@ -73,6 +93,47 @@ class AudioEngine:
         self._stream: Optional[sd.OutputStream] = None
 
         self._start_stream()
+
+    def configure_device(self, output_device: Optional[int] = None, input_device: Optional[int] = None, sample_rate: Optional[int] = None, block_size: Optional[int] = None, buffer_size: Optional[int] = None) -> bool:
+        """Modifie le périphérique audio, la fréquence d'échantillonnage ou la taille du buffer et redémarre le flux."""
+        self.close()
+        effective_buffer = buffer_size if buffer_size is not None else block_size
+        if output_device is not None:
+            self.output_device = None if output_device < 0 else output_device
+        if input_device is not None:
+            self.input_device = None if input_device < 0 else input_device
+        if sample_rate is not None:
+            self.sample_rate = int(sample_rate)
+        if effective_buffer is not None:
+            self.block_size = int(effective_buffer)
+        self._start_stream()
+        return self._stream is not None
+
+    def play_test_tone(self, freq: float = 440.0, duration_sec: float = 0.6):
+        """Joue un accord harmonique doux (Fondamentale, Tierce, Quinte) pour tester la sortie audio."""
+        num_samples = max(1, int(self.sample_rate * duration_sec))
+        t = np.linspace(0, duration_sec, num_samples, endpoint=False)
+        sine1 = np.sin(2.0 * np.pi * freq * t)
+        sine2 = 0.6 * np.sin(2.0 * np.pi * (freq * 1.25) * t)  # Tierce majeure
+        sine3 = 0.45 * np.sin(2.0 * np.pi * (freq * 1.5) * t)  # Quinte
+        chord = (sine1 + sine2 + sine3) * 0.22
+
+        env = np.ones(num_samples, dtype=np.float32)
+        att = min(num_samples // 4, int(self.sample_rate * 0.04))
+        rel = min(num_samples // 2, int(self.sample_rate * 0.22))
+        if att > 0:
+            env[:att] = np.linspace(0.0, 1.0, att)
+        if rel > 0:
+            env[-rel:] = np.linspace(1.0, 0.0, rel)
+
+        chord = (chord * env).astype(np.float32)
+        stereo = np.column_stack((chord, chord))
+
+        with self._preview_lock:
+            self._preview_buffers.append({
+                "buffer": stereo,
+                "cursor": 0
+            })
 
     def get_track_plugin(self, track: Track) -> Optional[Any]:
         """Récupère ou initialise l'instance de plugin VST3 associée à une piste"""
@@ -112,16 +173,23 @@ class AudioEngine:
     def set_project(self, project: Project):
         self.project = project
         self.current_beat = 0.0
+        self.track_plugins.clear()
+        with self._preview_lock:
+            self._preview_buffers.clear()
 
     def _start_stream(self):
         try:
-            self._stream = sd.OutputStream(
-                samplerate=self.sample_rate,
-                blocksize=self.block_size,
-                channels=2,
-                dtype="float32",
-                callback=self._audio_callback
-            )
+            kwargs = {
+                "samplerate": self.sample_rate,
+                "blocksize": self.block_size,
+                "channels": 2,
+                "dtype": "float32",
+                "callback": self._audio_callback
+            }
+            if self.output_device is not None and self.output_device >= 0:
+                kwargs["device"] = self.output_device
+
+            self._stream = sd.OutputStream(**kwargs)
             self._stream.start()
         except Exception as e:
             print(f"[AudioEngine] Erreur initialisation flux audio: {e}")
@@ -135,6 +203,102 @@ class AudioEngine:
             except Exception:
                 pass
             self._stream = None
+        if self._input_stream:
+            try:
+                self._input_stream.stop()
+                self._input_stream.close()
+            except Exception:
+                pass
+            self._input_stream = None
+
+    def start_recording(self, start_beat: float):
+        """Démarre la capture audio en direct et initialise l'enregistrement."""
+        self.is_recording = True
+        self.recording_start_beat = max(0.0, float(start_beat))
+        with self._record_lock:
+            self._recorded_audio_blocks.clear()
+            self._recorded_midi_notes.clear()
+
+        # Fermer un éventuel flux d'enregistrement précédent
+        if self._input_stream:
+            try:
+                self._input_stream.stop()
+                self._input_stream.close()
+            except Exception:
+                pass
+            self._input_stream = None
+
+        # Démarrage du flux de capture d'entrée
+        try:
+            in_dev = self.input_device
+            if in_dev is not None and in_dev < 0:
+                in_dev = None
+
+            kwargs = {
+                "samplerate": self.sample_rate,
+                "blocksize": self.block_size,
+                "channels": 2,
+                "dtype": "float32",
+                "callback": self._record_callback
+            }
+            if in_dev is not None:
+                kwargs["device"] = in_dev
+
+            # Vérifier les canaux disponibles sur le périphérique d'entrée
+            try:
+                dev_info = sd.query_devices(in_dev, kind="input") if in_dev is not None else sd.query_devices(kind="input")
+                max_in = dev_info.get("max_input_channels", 2)
+                kwargs["channels"] = min(2, max(1, max_in))
+            except Exception:
+                pass
+
+            self._input_stream = sd.InputStream(**kwargs)
+            self._input_stream.start()
+        except Exception as e:
+            print(f"[AudioEngine] Avertissement flux de capture audio : {e}")
+            self._input_stream = None
+
+    def _record_callback(self, indata, frames, time_info, status):
+        """Callback temps réel de capture audio du microphone/ligne"""
+        if self.is_recording:
+            with self._record_lock:
+                self._recorded_audio_blocks.append(indata.copy())
+
+    def stop_recording(self) -> Dict[str, Any]:
+        """Arrête l'enregistrement audio et retourne les blocs capturés ainsi que les notes MIDI."""
+        self.is_recording = False
+        if self._input_stream:
+            try:
+                self._input_stream.stop()
+                self._input_stream.close()
+            except Exception:
+                pass
+            self._input_stream = None
+
+        with self._record_lock:
+            blocks = list(self._recorded_audio_blocks)
+            self._recorded_audio_blocks.clear()
+            midi_notes = list(self._recorded_midi_notes)
+            self._recorded_midi_notes.clear()
+
+        audio_data = None
+        if blocks:
+            try:
+                raw_audio = np.concatenate(blocks, axis=0)
+                if raw_audio.ndim == 1:
+                    audio_data = np.column_stack((raw_audio, raw_audio))
+                elif raw_audio.shape[1] == 1:
+                    audio_data = np.column_stack((raw_audio[:, 0], raw_audio[:, 0]))
+                else:
+                    audio_data = raw_audio[:, :2]
+            except Exception as e:
+                print(f"[AudioEngine] Erreur assemblage des blocs audio enregistrés : {e}")
+
+        return {
+            "start_beat": self.recording_start_beat,
+            "audio": audio_data,
+            "midi_notes": midi_notes
+        }
 
     def play(self):
         self.is_playing = True
@@ -148,13 +312,42 @@ class AudioEngine:
             self.current_beat = self.project.loop_start_beat
         else:
             self.current_beat = 0.0
+        self._reset_all_plugins()
         if self.playhead_callback:
             self.playhead_callback(self.current_beat)
 
     def seek_beat(self, beat: float):
         self.current_beat = max(0.0, beat)
+        self._reset_all_plugins()
         if self.playhead_callback:
             self.playhead_callback(self.current_beat)
+
+    def _reset_all_plugins(self):
+        """Réinitialise les mémoires des filtres et compresseurs lors d'un arrêt ou repositionnement"""
+        if not self.project:
+            return
+        for track in self.project.tracks:
+            for p in getattr(track, "plugins", []):
+                if hasattr(p, "reset"):
+                    p.reset()
+        if getattr(self.project, "master_track", None):
+            for p in getattr(self.project.master_track, "plugins", []):
+                if hasattr(p, "reset"):
+                    p.reset()
+
+    def _get_active_mixer_plugin(self) -> Optional[Any]:
+        """Trouve le plugin mixeur actif (généralement sur la piste Master)"""
+        if not self.project:
+            return None
+        if getattr(self.project, "master_track", None):
+            for p in self.project.master_track.plugins:
+                if getattr(p, "plugin_type_id", None) == "novadaw.mixer":
+                    return p
+        for t in self.project.tracks:
+            for p in getattr(t, "plugins", []):
+                if getattr(p, "plugin_type_id", None) == "novadaw.mixer":
+                    return p
+        return None
 
     def _can_render_vst_offline(self, plugin: Any) -> bool:
         """
@@ -179,10 +372,39 @@ class AudioEngine:
         plugin._supports_offline_midi = True
         return True
 
+    def get_native_instrument(self, track: Optional[Track]) -> Optional[Any]:
+        """Récupère l'instance d'instrument virtuel natif (ex: Nova Drums VSTi) associée à la piste"""
+        if not track:
+            return None
+        # 1. Vérifier si un instrument est déjà présent dans la pile plugins de la piste
+        for p in getattr(track, "plugins", []):
+            if getattr(p, "is_instrument", False) or getattr(p, "category", "") == "instrument":
+                return p
+        # 2. Si track.plugin_path pointe vers un plugin natif (ex: novadaw.drum_machine)
+        if track.plugin_path and str(track.plugin_path).startswith("novadaw."):
+            try:
+                from plugins.registry import plugin_registry, ensure_plugins_loaded
+                ensure_plugins_loaded()
+                plugin = plugin_registry.create_plugin(track.plugin_path)
+                if plugin:
+                    track.plugins.insert(0, plugin)
+                    return plugin
+            except Exception as e:
+                print(f"[AudioEngine] Erreur initialisation instrument natif {track.plugin_path}: {e}")
+        return None
+
     def preview_note(self, pitch: int, duration_sec: float = 0.35, velocity: int = 100, track: Optional[Track] = None):
         """Joue immédiatement une note (appelé par le Piano Roll lors d'un clic)"""
         wave = None
-        if track and track.plugin_path:
+        # 1. Vérifier si la piste est routée vers un instrument natif (Nova Drums VSTi)
+        native_inst = self.get_native_instrument(track) if track else None
+        if native_inst and hasattr(native_inst, "render_note"):
+            try:
+                wave = native_inst.render_note(pitch, duration_sec=duration_sec, sample_rate=self.sample_rate, velocity=velocity)
+            except Exception as e:
+                wave = None
+
+        if wave is None and track and track.plugin_path:
             vst_plugin = self.get_track_plugin(track)
             if self._can_render_vst_offline(vst_plugin):
                 try:
@@ -207,6 +429,19 @@ class AudioEngine:
                 "buffer": wave,
                 "cursor": 0
             })
+
+        # Enregistrement des notes MIDI si l'enregistrement est actif sur une piste MIDI armée
+        if self.is_recording and track and track.track_type == "midi" and getattr(track, "armed", False):
+            bpm = self.project.bpm if self.project else 120.0
+            dur_beats = max(0.25, (duration_sec * bpm) / 60.0)
+            rel_beat = max(0.0, self.current_beat - self.recording_start_beat)
+            with self._record_lock:
+                self._recorded_midi_notes.append(MidiNote(
+                    pitch=pitch,
+                    start_beat=rel_beat,
+                    duration=dur_beats,
+                    velocity=velocity
+                ))
 
     def _audio_callback(self, outdata, frames, time_info, status):
         # Buffer de sortie initialisé à 0
@@ -273,6 +508,22 @@ class AudioEngine:
             if self.playhead_callback:
                 self.playhead_callback(self.current_beat)
 
+        # 3. Traitement de la piste Master et de sa pile de plugins (Mixeur, EQ, Compresseur)
+        if self.project and getattr(self.project, "master_track", None):
+            master_t = self.project.master_track
+            if not master_t.muted:
+                vol = master_t.volume
+                pan = max(-1.0, min(1.0, master_t.pan))
+                out[:, 0] *= vol * (1.0 - max(0.0, pan))
+                out[:, 1] *= vol * (1.0 + min(0.0, pan))
+            if hasattr(master_t, "plugins") and master_t.plugins:
+                for plugin in master_t.plugins:
+                    if getattr(plugin, "enabled", True):
+                        try:
+                            out = plugin.process(out, self.sample_rate)
+                        except Exception as e:
+                            pass
+
         # Application du volume Master et limitation douce (anti-saturation)
         out *= self.master_volume
         out = np.tanh(out)
@@ -283,11 +534,44 @@ class AudioEngine:
         beats_per_sec = bpm / 60.0
 
         if track.track_type == "midi":
-            # 1. Vérifier si la piste est routée vers un VST3 Instrument
-            vst_plugin = self.get_track_plugin(track)
+            # 1. Vérifier si la piste est routée vers un instrument virtuel natif (ex: Nova Drums VSTi)
+            native_inst = self.get_native_instrument(track)
+            rendered_by_native = False
+
+            if native_inst and hasattr(native_inst, "render_slice"):
+                clip_notes = []
+                for clip in track.clips:
+                    if not isinstance(clip, MidiClip):
+                        continue
+                    clip_start = clip.start_beat
+                    clip_end = clip_start + clip.length_beats
+                    if clip_end < start_b or clip_start > end_b:
+                        continue
+                    for note in clip.notes:
+                        abs_note_start = clip_start + note.start_beat
+                        if abs_note_start < end_b and (abs_note_start + note.duration) > start_b:
+                            clip_notes.append(MidiNote(
+                                pitch=note.pitch,
+                                start_beat=abs_note_start,
+                                duration=note.duration,
+                                velocity=note.velocity
+                            ))
+                try:
+                    native_out = native_inst.render_slice(
+                        clip_notes, start_b, end_b, beats_per_sec, frames, self.sample_rate
+                    )
+                    if native_out is not None and len(native_out) > 0:
+                        n = min(frames, len(native_out))
+                        track_buf[:n] += native_out[:n]
+                        rendered_by_native = True
+                except Exception as e:
+                    rendered_by_native = False
+
+            # 2. Vérifier si la piste est routée vers un VST3 Instrument externe
+            vst_plugin = None if rendered_by_native else self.get_track_plugin(track)
             rendered_by_vst = False
 
-            if self._can_render_vst_offline(vst_plugin):
+            if not rendered_by_native and self._can_render_vst_offline(vst_plugin):
                 try:
                     dur_sec = frames / self.sample_rate
                     midi_messages = []
@@ -432,6 +716,24 @@ class AudioEngine:
                     except Exception as e:
                         pass
 
+        # 4. Traitement de la pile de plugins modulaires de la piste (Égaliseur, Compresseur, etc.)
+        if hasattr(track, "plugins") and track.plugins and track_buf is not None:
+            for plugin in track.plugins:
+                if track.track_type == "midi" and plugin is native_inst:
+                    continue
+                if getattr(plugin, "enabled", True):
+                    try:
+                        track_buf = plugin.process(track_buf, self.sample_rate)
+                    except Exception as e:
+                        pass
+
+        # 5. Envoi des niveaux de crête au plugin Mixeur pour les VU-mètres
+        mixer_plugin = self._get_active_mixer_plugin()
+        if mixer_plugin and track_buf is not None and len(track_buf) > 0:
+            pk_l = float(np.max(np.abs(track_buf[:, 0])))
+            pk_r = float(np.max(np.abs(track_buf[:, 1])))
+            mixer_plugin.update_track_peak(track.id, pk_l, pk_r)
+
         return track_buf
 
     def export_wav(self, file_path: str, end_bar: int = 8) -> bool:
@@ -470,6 +772,22 @@ class AudioEngine:
                     sig[:, 0] *= vol * (1.0 - max(0.0, pan))
                     sig[:, 1] *= vol * (1.0 + min(0.0, pan))
                     out_chunk += sig
+
+            # Traitement Master sur le mixage global
+            if self.project and getattr(self.project, "master_track", None):
+                master_t = self.project.master_track
+                if not master_t.muted:
+                    vol = master_t.volume
+                    pan = max(-1.0, min(1.0, master_t.pan))
+                    out_chunk[:, 0] *= vol * (1.0 - max(0.0, pan))
+                    out_chunk[:, 1] *= vol * (1.0 + min(0.0, pan))
+                if hasattr(master_t, "plugins") and master_t.plugins:
+                    for plugin in master_t.plugins:
+                        if getattr(plugin, "enabled", True):
+                            try:
+                                out_chunk = plugin.process(out_chunk, self.sample_rate)
+                            except Exception:
+                                pass
 
             rendered[start_sample:end_sample] = out_chunk
 

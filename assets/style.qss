@@ -108,17 +108,21 @@ QPushButton#btn_play {
     color: #34d399;
     font-size: 14px;
     border-radius: 5px;
+    font-weight: bold;
 }
 
 QPushButton#btn_play:hover {
     background-color: #059669;
     color: #ffffff;
+    border-color: #34d399;
 }
 
 QPushButton#btn_play:checked {
-    background-color: #10b981;
-    color: #000000;
-    border-color: #34d399;
+    background: qradialgradient(cx:0.5, cy:0.5, radius:0.8, fx:0.5, fy:0.5, stop:0 #10b981, stop:0.75 #059669, stop:1 #047857);
+    color: #ffffff;
+    border: 2px solid #6ee7b7;
+    font-size: 15px;
+    font-weight: bold;
 }
 
 QPushButton#btn_stop {
@@ -132,23 +136,29 @@ QPushButton#btn_stop {
 QPushButton#btn_stop:hover {
     background-color: #333849;
     color: #ffffff;
+    border-color: #64748b;
 }
 
 QPushButton#btn_record {
-    background-color: #450a0a;
-    border: 1px solid #dc2626;
+    background-color: #3b0d0c;
+    border: 1px solid #7f1d1d;
     color: #f87171;
+    font-size: 14px;
     border-radius: 5px;
 }
 
 QPushButton#btn_record:hover {
-    background-color: #dc2626;
+    background-color: #b91c1c;
     color: #ffffff;
+    border-color: #f87171;
 }
 
 QPushButton#btn_record:checked {
-    background-color: #ef4444;
+    background: qradialgradient(cx:0.5, cy:0.5, radius:0.8, fx:0.5, fy:0.5, stop:0 #ff3355, stop:0.75 #dc2626, stop:1 #991b1b);
     color: #ffffff;
+    border: 2px solid #fca5a5;
+    font-size: 15px;
+    font-weight: bold;
 }
 
 QPushButton#btn_loop {
@@ -157,6 +167,7 @@ QPushButton#btn_loop {
     color: #d97706;
     font-size: 11px;
     border-radius: 5px;
+    font-weight: bold;
 }
 
 QPushButton#btn_loop:hover {
@@ -166,8 +177,8 @@ QPushButton#btn_loop:hover {
 }
 
 QPushButton#btn_loop:checked {
-    background-color: #d97706;
-    border-color: #fbbf24;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f59e0b, stop:1 #b45309);
+    border: 2px solid #fde68a;
     color: #ffffff;
     font-weight: bold;
 }
@@ -327,65 +338,89 @@ QFrame.track_header:hover {
     background-color: #20232e;
 }
 
-/* Boutons Mute, Solo, Rec */
-QPushButton.btn_mute {
-    background-color: #20232f;
+/* Boutons Mute, Solo, Rec (Pistes et Inspecteur) */
+QPushButton#btn_track_mute, QPushButton.btn_mute, QPushButton[class="btn_mute"] {
+    background-color: #1e202b;
     border: 1px solid #33384a;
-    border-radius: 3px;
+    border-radius: 4px;
     font-weight: bold;
     font-size: 10px;
     color: #94a3b8;
-    max-width: 22px;
-    min-width: 22px;
-    max-height: 20px;
+    max-width: 26px;
+    min-width: 20px;
+    max-height: 24px;
     min-height: 20px;
     padding: 0px;
 }
 
-QPushButton.btn_mute:checked {
-    background-color: #d97706;
-    color: #ffffff;
+QPushButton#btn_track_mute:hover, QPushButton.btn_mute:hover, QPushButton[class="btn_mute"]:hover {
+    background-color: #2e261a;
     border-color: #f59e0b;
+    color: #fbbf24;
 }
 
-QPushButton.btn_solo {
-    background-color: #20232f;
-    border: 1px solid #33384a;
-    border-radius: 3px;
-    font-weight: bold;
-    font-size: 10px;
-    color: #94a3b8;
-    max-width: 22px;
-    min-width: 22px;
-    max-height: 20px;
-    min-height: 20px;
-    padding: 0px;
-}
-
-QPushButton.btn_solo:checked {
-    background-color: #eab308;
-    color: #1e293b;
-    border-color: #facc15;
-}
-
-QPushButton.btn_rec {
-    background-color: #20232f;
-    border: 1px solid #33384a;
-    border-radius: 3px;
-    font-weight: bold;
-    font-size: 10px;
-    color: #94a3b8;
-    max-width: 22px;
-    min-width: 22px;
-    max-height: 20px;
-    min-height: 20px;
-    padding: 0px;
-}
-
-QPushButton.btn_rec:checked {
-    background-color: #dc2626;
+QPushButton#btn_track_mute:checked, QPushButton.btn_mute:checked, QPushButton[class="btn_mute"]:checked {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f59e0b, stop:1 #b45309);
     color: #ffffff;
-    border-color: #ef4444;
+    border: 2px solid #fde047;
+    font-size: 11px;
+    font-weight: 800;
+}
+
+QPushButton#btn_track_solo, QPushButton.btn_solo, QPushButton[class="btn_solo"] {
+    background-color: #1e202b;
+    border: 1px solid #33384a;
+    border-radius: 4px;
+    font-weight: bold;
+    font-size: 10px;
+    color: #94a3b8;
+    max-width: 26px;
+    min-width: 20px;
+    max-height: 24px;
+    min-height: 20px;
+    padding: 0px;
+}
+
+QPushButton#btn_track_solo:hover, QPushButton.btn_solo:hover, QPushButton[class="btn_solo"]:hover {
+    background-color: #2b2812;
+    border-color: #facc15;
+    color: #fef08a;
+}
+
+QPushButton#btn_track_solo:checked, QPushButton.btn_solo:checked, QPushButton[class="btn_solo"]:checked {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #facc15, stop:1 #ca8a04);
+    color: #000000;
+    border: 2px solid #fef08a;
+    font-size: 11px;
+    font-weight: 800;
+}
+
+QPushButton#btn_track_rec, QPushButton.btn_rec, QPushButton[class="btn_rec"] {
+    background-color: #1e202b;
+    border: 1px solid #33384a;
+    border-radius: 4px;
+    font-weight: bold;
+    font-size: 10px;
+    color: #94a3b8;
+    max-width: 26px;
+    min-width: 20px;
+    max-height: 24px;
+    min-height: 20px;
+    padding: 0px;
+}
+
+QPushButton#btn_track_rec:hover, QPushButton.btn_rec:hover, QPushButton[class="btn_rec"]:hover {
+    background-color: #331518;
+    border-color: #ff4d6d;
+    color: #ff99aa;
+}
+
+QPushButton#btn_track_rec:checked, QPushButton.btn_rec:checked, QPushButton[class="btn_rec"]:checked {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #ff3355, stop:1 #dc2626);
+    color: #ffffff;
+    border: 2px solid #ff7b92;
+    font-size: 11px;
+    font-weight: 800;
 }
 
 /* Panneaux rétractables (Lower Zone) */
@@ -428,4 +463,26 @@ QLineEdit {
 
 QLineEdit:focus {
     border-color: #38bdf8;
+}
+
+/* Splitters redimensionnables */
+QSplitter::handle {
+    background-color: #1a1c25;
+}
+
+QSplitter::handle:hover {
+    background-color: #38bdf8;
+}
+
+QSplitter::handle:horizontal {
+    width: 4px;
+}
+
+QSplitter::handle:vertical {
+    height: 4px;
+}
+
+/* Overrides de padding pour petits boutons d'action */
+QPushButton#btn_close_sub, QPushButton#btn_del, QPushButton#btn_delete_track {
+    padding: 0px;
 }

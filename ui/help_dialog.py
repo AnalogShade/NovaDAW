@@ -1,13 +1,14 @@
 """
 ui/help_dialog.py - Boîte de dialogue d'aide et documentation intégrée pour NovaDAW
 """
+import os
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QLabel,
     QPushButton, QTextBrowser, QTableWidget, QTableWidgetItem,
     QHeaderView, QFrame
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtGui import QFont, QColor, QPixmap, QIcon
 
 
 class HelpDialog(QDialog):
@@ -15,8 +16,9 @@ class HelpDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Documentation & Raccourcis Clavier - NovaDAW")
-        self.resize(760, 560)
+        self.resize(780, 580)
         self.setMinimumSize(640, 480)
+        self.setSizeGripEnabled(True)
         self.setStyleSheet("""
             QDialog {
                 background-color: #14151c;
@@ -147,6 +149,12 @@ class HelpDialog(QDialog):
             
             # Catégorie Pistes & Timeline
             ("Ctrl + T", "Ajouter une nouvelle piste (MIDI ou Audio)", "Pistes & Timeline"),
+            ("Glisser bord inférieur de piste", "Redimensionner interactivement la hauteur d'une piste (ou sur la timeline)", "Pistes & Timeline"),
+            ("Shift + Glisser bord de piste", "Redimensionner simultanément la hauteur de toutes les pistes", "Pistes & Timeline"),
+            ("Ctrl + Alt + ↑ / ↓", "Zoomer / Dézoomer la hauteur de toutes les pistes", "Pistes & Timeline"),
+            ("Ctrl + Alt + 0", "Réinitialiser la hauteur des pistes à la valeur par défaut (76px)", "Pistes & Timeline"),
+            ("Glisser séparateur latéral", "Ajuster la largeur de l'inspecteur / en-têtes de pistes à gauche", "Interface"),
+            ("Bouton ◀ / ▶", "Masquer ou afficher rapidement le volet inspecteur / en-têtes à gauche", "Interface"),
             ("Double-clic sur piste vide", "Créer automatiquement un nouveau bloc/clip sur la mesure ou sur la boucle", "Pistes & Timeline"),
             ("Double-clic sur un bloc", "Ouvrir l'éditeur correspondant (Piano Roll pour MIDI, Inspecteur pour Audio)", "Pistes & Timeline"),
             ("Glisser un bloc", "Déplacer le bloc temporellement sur la timeline", "Pistes & Timeline"),
@@ -271,16 +279,33 @@ class HelpDialog(QDialog):
     def _create_about_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(12)
 
-        lbl_app = QLabel("NovaDAW")
-        lbl_app.setStyleSheet("font-size: 24px; font-weight: bold; color: #38bdf8;")
-        layout.addWidget(lbl_app)
+        # En-tête avec logo supernova
+        header_h = QHBoxLayout()
+        header_h.setSpacing(16)
 
-        lbl_sub = QLabel("Version 1.0 — Digital Audio Workstation Open-Source")
+        logo_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "nova_icon.png"))
+        if os.path.exists(logo_path):
+            lbl_logo = QLabel()
+            pix = QPixmap(logo_path).scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            lbl_logo.setPixmap(pix)
+            header_h.addWidget(lbl_logo)
+
+        v_titles = QVBoxLayout()
+        v_titles.setSpacing(4)
+        lbl_app = QLabel("NovaDAW Pro")
+        lbl_app.setStyleSheet("font-size: 26px; font-weight: bold; color: #38bdf8;")
+        v_titles.addWidget(lbl_app)
+
+        lbl_sub = QLabel("Version 1.1 Pro — Digital Audio Workstation Open-Source & Pilotable par IA")
         lbl_sub.setStyleSheet("font-size: 13px; color: #94a3b8; font-weight: 600;")
-        layout.addWidget(lbl_sub)
+        v_titles.addWidget(lbl_sub)
+
+        header_h.addLayout(v_titles)
+        header_h.addStretch()
+        layout.addLayout(header_h)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
@@ -288,18 +313,17 @@ class HelpDialog(QDialog):
         layout.addWidget(sep)
 
         about_text = QLabel(
-            "NovaDAW est une station de travail audio numérique moderne, libre et gratuite, "
-            "développée en Python avec PySide6 (Qt 6), numpy, scipy et sounddevice.\n\n"
-            "Caractéristiques techniques :\n"
-            " • Moteur audio temps réel avec synthétiseur polyphonique à modélisation analogique\n"
-            " • Mixeur multi-pistes stéréo avec contrôle de panoramique, volume, mute et solo\n"
-            " • Séquenceur MIDI interactif avec quantification automatique\n"
-            " • Format de projet structuré .ndaw (NovaDAW Project)\n"
-            " • Rendu hors-ligne vers fichier WAV stéréo 44.1 kHz haute fidélité\n"
-            " • Prêt pour l'accueil de plugins VST3 via pedalboard\n\n"
-            "Créé pour rendre la production musicale accessible, créative et ouverte à tous !"
+            "<b>NovaDAW</b> est une station de travail audio numérique professionnelle, libre et gratuite, "
+            "développée en Python avec PySide6 (Qt 6), NumPy, SciPy, sounddevice et Pedalboard.<br><br>"
+            "<b>Nouvelles Fonctionnalités Majeures (v1.1) :</b><br>"
+            " • <b>Section Périphériques Audio & Graphiques :</b> Détection et sélection des cartes graphiques (GPU NVIDIA, AMD, Intel) et des pilotes audio (ASIO, WASAPI, DirectSound, MME).<br>"
+            " • <b>Importateur Audio Universel :</b> Prise en charge native de tous les formats audio (WAV, MP3, FLAC, OGG, AIFF, M4A...) avec calcul automatique des durées et calage temporel.<br>"
+            " • <b>Pilotabilité Intégrale par Agent IA (FastMCP & TCP IPC) :</b> 31 actions et outils permettant à un agent (Antigravity, Claude, Cursor, Codex) de composer, manipuler les faders, égaliseurs et compresseurs en direct.<br>"
+            " • <b>Identité Visuelle Supernova :</b> Nouvelle icône et logo haute définition intégrés dans l'interface et sur le bureau.<br><br>"
+            "<i>Tous les composants utilisent des licences libres et hautement permissives (MIT, BSD-3, Apache 2.0).</i>"
         )
-        about_text.setStyleSheet("color: #cbd5e1; font-size: 12px; line-height: 1.5;")
+        about_text.setTextFormat(Qt.RichText)
+        about_text.setStyleSheet("color: #cbd5e1; font-size: 12px; line-height: 1.6;")
         about_text.setWordWrap(True)
         layout.addWidget(about_text)
 

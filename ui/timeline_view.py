@@ -153,8 +153,10 @@ class TimelineGrid(QWidget):
     project_modified = Signal()
     seek_requested = Signal(float)
     time_range_selected = Signal(float, float)
+    track_height_changed = Signal(str, int, bool)  # (track_id, height, apply_all)
 
-    TRACK_HEIGHT = 76
+    DEFAULT_TRACK_HEIGHT = 76
+    RESIZE_MARGIN = 5
 
     def __init__(self, project: Project, parent=None):
         super().__init__(parent)
@@ -177,6 +179,12 @@ class TimelineGrid(QWidget):
         self._drag_start_beat = 0.0
         self._drag_start_len = 0.0
 
+        # Redimensionnement de piste à la souris
+        self._resizing_track_height = False
+        self._resizing_track: Optional[Track] = None
+        self._drag_start_track_h = 76
+        self._drag_start_track_y = 0
+
         self.setMouseTracking(True)
         self.update_dimensions()
 
@@ -189,16 +197,34 @@ class TimelineGrid(QWidget):
         self.playhead_beat = beat
         self.update()
 
+    def get_track_layout(self) -> list:
+        """Retourne la liste des tuples (track, top_y, height) pour chaque piste"""
+        layout = []
+        curr_y = 0
+        for track in self.project.tracks:
+            h = getattr(track, "height", self.DEFAULT_TRACK_HEIGHT)
+            layout.append((track, curr_y, h))
+            curr_y += h
+        return layout
+
     def update_dimensions(self):
-        total_tracks = max(1, len(self.project.tracks))
-        h = total_tracks * self.TRACK_HEIGHT
+        total_tracks_h = sum(getattr(t, "height", self.DEFAULT_TRACK_HEIGHT) for t in self.project.tracks)
+        h = max(400, total_tracks_h)
         w = max(2400, int(128.0 * self.pixels_per_beat))
         self.setFixedSize(w, h)
 
     def _get_track_at_y(self, y: int) -> Tuple[Optional[Track], int]:
-        index = int(y // self.TRACK_HEIGHT)
-        if 0 <= index < len(self.project.tracks):
-            return self.project.tracks[index], index
+        for index, (track, top_y, h) in enumerate(self.get_track_layout()):
+            if top_y <= y < top_y + h:
+                return track, index
+        return None, -1
+
+    def _get_track_separator_at_y(self, y: int) -> Tuple[Optional[Track], int]:
+        """Détecte si la souris survole la ligne de séparation inférieure d'une piste"""
+        for index, (track, top_y, h) in enumerate(self.get_track_layout()):
+            bottom_y = top_y + h
+            if abs(y - bottom_y) <= self.RESIZE_MARGIN:
+                return track, index
         return None, -1
 
     def _get_clip_at(self, x: int, y: int) -> Tuple[Optional[Track], Optional[ClipType], bool]:
@@ -221,6 +247,20 @@ class TimelineGrid(QWidget):
         self.setFocus()
         x = event.position().x()
         y = event.position().y()
+
+        # 1. Vérifier si on clique sur la ligne de séparation d'une piste pour redimensionner sa hauteur
+        sep_track, sep_idx = self._get_track_separator_at_y(y)
+        if event.button() == Qt.LeftButton and sep_track:
+            track, clip, is_resize = self._get_clip_at(x, y)
+            if not clip or is_resize:
+                self._resizing_track_height = True
+                self._resizing_track = sep_track
+                self._drag_start_track_h = getattr(sep_track, "height", self.DEFAULT_TRACK_HEIGHT)
+                self._drag_start_track_y = event.globalPosition().y()
+                self.grabMouse()
+                event.accept()
+                return
+
         track, clip, is_resize = self._get_clip_at(x, y)
 
         if event.button() == Qt.LeftButton:
@@ -304,6 +344,21 @@ class TimelineGrid(QWidget):
         x = event.position().x()
         y = event.position().y()
 
+        if self._resizing_track_height and self._resizing_track:
+            dy = int(event.globalPosition().y() - self._drag_start_track_y)
+            new_h = max(46, min(320, self._drag_start_track_h + dy))
+            apply_all = bool(event.modifiers() & (Qt.ShiftModifier | Qt.AltModifier))
+            if apply_all:
+                for t in self.project.tracks:
+                    t.height = new_h
+            else:
+                self._resizing_track.height = new_h
+            self.update_dimensions()
+            self.update()
+            self.track_height_changed.emit(self._resizing_track.id, new_h, apply_all)
+            event.accept()
+            return
+
         if self._dragging_clip and self.selected_clip:
             _, clip = self.selected_clip
             delta_beats = (x - self._drag_start_x) / self.pixels_per_beat
@@ -329,8 +384,11 @@ class TimelineGrid(QWidget):
             self.update()
 
         else:
+            sep_track, _ = self._get_track_separator_at_y(y)
             _, clip, is_resize = self._get_clip_at(x, y)
-            if is_resize:
+            if sep_track and (not clip or is_resize):
+                self.setCursor(Qt.SizeVerCursor)
+            elif is_resize:
                 self.setCursor(Qt.SizeHorCursor)
             elif clip:
                 self.setCursor(Qt.PointingHandCursor)
@@ -338,6 +396,16 @@ class TimelineGrid(QWidget):
                 self.setCursor(Qt.CrossCursor)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._resizing_track_height:
+            self._resizing_track_height = False
+            self._resizing_track = None
+            self.releaseMouse()
+            self.unsetCursor()
+            self.project_modified.emit()
+            self.update()
+            event.accept()
+            return
+
         if self._dragging_clip or self._resizing_clip:
             self._dragging_clip = False
             self._resizing_clip = False
@@ -426,13 +494,21 @@ class TimelineGrid(QWidget):
         # Fond
         painter.fillRect(0, 0, width, height, QColor("#121318"))
 
-        # Pistes & Lignes horizontales
-        for i, track in enumerate(self.project.tracks):
-            y = i * self.TRACK_HEIGHT
+        # Pistes & Lignes horizontales adaptées à chaque piste
+        track_layout = self.get_track_layout()
+        if not track_layout:
+            painter.setPen(QColor("#475569"))
+            painter.setFont(QFont("Segoe UI", 11))
+            painter.drawText(
+                QRectF(24, 24, 650, 36),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                "Projet vide — Cliquez sur '+ Piste' ou [Ctrl+T] pour ajouter votre première piste"
+            )
+        for i, (track, top_y, track_h) in enumerate(track_layout):
             bg_col = QColor("#171821") if i % 2 == 0 else QColor("#14151c")
-            painter.fillRect(0, y, width, self.TRACK_HEIGHT, bg_col)
+            painter.fillRect(0, top_y, width, track_h, bg_col)
             painter.setPen(QPen(QColor("#232634"), 1))
-            painter.drawLine(0, y + self.TRACK_HEIGHT, width, y + self.TRACK_HEIGHT)
+            painter.drawLine(0, top_y + track_h, width, top_y + track_h)
 
         # Grille verticale (Mesures et temps)
         num_bars = int(width / (self.pixels_per_beat * 4)) + 4
@@ -468,14 +544,12 @@ class TimelineGrid(QWidget):
         font_clip = QFont("Segoe UI", 9, QFont.Bold)
         painter.setFont(font_clip)
 
-        for track_idx, track in enumerate(self.project.tracks):
-            y_track = track_idx * self.TRACK_HEIGHT
-
+        for track, top_y, track_h in track_layout:
             for clip in track.clips:
                 cx = clip.start_beat * self.pixels_per_beat
                 cw = clip.length_beats * self.pixels_per_beat
-                cy = y_track + 6
-                ch = self.TRACK_HEIGHT - 12
+                cy = top_y + 4
+                ch = max(18, track_h - 8)
 
                 clip_rect = QRectF(cx, cy, cw, ch)
                 is_selected = self.selected_clip and self.selected_clip[1].id == clip.id
@@ -498,44 +572,55 @@ class TimelineGrid(QWidget):
                 painter.drawRoundedRect(clip_rect, 5, 5)
 
                 # Barre d'en-tête du clip
-                header_rect = QRectF(cx, cy, cw, 18)
+                h_header = min(18, int(ch * 0.35))
+                header_rect = QRectF(cx, cy, cw, h_header)
                 header_col = QColor(base_color.darker(140))
                 painter.setBrush(QBrush(header_col))
-                painter.drawRoundedRect(header_rect, 5, 5)
-                painter.fillRect(QRectF(cx, cy + 12, cw, 6), header_col)
+                painter.drawRoundedRect(header_rect, 4, 4)
+                if h_header >= 10:
+                    painter.fillRect(QRectF(cx, cy + h_header - 4, cw, 4), header_col)
 
-                # Titre du bloc
-                painter.setPen(QColor("#ffffff"))
-                painter.drawText(int(cx) + 8, int(cy) + 14, clip.name)
+                # Titre du bloc (si assez d'espace vertical)
+                if ch >= 26:
+                    painter.setPen(QColor("#ffffff"))
+                    fm = painter.fontMetrics()
+                    avail_w = int(cw - 16)
+                    if avail_w > 10:
+                        elided_name = fm.elidedText(clip.name, Qt.ElideRight, avail_w)
+                        painter.drawText(int(cx) + 8, int(cy) + min(14, max(10, h_header - 2)), elided_name)
 
                 # Badge ou étoile si sélectionné
-                if is_selected and cw > 40:
+                if is_selected and cw > 40 and ch >= 26:
                     painter.setPen(QColor("#fbbf24"))
-                    painter.drawText(int(cx + cw - 20), int(cy + 14), "★")
+                    painter.drawText(int(cx + cw - 18), int(cy) + min(14, max(10, h_header - 2)), "★")
 
                 # Aperçu du contenu à l'intérieur du clip
-                if isinstance(clip, MidiClip):
-                    painter.setPen(Qt.NoPen)
-                    painter.setBrush(QBrush(QColor("#ffffff")))
-                    for note in clip.notes:
-                        norm_pitch = max(0.0, min(1.0, (note.pitch - 36) / 48.0))
-                        ny = cy + 22 + (1.0 - norm_pitch) * (ch - 28)
-                        nx = cx + (note.start_beat * self.pixels_per_beat)
-                        nw = max(3.0, note.duration * self.pixels_per_beat - 1)
-                        painter.drawRoundedRect(QRectF(nx, ny, nw, 3), 1, 1)
+                if ch >= 36:
+                    if isinstance(clip, MidiClip):
+                        painter.setPen(Qt.NoPen)
+                        painter.setBrush(QBrush(QColor("#ffffff")))
+                        content_top = cy + h_header + 4
+                        content_h = ch - h_header - 8
+                        for note in clip.notes:
+                            norm_pitch = max(0.0, min(1.0, (note.pitch - 36) / 48.0))
+                            ny = content_top + (1.0 - norm_pitch) * max(4, content_h - 4)
+                            nx = cx + (note.start_beat * self.pixels_per_beat)
+                            nw = max(3.0, note.duration * self.pixels_per_beat - 1)
+                            painter.drawRoundedRect(QRectF(nx, ny, nw, 3), 1, 1)
 
-                elif isinstance(clip, AudioClip):
-                    painter.setPen(QPen(QColor("#ffffff"), 1))
-                    mid_y = cy + 18 + (ch - 18) / 2
-                    painter.drawLine(int(cx) + 4, int(mid_y), int(cx + cw) - 4, int(mid_y))
-                    step = 6
-                    for sx in range(int(cx) + 6, int(cx + cw) - 6, step):
-                        h_wave = 4 + (abs(sx % 17 - 8) * 1.5)
-                        painter.drawLine(sx, int(mid_y - h_wave), sx, int(mid_y + h_wave))
+                    elif isinstance(clip, AudioClip):
+                        painter.setPen(QPen(QColor("#ffffff"), 1))
+                        mid_y = cy + h_header + (ch - h_header) / 2
+                        painter.drawLine(int(cx) + 4, int(mid_y), int(cx + cw) - 4, int(mid_y))
+                        step = 6
+                        max_wave = max(2, (ch - h_header) * 0.35)
+                        for sx in range(int(cx) + 6, int(cx + cw) - 6, step):
+                            h_wave = min(max_wave, 3 + (abs(sx % 17 - 8) * 1.5))
+                            painter.drawLine(sx, int(mid_y - h_wave), sx, int(mid_y + h_wave))
 
                 # Poignée de redimensionnement à droite
                 painter.setPen(QPen(QColor(255, 255, 255, 100), 2))
-                painter.drawLine(int(cx + cw) - 3, int(cy) + 8, int(cx + cw) - 3, int(cy + ch) - 8)
+                painter.drawLine(int(cx + cw) - 3, int(cy) + 6, int(cx + cw) - 3, int(cy + ch) - 6)
 
         # Tête de lecture (Ligne verticale)
         px = self.playhead_beat * self.pixels_per_beat

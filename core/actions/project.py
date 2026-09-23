@@ -4,7 +4,7 @@ core/actions/project.py - Actions globales de gestion de projet, pistes, mixage 
 import os
 from typing import Dict, Any, List, Optional
 from core.action_registry import action_registry
-from core.project import Track
+from core.project import Project, Track
 from core.serializer import save_project
 
 
@@ -160,3 +160,134 @@ def export_wav(app, output_file_path: str, end_bar: Optional[int] = None) -> Dic
         "file_path": os.path.abspath(out_path),
         "exported_bars": target_bar
     }
+
+
+@action_registry.register(
+    name="novadaw_import_audio_file",
+    description="Importe un fichier audio de n'importe quel format (WAV, MP3, FLAC, OGG, AIFF, M4A...) sur une piste Audio existante ou en créant une nouvelle piste.",
+    tags=["project", "audio", "file"]
+)
+def import_audio_file_action(
+    app,
+    file_path: str,
+    track_id_or_name: Optional[str] = None,
+    start_beat: float = 0.0,
+    track_name: Optional[str] = None
+) -> Dict[str, Any]:
+    from core.audio_importer import load_audio_file
+    from core.project import AudioClip
+
+    clean_path = os.path.abspath(os.path.expanduser(file_path.strip()))
+    if not os.path.isfile(clean_path):
+        raise FileNotFoundError(f"Fichier audio introuvable : '{file_path}'")
+
+    sr = app.audio_engine.sample_rate if hasattr(app, "audio_engine") else 44100
+    audio_data, target_sr, dur_sec = load_audio_file(clean_path, target_sr=sr)
+
+    # Résolution ou création de la piste cible
+    target_track = None
+    if track_id_or_name:
+        target_track = app.project.get_track(track_id_or_name)
+
+    if not target_track:
+        sel_id = getattr(app, "selected_track_id", None)
+        if sel_id:
+            cand = app.project.get_track(sel_id)
+            if cand and cand.track_type == "audio":
+                target_track = cand
+
+    if not target_track:
+        # Créer une nouvelle piste Audio
+        base_name = track_name or os.path.splitext(os.path.basename(clean_path))[0]
+        target_track = Track(
+            name=base_name,
+            track_type="audio",
+            color="#10b981"
+        )
+        app.project.add_track(target_track)
+
+    # Calcul de la longueur en temps selon le tempo du projet
+    bpm = app.project.bpm
+    beats = max(1.0, round((dur_sec / 60.0) * bpm, 2))
+
+    clip_name = os.path.splitext(os.path.basename(clean_path))[0]
+    new_clip = AudioClip(
+        name=clip_name,
+        start_beat=max(0.0, float(start_beat)),
+        length_beats=beats,
+        file_path=clean_path,
+        gain=1.0,
+        color=target_track.color
+    )
+    new_clip.audio_data = audio_data
+    new_clip.sample_rate = target_sr
+    target_track.clips.append(new_clip)
+
+    # Mise à jour de l'interface utilisateur
+    if hasattr(app, "refresh_project_ui"):
+        app.refresh_project_ui()
+
+    if hasattr(app, "audio_editor"):
+        app.audio_editor.open_clip(target_track, new_clip)
+        if hasattr(app, "lower_zone"):
+            app.lower_zone.setCurrentWidget(app.audio_editor)
+            if getattr(app, "is_lower_zone_minimized", False):
+                app._expand_lower_zone()
+
+    if hasattr(app, "timeline_grid"):
+        app.timeline_grid.update_dimensions()
+        app.timeline_grid.update()
+
+    if hasattr(app, "statusBar"):
+        app.statusBar().showMessage(f"Fichier audio importé : {clip_name} ({dur_sec:.2f}s)", 3500)
+
+    return {
+        "status": "success",
+        "file_path": clean_path,
+        "track_id": target_track.id,
+        "track_name": target_track.name,
+        "clip_id": new_clip.id,
+        "clip_name": new_clip.name,
+        "duration_seconds": round(dur_sec, 3),
+        "length_beats": beats,
+        "sample_rate": target_sr,
+        "channels": 2
+    }
+
+
+@action_registry.register(
+    name="novadaw_new_project",
+    description="Réinitialise NovaDAW avec un nouveau projet vide sans pistes.",
+    tags=["project"]
+)
+def new_project_action(app) -> Dict[str, Any]:
+    if hasattr(app, "new_project"):
+        app.new_project()
+    else:
+        app.project = Project.create_empty()
+        if hasattr(app, "audio_engine"):
+            app.audio_engine.set_project(app.project)
+        if hasattr(app, "refresh_project_ui"):
+            app.refresh_project_ui()
+
+    return {"status": "success", "message": "Nouveau projet vide initialisé."}
+
+
+@action_registry.register(
+    name="novadaw_load_demo_project",
+    description="Charge le projet de démonstration NovaDAW avec synthétiseurs, basse et batterie.",
+    tags=["project"]
+)
+def load_demo_project_action(app) -> Dict[str, Any]:
+    if hasattr(app, "load_demo_project"):
+        app.load_demo_project()
+    else:
+        app.project = Project.create_demo()
+        if hasattr(app, "audio_engine"):
+            app.audio_engine.set_project(app.project)
+        if hasattr(app, "refresh_project_ui"):
+            app.refresh_project_ui()
+
+    return {"status": "success", "message": "Projet de démonstration chargé."}
+
+

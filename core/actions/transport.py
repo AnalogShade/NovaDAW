@@ -61,10 +61,12 @@ def adjust_loop_bounds(app, shift_beats: float = 0.0, length_delta_beats: float 
 def get_transport_state(app) -> Dict[str, Any]:
     current_beat = app.audio_engine.current_beat if hasattr(app, "audio_engine") else 0.0
     is_playing = app.audio_engine.is_playing if hasattr(app, "audio_engine") else False
+    is_recording = getattr(app.audio_engine, "is_recording", False) if hasattr(app, "audio_engine") else False
     beats_per_bar = app.project.beats_per_bar()
 
     return {
         "is_playing": is_playing,
+        "is_recording": is_recording,
         "current_beat": round(current_beat, 3),
         "current_bar": int(current_beat // beats_per_bar) + 1,
         "current_beat_in_bar": round((current_beat % beats_per_bar) + 1, 2),
@@ -78,7 +80,7 @@ def get_transport_state(app) -> Dict[str, Any]:
 
 @action_registry.register(
     name="novadaw_control_transport",
-    description="Pilote la barre de transport : 'play' (lecture), 'pause', 'stop' (retour début boucle ou 0), 'seek' (déplacer curseur à target_beat), 'goto_start', 'goto_end'.",
+    description="Pilote la barre de transport : 'play' (lecture), 'pause', 'stop' (retour début boucle ou 0), 'record' (lancer/arrêter enregistrement et lecture), 'seek' (déplacer curseur à target_beat), 'goto_start', 'goto_end'.",
     tags=["transport"]
 )
 def control_transport(app, action: str, target_beat: Optional[float] = None) -> Dict[str, Any]:
@@ -92,6 +94,11 @@ def control_transport(app, action: str, target_beat: Optional[float] = None) -> 
         app.audio_engine.pause()
         if hasattr(app, "transport_bar"):
             app.transport_bar.set_playing_state(False)
+    elif act in ("record", "rec"):
+        if hasattr(app, "_toggle_record"):
+            app._toggle_record()
+        elif hasattr(app, "transport_bar"):
+            app.transport_bar.btn_record.click()
     elif act == "stop":
         app._on_stop()
     elif act == "seek":
@@ -102,7 +109,7 @@ def control_transport(app, action: str, target_beat: Optional[float] = None) -> 
     elif act == "goto_end":
         app._on_goto_end()
     else:
-        raise ValueError(f"Action de transport non reconnue : '{action}' (attendues: play, pause, stop, seek, goto_start, goto_end)")
+        raise ValueError(f"Action de transport non reconnue : '{action}' (attendues: play, pause, stop, record, seek, goto_start, goto_end)")
 
     return get_transport_state(app)
 

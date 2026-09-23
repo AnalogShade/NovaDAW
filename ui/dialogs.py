@@ -26,8 +26,57 @@ class AddTrackDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Ajouter une nouvelle piste")
-        self.setFixedWidth(380)
-        self.setStyleSheet("background-color: #1a1c24;")
+        self.setMinimumWidth(440)
+        self.resize(460, 420)
+        self.setSizeGripEnabled(True)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1a1c24;
+                color: #e2e8f0;
+            }
+            QLabel {
+                color: #94a3b8;
+                font-size: 12px;
+            }
+            QRadioButton {
+                color: #f1f5f9;
+                font-size: 12px;
+                spacing: 8px;
+            }
+            QLineEdit {
+                background-color: #121318;
+                color: #ffffff;
+                border: 1px solid #282a36;
+                border-radius: 4px;
+                padding: 6px 10px;
+                font-size: 12px;
+            }
+            QLineEdit:focus {
+                border-color: #38bdf8;
+            }
+            QPushButton {
+                background-color: #262936;
+                color: #e2e8f0;
+                border: 1px solid #3b3f52;
+                border-radius: 4px;
+                padding: 6px 16px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #333748;
+                border-color: #38bdf8;
+            }
+            QPushButton#btn_add_track {
+                background-color: #0284c7;
+                color: #ffffff;
+                font-weight: bold;
+                border: none;
+            }
+            QPushButton#btn_add_track:hover {
+                background-color: #0369a1;
+            }
+        """)
 
         self.selected_color = self.COLOR_PRESETS[0]
 
@@ -74,6 +123,7 @@ class AddTrackDialog(QDialog):
             }
         """)
         self.combo_inst.addItem("🎹 Synthé Polyphonique NovaDAW (Défaut)", userData=None)
+        self.combo_inst.addItem("🥁 Nova Drums VSTi (Batterie IA)", userData="novadaw.drum_machine")
         for inst in global_plugin_manager.get_compatible_instruments():
             is_multibus = any(k.lower() in inst.name.lower() for k in ["kontakt", "sampletank"])
             tag = " (Sampler Multi-bus) ⚠️" if is_multibus else " (VST3 Direct) ✅"
@@ -145,7 +195,7 @@ class AddTrackDialog(QDialog):
     def _on_instrument_selected(self, index: int):
         file_path = self.combo_inst.currentData()
         if file_path:
-            inst_name = self.combo_inst.currentText().replace("🎹 ", "")
+            inst_name = self.combo_inst.currentText().replace("🎹 ", "").replace("🥁 ", "")
             for badge in [" (Sampler Multi-bus) ⚠️", " (VST3 Direct) ✅", " (VST3)"]:
                 inst_name = inst_name.replace(badge, "")
             inst_name = inst_name.strip()
@@ -164,7 +214,7 @@ class AddTrackDialog(QDialog):
         plugin_path = self.combo_inst.currentData() if track_type == "midi" else None
         plugin_name = None
         if track_type == "midi" and plugin_path:
-            raw = self.combo_inst.currentText().replace("🎹 ", "")
+            raw = self.combo_inst.currentText().replace("🎹 ", "").replace("🥁 ", "")
             for badge in [" (Sampler Multi-bus) ⚠️", " (VST3 Direct) ✅", " (VST3)"]:
                 raw = raw.replace(badge, "")
             plugin_name = raw.strip()

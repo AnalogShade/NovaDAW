@@ -10,7 +10,7 @@ from core.project import Project, AudioClip
 def save_project(project: Project, file_path: str) -> None:
     """Enregistre l'état complet du projet dans un fichier .ndaw"""
     project_dict = {
-        "format_version": "1.0",
+        "format_version": "1.1",
         "name": project.name,
         "bpm": project.bpm,
         "time_sig_num": project.time_sig_num,
@@ -19,6 +19,7 @@ def save_project(project: Project, file_path: str) -> None:
         "loop_start_beat": project.loop_start_beat,
         "loop_end_beat": project.loop_end_beat,
         "plugin_rack": list(project.plugin_rack),
+        "master_track": project.master_track.to_dict() if project.master_track else None,
         "tracks": [t.to_dict() for t in project.tracks],
     }
 
@@ -48,6 +49,11 @@ def load_project(file_path: str) -> Project:
     from core.project import Track
     for t_data in data.get("tracks", []):
         track = Track.from_dict(t_data)
+        # Lier le projet aux plugins si nécessaire (ex: Mixeur)
+        for p in track.plugins:
+            if hasattr(p, "set_project"):
+                p.set_project(proj)
+
         # Recharger les données audio si des fichiers audio sont référencés
         for clip in track.clips:
             if isinstance(clip, AudioClip) and clip.file_path and os.path.exists(clip.file_path):
@@ -58,5 +64,14 @@ def load_project(file_path: str) -> Project:
                 except Exception as e:
                     print(f"Erreur chargement audio {clip.file_path}: {e}")
         proj.add_track(track)
+
+    # Chargement ou création de la piste Master
+    if "master_track" in data and data["master_track"]:
+        proj.master_track = Track.from_dict(data["master_track"])
+        for p in proj.master_track.plugins:
+            if hasattr(p, "set_project"):
+                p.set_project(proj)
+    else:
+        proj.ensure_master_track()
 
     return proj
