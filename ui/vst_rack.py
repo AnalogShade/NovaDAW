@@ -319,8 +319,8 @@ class VstRackWidget(QWidget):
         btn_del = QPushButton("✕")
         btn_del.setFixedSize(24, 24)
         btn_del.setStyleSheet("background: transparent; border: none; color: #ef4444; font-size: 13px; font-weight: bold; padding: 0px;")
-        btn_del.setToolTip("Retirer ce plugin du rack")
-        btn_del.clicked.connect(lambda _, rid=rack_item["id"]: self._remove_plugin(rid))
+        rack_id = rack_item.get("id", "")
+        btn_del.clicked.connect(lambda _, rid=rack_id: self._remove_plugin(rid))
         c_layout.addWidget(btn_del)
 
         return card

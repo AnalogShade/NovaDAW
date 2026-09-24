@@ -55,6 +55,11 @@ def load_project(file_path: str) -> Project:
         file_path=file_path,
     )
 
+    import uuid
+    for item in proj.plugin_rack:
+        if isinstance(item, dict) and "id" not in item:
+            item["id"] = str(uuid.uuid4())[:8]
+
     from core.project import Track
     for t_data in data.get("tracks", []):
         track = Track.from_dict(t_data)

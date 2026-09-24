@@ -37,6 +37,15 @@ def main():
     load_stylesheet(app)
 
     window = MainWindow()
+    if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):
+        try:
+            from core.serializer import load_project
+            window.audio_engine.stop()
+            window.project = load_project(sys.argv[1])
+            window.audio_engine.set_project(window.project)
+            window.refresh_project_ui()
+        except Exception as e:
+            print(f"Erreur chargement projet CLI {sys.argv[1]}: {e}")
     window.showMaximized()
 
     sys.exit(app.exec())

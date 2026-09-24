@@ -119,11 +119,13 @@ class NovaIpcServer(QObject):
                 "error": None
             }
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             response = {
                 "id": req.get("id", "req-0") if "req" in locals() else "err",
                 "success": False,
                 "result": None,
-                "error": str(e)
+                "error": f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
             }
 
         try:

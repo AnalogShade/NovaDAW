@@ -424,6 +424,19 @@ class Track:
                     t.plugin_name = getattr(p, "name", None)
                     break
 
+        # Si plugin_path est un plugin natif mais n'est pas encore dans plugins
+        if t.plugin_path and str(t.plugin_path).startswith("novadaw.") and t.track_type == "midi":
+            has_p = any(getattr(p, "plugin_type_id", None) == t.plugin_path for p in t.plugins)
+            if not has_p:
+                try:
+                    from plugins.registry import plugin_registry, ensure_plugins_loaded
+                    ensure_plugins_loaded()
+                    p = plugin_registry.create_plugin(t.plugin_path)
+                    if p:
+                        t.plugins.insert(0, p)
+                except Exception:
+                    pass
+
         return t
 
 
