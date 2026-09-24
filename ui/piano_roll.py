@@ -455,7 +455,9 @@ class PianoRoll(QWidget):
             return
 
         is_multibus = any(k.lower() in (track.plugin_name or "").lower() for k in ["kontakt", "sampletank"])
-        if track.plugin_path == "novadaw.drum_machine" or "drums" in (track.plugin_name or "").lower():
+        if track.plugin_path == "novadaw.synth" or "synth" in (track.plugin_name or "").lower():
+            inst_tag = f"⚡ {track.plugin_name} (Synthé Polyphonique Multi-Couches) ✅"
+        elif track.plugin_path == "novadaw.drum_machine" or "drums" in (track.plugin_name or "").lower():
             inst_tag = f"🥁 {track.plugin_name} (Échantillonneur FP32) ✅"
         elif track.plugin_path and not is_multibus:
             inst_tag = f"VST3 Direct : {track.plugin_name} ✅"
@@ -484,7 +486,9 @@ class PianoRoll(QWidget):
         self.current_track = track
         self.current_clip = clip
         is_multibus = any(k.lower() in (track.plugin_name or "").lower() for k in ["kontakt", "sampletank"])
-        if track.plugin_path == "novadaw.drum_machine" or "drums" in (track.plugin_name or "").lower():
+        if track.plugin_path == "novadaw.synth" or "synth" in (track.plugin_name or "").lower():
+            inst_tag = f"⚡ {track.plugin_name} (Synthé Polyphonique Multi-Couches) ✅"
+        elif track.plugin_path == "novadaw.drum_machine" or "drums" in (track.plugin_name or "").lower():
             inst_tag = f"🥁 {track.plugin_name} (Échantillonneur FP32) ✅"
         elif track.plugin_path and not is_multibus:
             inst_tag = f"VST3 Direct : {track.plugin_name} ✅"

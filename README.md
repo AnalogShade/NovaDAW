@@ -77,11 +77,15 @@ NovaDAW transforme la station de travail audio numérique en un environnement co
   - **Processeur de Réverbération Stéréo Intégré** : Réverbération algorithmique de studio (Schroeder / Freeverb) avec contrôles de taille de pièce (*Room Size*), amortissement des hautes fréquences (*Damping*), largeur stéréo (*Width*) et mélange *Wet/Dry*.
   - **Gestion Acoustique par Pad** : Contrôle indépendant du volume, panoramique, pitch / accordage (±12 demi-tons), decay d'enveloppe et niveau d'envoi réverb (*Reverb Send*).
   - **Choke Group Intelligent** : Étouffement naturel du charleston ouvert lors de la frappe du charleston fermé.
-  - **Piste par Défaut & Presets** : Piste batterie avec groove 4/4 intégrée par défaut dans les nouveaux projets, et presets d'usine (*Studio Acoustic*, *Punchy Rock*, *Trap / Modern*, *Big Hall Ambience*, *Tight & Dry*).
-- **Piano Roll MIDI & Synthétiseur Intégré** :
-  - Clavier interactif (C1 à B6) jouant les notes en direct au clic.
-  - Grille magnétique (1/16, 1/8, 1/4, 1/2, 1 mesure).
-  - Synthétiseur polyphonique riche à modélisation harmonique et enveloppe ADSR.
+- **Synthétiseur Polyphonique Modulaire NovaSynth (`novadaw.synth`)** :
+  - **Synthèse DSP 100% Électronique Pure (FP32)** : Aucun sample nécessaire. 7 formes d'ondes anti-aliasées (PolyBLEP Saw, Square/Pulse avec PWM, Sine, Triangle, Bruit rose/blanc, FM 2-opérateurs, et SuperSaw 7-voix stéréo style Roland JP-8000).
+  - **Empilement de Couches Sonores (Sound Stacking)** : Possibilité de créer, dupliquer et superposer un nombre illimité de couches sonores indépendantes par note avec transposition d'octaves, demi-tons et micro-désaccordage (*Fine Tune*).
+  - **Matrice Multi-Sorties 10 Bus Stéréo** : Routage assignable de chaque couche sonore vers 10 sorties stéréo indépendantes (Bus 0 à Bus 9 / Out 1 à Out 10) permettant à plusieurs pistes de piloter le même synthétiseur sur des canaux audio séparés.
+  - **Double Enveloppe ADSR & Filtre State-Variable Analogique (SVF)** : Filtre multimode sans instabilité numérique (Passe-Bas, Passe-Haut, Passe-Bande, Rejet/Notch) avec résonance Q jusqu'à 10.0, saturation de distorsion intégrée et enveloppe de filtre dédiée.
+  - **LFO Multi-Destinations & Effets d'Espace** : LFO routable vers le pitch, le cutoff, le panoramique ou le volume, complété par un Délai Ping-Pong stéréo et une Réverbération de studio.
+  - **Design Cyberpunk & Interface Séduisante** : Arrière-plan orné d'une grille hexagonale et circuits néon, oscilloscope temps réel réactif, visualisateurs interactifs de courbe ADSR et de réponse en fréquence de filtre (Bode plot), et clavier d'écoute à latence nulle (<8ms).
+  - **Banque de Presets d'Usine** : *Cyberpunk Acid Lead*, *Neon Horizon SuperSaw*, *Deep Sub & Punch Bass*, *Ethereal Dream Pad*, *80s Synthwave Pluck*, *Sci-Fi FM Resonator*.
+  - **Contrôle Total par Protocole MCP** : Entièrement pilotable via `novadaw_configure_synth`, `novadaw_add_synth_layer`, `novadaw_remove_synth_layer`, `novadaw_set_synth_preset` et `novadaw_get_synth_state`.
 - **Export Mixdown WAV** : Rendu direct avec application des chaînes d'effets et du mastering.
 
 ---

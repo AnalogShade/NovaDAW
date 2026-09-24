@@ -494,12 +494,18 @@ class AudioEngine:
     def preview_note(self, pitch: int, duration_sec: float = 0.35, velocity: int = 100, track: Optional[Track] = None):
         """Joue immédiatement une note (appelé par le Piano Roll lors d'un clic)"""
         wave = None
-        # 1. Vérifier si la piste est routée vers un instrument natif (Nova Drums VSTi)
+        # 1. Vérifier si la piste est routée vers un instrument natif (Nova Drums VSTi, NovaSynth)
         native_inst = self.get_native_instrument(track) if track else None
         if native_inst and hasattr(native_inst, "render_note"):
             try:
-                wave = native_inst.render_note(pitch, duration_sec=duration_sec, sample_rate=self.sample_rate, velocity=velocity)
-            except Exception as e:
+                bus_idx = getattr(track, "synth_output_bus", None) if track else None
+                wave = native_inst.render_note(pitch, duration_sec=duration_sec, sample_rate=self.sample_rate, velocity=velocity, bus_index=bus_idx)
+            except TypeError:
+                try:
+                    wave = native_inst.render_note(pitch, duration_sec=duration_sec, sample_rate=self.sample_rate, velocity=velocity)
+                except Exception:
+                    wave = None
+            except Exception:
                 wave = None
 
         if wave is None and track and track.plugin_path:
@@ -695,8 +701,13 @@ class AudioEngine:
         beats_per_sec = bpm / 60.0
 
         if track.track_type == "midi":
-            # 1. Vérifier si la piste est routée vers un instrument virtuel natif (ex: Nova Drums VSTi)
-            native_inst = self.get_native_instrument(track)
+            # 0. Si la piste est routée vers un instrument hébergé sur une autre piste (synth_route_track_id)
+            target_track = None
+            if getattr(track, "synth_route_track_id", None) and self.project:
+                target_track = self.project.get_track(track.synth_route_track_id)
+
+            # 1. Vérifier si la piste est routée vers un instrument virtuel natif (ex: Nova Drums VSTi, NovaSynth)
+            native_inst = self.get_native_instrument(target_track) if target_track else self.get_native_instrument(track)
             rendered_by_native = False
 
             if native_inst and hasattr(native_inst, "render_slice"):
@@ -718,9 +729,20 @@ class AudioEngine:
                                 velocity=note.velocity
                             ))
                 try:
-                    native_out = native_inst.render_slice(
-                        clip_notes, start_b, end_b, beats_per_sec, frames, self.sample_rate
-                    )
+                    bus_idx = getattr(track, "synth_output_bus", None)
+                    if bus_idx is not None:
+                        try:
+                            native_out = native_inst.render_slice(
+                                clip_notes, start_b, end_b, beats_per_sec, frames, self.sample_rate, bus_index=bus_idx
+                            )
+                        except TypeError:
+                            native_out = native_inst.render_slice(
+                                clip_notes, start_b, end_b, beats_per_sec, frames, self.sample_rate
+                            )
+                    else:
+                        native_out = native_inst.render_slice(
+                            clip_notes, start_b, end_b, beats_per_sec, frames, self.sample_rate
+                        )
                     if native_out is not None and len(native_out) > 0:
                         n = min(frames, len(native_out))
                         track_buf[:n] += native_out[:n]

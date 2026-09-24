@@ -128,3 +128,8 @@ def ensure_plugins_loaded():
         import plugins.drum_machine.drum_plugin
     except ImportError as e:
         print(f"[PluginRegistry] Erreur chargement DrumMachine: {e}")
+
+    try:
+        import plugins.synth.synth_plugin
+    except ImportError as e:
+        print(f"[PluginRegistry] Erreur chargement NovaSynth: {e}")

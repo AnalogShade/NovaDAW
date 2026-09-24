@@ -114,6 +114,8 @@ class TrackHeaderWidget(QFrame):
         # Icône du type
         if "drum" in (self.track.plugin_name or "").lower() or "batterie" in self.track.name.lower() or self.track.plugin_path == "novadaw.drum_machine":
             icon = "🥁"
+        elif "synth" in (self.track.plugin_name or "").lower() or self.track.plugin_path == "novadaw.synth":
+            icon = "⚡"
         elif self.track.track_type == "midi":
             icon = "🎹"
         else:
@@ -534,10 +536,13 @@ class TrackHeaderWidget(QFrame):
         # 1. Synthé interne
         self.combo_plugin.addItem("🎹 Synthé Interne", userData=None)
 
-        # 2. Nova Drums VSTi
+        # 2. NovaSynth (Synthétiseur Polyphonique Modulaire)
+        self.combo_plugin.addItem("⚡ NovaSynth", userData="novadaw.synth")
+
+        # 3. Nova Drums VSTi
         self.combo_plugin.addItem("🥁 Nova Drums VSTi", userData="novadaw.drum_machine")
 
-        # 3. Instruments déjà chargés dans le Rack du projet
+        # 4. Instruments déjà chargés dans le Rack du projet
         rack_paths = set()
         proj = self.project
         if proj and hasattr(proj, "plugin_rack"):
@@ -546,13 +551,13 @@ class TrackHeaderWidget(QFrame):
                 rack_paths.add(r.get("file_path"))
                 self.combo_plugin.addItem(f"🎹 [Rack #{idx:02d}] {r['name']}", userData=r["file_path"])
 
-        # 4. Tous les autres instruments compatibles scannés
+        # 5. Tous les autres instruments compatibles scannés
         instruments = global_plugin_manager.get_compatible_instruments()
         for inst in instruments:
-            if inst.file_path not in rack_paths and inst.file_path != "novadaw.drum_machine":
+            if inst.file_path not in rack_paths and inst.file_path not in ("novadaw.drum_machine", "novadaw.synth"):
                 self.combo_plugin.addItem(f"🎹 {inst.name}", userData=inst.file_path)
 
-        # 5. Option pour ajouter au rack
+        # 6. Option pour ajouter au rack
         self.combo_plugin.addItem("➕ Assigner un instrument au Rack…", userData="__ADD_TO_RACK__")
 
         # Trouver l'élément sélectionné
@@ -582,7 +587,7 @@ class TrackHeaderWidget(QFrame):
 
         if file_path:
             self.track.plugin_path = file_path
-            raw = self.combo_plugin.currentText().replace("🎹 ", "").replace("🥁 ", "")
+            raw = self.combo_plugin.currentText().replace("🎹 ", "").replace("🥁 ", "").replace("⚡ ", "")
             if "[Rack #" in raw:
                 raw = raw.split("]", 1)[-1].strip()
             self.track.plugin_name = raw.strip()
@@ -593,15 +598,15 @@ class TrackHeaderWidget(QFrame):
             if proj and hasattr(proj, "add_rack_plugin"):
                 proj.add_rack_plugin(file_path, self.track.plugin_name, "instrument")
 
-            # Si Nova Drums, s'assurer qu'il est instancié
-            if file_path == "novadaw.drum_machine":
-                has_drum = any(getattr(p, "plugin_type_id", None) == "novadaw.drum_machine" for p in getattr(self.track, "plugins", []))
-                if not has_drum:
+            # Si Nova Drums ou NovaSynth, s'assurer qu'il est instancié
+            if file_path in ("novadaw.drum_machine", "novadaw.synth"):
+                has_inst = any(getattr(p, "plugin_type_id", None) == file_path for p in getattr(self.track, "plugins", []))
+                if not has_inst:
                     from plugins.registry import plugin_registry, ensure_plugins_loaded
                     ensure_plugins_loaded()
-                    dp = plugin_registry.create_plugin("novadaw.drum_machine")
-                    if dp:
-                        self.track.plugins.insert(0, dp)
+                    inst = plugin_registry.create_plugin(file_path)
+                    if inst:
+                        self.track.plugins.insert(0, inst)
         else:
             self.track.plugin_path = None
             self.track.plugin_name = None
@@ -650,17 +655,17 @@ class TrackHeaderWidget(QFrame):
             self.btn_edit_plugin.setToolTip("Éditer l'instrument VST (Ouvrir l'interface)")
 
     def _on_open_plugin_editor(self):
-        if self.track.plugin_path == "novadaw.drum_machine":
+        if self.track.plugin_path in ("novadaw.drum_machine", "novadaw.synth"):
             from ui.plugin_dialogs import open_native_plugin_editor
             from plugins.registry import plugin_registry, ensure_plugins_loaded
-            drum_plugin = next((p for p in getattr(self.track, "plugins", []) if getattr(p, "plugin_type_id", None) == "novadaw.drum_machine"), None)
-            if not drum_plugin:
+            native_plugin = next((p for p in getattr(self.track, "plugins", []) if getattr(p, "plugin_type_id", None) == self.track.plugin_path), None)
+            if not native_plugin:
                 ensure_plugins_loaded()
-                drum_plugin = plugin_registry.create_plugin("novadaw.drum_machine")
-                if drum_plugin:
-                    self.track.plugins.insert(0, drum_plugin)
-            if drum_plugin:
-                open_native_plugin_editor(drum_plugin, self)
+                native_plugin = plugin_registry.create_plugin(self.track.plugin_path)
+                if native_plugin:
+                    self.track.plugins.insert(0, native_plugin)
+            if native_plugin:
+                open_native_plugin_editor(native_plugin, self)
         elif self.track.plugin_path:
             from ui.plugin_dialogs import open_plugin_editor_gui
             open_plugin_editor_gui(self.track.plugin_path, self, f"track:{self.track.id}:instrument:{self.track.plugin_path}")
