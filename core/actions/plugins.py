@@ -39,6 +39,14 @@ def add_plugin_to_track(app, track_id: str, plugin_type_id: str) -> Dict[str, An
         plugin.set_project(app.project)
 
     track.add_plugin(plugin)
+
+    if getattr(plugin, "is_instrument", False) or getattr(plugin, "category", "") == "instrument":
+        if track.track_type == "midi":
+            track.plugin_path = plugin_type_id
+            track.plugin_name = plugin.name
+            if hasattr(app.project, "add_rack_plugin"):
+                app.project.add_rack_plugin(plugin_type_id, plugin.name, "instrument")
+
     app.refresh_project_ui()
 
     return {
@@ -556,12 +564,15 @@ def configure_drum_machine(
         drum_plugin = plugin_registry.create_plugin("novadaw.drum_machine")
         if drum_plugin:
             track.plugins.insert(0, drum_plugin)
-            if track.track_type == "midi":
-                track.plugin_path = "novadaw.drum_machine"
-                track.plugin_name = "Nova Drums VSTi"
 
     if not drum_plugin:
         return {"status": "error", "message": "Impossible d'instancier Nova Drums VSTi."}
+
+    if track.track_type == "midi":
+        track.plugin_path = "novadaw.drum_machine"
+        track.plugin_name = "Nova Drums VSTi"
+        if hasattr(app.project, "add_rack_plugin"):
+            app.project.add_rack_plugin("novadaw.drum_machine", "Nova Drums VSTi", "instrument")
 
     if preset:
         drum_plugin.apply_preset(preset)

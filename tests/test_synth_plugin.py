@@ -272,6 +272,79 @@ class TestNovaSynthPlugin(unittest.TestCase):
         })
         self.assertEqual(res_del["status"], "success")
 
+    def test_09_inspector_and_dialog_integration(self):
+        """Vérifie l'intégration GUI de NovaSynth : Inspector combo, bouton d'ouverture et état activé"""
+        from PySide6.QtWidgets import QApplication
+        from ui.inspector import TrackInspector
+        from ui.dialogs import AddTrackDialog
+        app = QApplication.instance() or QApplication([])
+
+        proj = Project(name="Synth GUI Test")
+        track = Track(name="Synth Track", track_type="midi")
+        proj.add_track(track)
+
+        inspector = TrackInspector(proj)
+        inspector.set_track(track)
+
+        # Vérifier que NovaSynth est disponible dans le combo de l'inspecteur
+        idx = inspector.combo_instrument.findData("novadaw.synth")
+        self.assertGreater(idx, 0, "NovaSynth doit être présent dans le sélecteur d'instrument.")
+
+        # Sélectionner NovaSynth dans l'inspecteur
+        inspector.combo_instrument.setCurrentIndex(idx)
+        self.assertEqual(track.plugin_path, "novadaw.synth")
+        self.assertEqual(track.plugin_name, "NovaSynth")
+        self.assertTrue(inspector.btn_edit_instrument.isEnabled(), "Le bouton Ouvrir l'interface doit être activé !")
+
+        # Vérifier que le plugin a bien été instancié sur la piste
+        has_synth = any(getattr(p, "plugin_type_id", None) == "novadaw.synth" for p in track.plugins)
+        self.assertTrue(has_synth, "NovaSynth doit être ajouté à la pile de plugins de la piste.")
+
+        # Vérifier AddTrackDialog
+        add_dlg = AddTrackDialog()
+        synth_dlg_idx = add_dlg.combo_inst.findData("novadaw.synth")
+        self.assertGreater(synth_dlg_idx, 0, "NovaSynth doit être disponible dans la création de piste.")
+        add_dlg.combo_inst.setCurrentIndex(synth_dlg_idx)
+        data = add_dlg.get_track_data()
+        self.assertEqual(data["plugin_path"], "novadaw.synth")
+
+        inspector.close()
+        add_dlg.close()
+
+    def test_10_serialization_and_phase_continuity(self):
+        """Vérifie la sérialisation avec auto-récupération de plugin_path et la continuité audio"""
+        # Test sérialisation sans plugin_path explicite
+        track = Track(name="Lead", track_type="midi", plugin_path=None)
+        synth = plugin_registry.create_plugin("novadaw.synth")
+        track.add_plugin(synth)
+
+        data = track.to_dict()
+        self.assertEqual(data["plugin_path"], "novadaw.synth")
+
+        # Restauration
+        restored = Track.from_dict(data)
+        self.assertEqual(restored.plugin_path, "novadaw.synth")
+        self.assertEqual(restored.plugin_name, "NovaSynth")
+
+        # Continuité de phase à travers 2 tranches audio consécutives
+        sr = 44100
+        frames = 512
+        notes = [MidiNote(pitch=60, start_beat=0.0, duration=4.0)]
+        bpm = 120.0
+        bps = bpm / 60.0
+
+        # Tranche 1 (0.0 -> 0.25 beat)
+        b1 = synth.render_slice(notes, 0.0, 0.25, bps, frames, sr)
+        # Tranche 2 (0.25 -> 0.50 beat)
+        b2 = synth.render_slice(notes, 0.25, 0.50, bps, frames, sr)
+
+        self.assertEqual(len(b1), frames)
+        self.assertEqual(len(b2), frames)
+        delta_l = abs(b2[0, 0] - b1[-1, 0])
+        delta_r = abs(b2[0, 1] - b1[-1, 1])
+        self.assertLess(delta_l, 0.5, "La transition entre tranches ne doit pas comporter de saut de phase brusque.")
+        self.assertLess(delta_r, 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

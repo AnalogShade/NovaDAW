@@ -123,14 +123,15 @@ class AddTrackDialog(QDialog):
             }
         """)
         self.combo_inst.addItem("🎹 Synthé Polyphonique NovaDAW (Défaut)", userData=None)
+        self.combo_inst.addItem("⚡ NovaSynth (Synthétiseur Polyphonique)", userData="novadaw.synth")
         self.combo_inst.addItem("🥁 Nova Drums VSTi (Batterie IA)", userData="novadaw.drum_machine")
         project = getattr(parent, "project", None)
         rack = project.plugin_rack if project else []
         for item in rack:
-            if item.get("plugin_type") == "instrument" and item["file_path"] != "novadaw.drum_machine":
+            if item.get("plugin_type") == "instrument" and item["file_path"] not in ("novadaw.drum_machine", "novadaw.synth"):
                 self.combo_inst.addItem(item["name"], userData=item["file_path"])
         for inst in global_plugin_manager.get_compatible_instruments():
-            if not any(item["file_path"] == inst.file_path for item in rack):
+            if not any(item["file_path"] == inst.file_path for item in rack) and inst.file_path not in ("novadaw.drum_machine", "novadaw.synth"):
                 self.combo_inst.addItem(inst.name, userData=inst.file_path)
         self.combo_inst.currentIndexChanged.connect(self._on_instrument_selected)
         layout.addWidget(self.combo_inst)
@@ -218,7 +219,7 @@ class AddTrackDialog(QDialog):
         plugin_path = self.combo_inst.currentData() if track_type == "midi" else None
         plugin_name = None
         if track_type == "midi" and plugin_path:
-            raw = self.combo_inst.currentText().replace("🎹 ", "").replace("🥁 ", "")
+            raw = self.combo_inst.currentText().replace("🎹 ", "").replace("⚡ ", "").replace("🥁 ", "")
             for badge in [" (Sampler Multi-bus) ⚠️", " (VST3 Direct) ✅", " (VST3)"]:
                 raw = raw.replace(badge, "")
             plugin_name = raw.strip()

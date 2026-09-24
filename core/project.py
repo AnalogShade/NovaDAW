@@ -347,6 +347,15 @@ class Track:
         return None
 
     def to_dict(self) -> dict:
+        plugin_path = self.plugin_path
+        plugin_name = self.plugin_name
+        if not plugin_path and self.track_type == "midi":
+            for p in self.plugins:
+                if getattr(p, "is_instrument", False) or getattr(p, "category", "") == "instrument":
+                    plugin_path = getattr(p, "plugin_type_id", None)
+                    plugin_name = getattr(p, "name", None)
+                    break
+
         return {
             "id": self.id,
             "name": self.name,
@@ -358,8 +367,8 @@ class Track:
             "soloed": self.soloed,
             "armed": self.armed,
             "height": int(self.height),
-            "plugin_path": self.plugin_path,
-            "plugin_name": self.plugin_name,
+            "plugin_path": plugin_path,
+            "plugin_name": plugin_name,
             "insert_effects": list(self.insert_effects),
             "plugins": [p.to_dict() for p in self.plugins if hasattr(p, "to_dict")],
             "synth_output_bus": self.synth_output_bus,
@@ -406,6 +415,14 @@ class Track:
                         t.plugins.append(p)
             except Exception as e:
                 print(f"[Track.from_dict] Erreur chargement plugins: {e}")
+
+        # Si plugin_path n'est pas renseigné mais qu'un instrument natif est présent dans la pile
+        if not t.plugin_path and t.track_type == "midi":
+            for p in t.plugins:
+                if getattr(p, "is_instrument", False) or getattr(p, "category", "") == "instrument":
+                    t.plugin_path = getattr(p, "plugin_type_id", None)
+                    t.plugin_name = getattr(p, "name", None)
+                    break
 
         return t
 

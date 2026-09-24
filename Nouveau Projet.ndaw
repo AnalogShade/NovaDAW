@@ -1,0 +1,369 @@
+{
+  "format_version": "1.1",
+  "name": "Nouveau Projet",
+  "bpm": 120.0,
+  "time_sig_num": 4,
+  "time_sig_denom": 4,
+  "loop_enabled": true,
+  "loop_start_beat": 0.0,
+  "loop_end_beat": 16.0,
+  "plugin_rack": [
+    {
+      "file_path": "novadaw.synth",
+      "name": "NovaSynth",
+      "plugin_type": "instrument"
+    }
+  ],
+  "plugin_states": {},
+  "master_track": {
+    "id": "e73fcb6c",
+    "name": "Master",
+    "track_type": "master",
+    "color": "#ef4444",
+    "volume": 1.0,
+    "pan": 0.0,
+    "muted": false,
+    "soloed": false,
+    "armed": false,
+    "height": 76,
+    "plugin_path": null,
+    "plugin_name": null,
+    "insert_effects": [],
+    "plugins": [
+      {
+        "instance_id": "b3c7caad",
+        "plugin_type_id": "novadaw.mixer",
+        "name": "Mixeur de Pistes",
+        "category": "mixer",
+        "enabled": true,
+        "state": {
+          "master_volume": 1.0,
+          "master_pan": 0.0,
+          "mono_switch": false,
+          "dim_switch": false
+        }
+      }
+    ],
+    "synth_output_bus": null,
+    "synth_route_track_id": null,
+    "clips": []
+  },
+  "tracks": [
+    {
+      "id": "e26119bb",
+      "name": "NovaSynth Lead",
+      "track_type": "midi",
+      "color": "#38bdf8",
+      "volume": 0.8,
+      "pan": 0.0,
+      "muted": false,
+      "soloed": false,
+      "armed": false,
+      "height": 76,
+      "plugin_path": "novadaw.synth",
+      "plugin_name": "NovaSynth",
+      "insert_effects": [],
+      "plugins": [
+        {
+          "instance_id": "7ad7d93d",
+          "plugin_type_id": "novadaw.synth",
+          "name": "NovaSynth",
+          "category": "instrument",
+          "enabled": true,
+          "state": {
+            "preset_name": "Neon Horizon SuperSaw",
+            "master_volume": 0.95,
+            "glide_time": 0.0,
+            "saturation_drive": 0.0,
+            "delay": {
+              "enabled": true,
+              "time_sec": 0.375,
+              "feedback": 0.4,
+              "ping_pong": true,
+              "mix": 0.25
+            },
+            "reverb": {
+              "enabled": true,
+              "room_size": 0.7,
+              "damping": 0.4,
+              "width": 1.0,
+              "mix": 0.3
+            },
+            "layers": [
+              {
+                "layer_id": "611e3d29",
+                "name": "SuperSaw 7-Voices",
+                "enabled": true,
+                "muted": false,
+                "soloed": false,
+                "color": "#00f0ff",
+                "waveform": "supersaw",
+                "octave": 0,
+                "semitone": 0,
+                "fine_tune": 0.0,
+                "volume": 0.85,
+                "pan": 0.0,
+                "output_bus": 0,
+                "unison_voices": 7,
+                "unison_detune": 0.35,
+                "unison_spread": 0.8,
+                "pulse_width": 0.5,
+                "fm_ratio": 2.0,
+                "fm_depth": 1.0,
+                "attack": 0.04,
+                "decay": 0.5,
+                "sustain": 0.8,
+                "release": 0.6,
+                "filter_type": "lowpass",
+                "cutoff": 12000.0,
+                "resonance": 0.8,
+                "drive": 0.0,
+                "key_tracking": 0.0,
+                "filter_env_amount": 0.0,
+                "filter_attack": 0.015,
+                "filter_decay": 0.3,
+                "filter_sustain": 0.2,
+                "filter_release": 0.4,
+                "lfo_enabled": false,
+                "lfo_waveform": "sine",
+                "lfo_rate": 2.0,
+                "lfo_depth": 0.0,
+                "lfo_target": "cutoff"
+              },
+              {
+                "layer_id": "1a80af65",
+                "name": "Warm Octave Down",
+                "enabled": true,
+                "muted": false,
+                "soloed": false,
+                "color": "#00f0ff",
+                "waveform": "saw",
+                "octave": -1,
+                "semitone": 0,
+                "fine_tune": 0.0,
+                "volume": 0.6,
+                "pan": 0.0,
+                "output_bus": 0,
+                "unison_voices": 7,
+                "unison_detune": 0.25,
+                "unison_spread": 0.5,
+                "pulse_width": 0.5,
+                "fm_ratio": 2.0,
+                "fm_depth": 1.0,
+                "attack": 0.02,
+                "decay": 0.4,
+                "sustain": 0.75,
+                "release": 0.5,
+                "filter_type": "lowpass",
+                "cutoff": 3500.0,
+                "resonance": 1.0,
+                "drive": 0.0,
+                "key_tracking": 0.0,
+                "filter_env_amount": 0.0,
+                "filter_attack": 0.015,
+                "filter_decay": 0.3,
+                "filter_sustain": 0.2,
+                "filter_release": 0.4,
+                "lfo_enabled": false,
+                "lfo_waveform": "sine",
+                "lfo_rate": 2.0,
+                "lfo_depth": 0.0,
+                "lfo_target": "cutoff"
+              },
+              {
+                "layer_id": "5aefcf1d",
+                "name": "Air Noise Shimmer",
+                "enabled": true,
+                "muted": false,
+                "soloed": false,
+                "color": "#00f0ff",
+                "waveform": "noise",
+                "octave": 1,
+                "semitone": 0,
+                "fine_tune": 0.0,
+                "volume": 0.25,
+                "pan": 0.0,
+                "output_bus": 1,
+                "unison_voices": 7,
+                "unison_detune": 0.25,
+                "unison_spread": 0.5,
+                "pulse_width": 0.5,
+                "fm_ratio": 2.0,
+                "fm_depth": 1.0,
+                "attack": 0.1,
+                "decay": 0.4,
+                "sustain": 0.2,
+                "release": 0.8,
+                "filter_type": "highpass",
+                "cutoff": 6000.0,
+                "resonance": 1.5,
+                "drive": 0.0,
+                "key_tracking": 0.0,
+                "filter_env_amount": 0.0,
+                "filter_attack": 0.015,
+                "filter_decay": 0.3,
+                "filter_sustain": 0.2,
+                "filter_release": 0.4,
+                "lfo_enabled": false,
+                "lfo_waveform": "sine",
+                "lfo_rate": 2.0,
+                "lfo_depth": 0.0,
+                "lfo_target": "cutoff"
+              },
+              {
+                "layer_id": "e35ad130",
+                "name": "FM Shimmer Accent",
+                "enabled": true,
+                "muted": false,
+                "soloed": false,
+                "color": "#00ff88",
+                "waveform": "fm",
+                "octave": 1,
+                "semitone": 0,
+                "fine_tune": 0.0,
+                "volume": 0.7,
+                "pan": 0.0,
+                "output_bus": 2,
+                "unison_voices": 7,
+                "unison_detune": 0.25,
+                "unison_spread": 0.5,
+                "pulse_width": 0.5,
+                "fm_ratio": 2.0,
+                "fm_depth": 1.0,
+                "attack": 0.005,
+                "decay": 0.15,
+                "sustain": 0.2,
+                "release": 0.35,
+                "filter_type": "lowpass",
+                "cutoff": 4500.0,
+                "resonance": 2.0,
+                "drive": 0.0,
+                "key_tracking": 0.0,
+                "filter_env_amount": 0.0,
+                "filter_attack": 0.015,
+                "filter_decay": 0.3,
+                "filter_sustain": 0.2,
+                "filter_release": 0.4,
+                "lfo_enabled": false,
+                "lfo_waveform": "sine",
+                "lfo_rate": 2.0,
+                "lfo_depth": 0.0,
+                "lfo_target": "cutoff"
+              }
+            ]
+          }
+        }
+      ],
+      "synth_output_bus": null,
+      "synth_route_track_id": null,
+      "clips": [
+        {
+          "id": "8039610f",
+          "name": "SuperSaw Chords",
+          "type": "midi",
+          "start_beat": 0.0,
+          "length_beats": 8.0,
+          "color": "#38bdf8",
+          "notes": [
+            {
+              "pitch": 57,
+              "start_beat": 0.0,
+              "duration": 1.75,
+              "velocity": 105
+            },
+            {
+              "pitch": 60,
+              "start_beat": 0.0,
+              "duration": 1.75,
+              "velocity": 100
+            },
+            {
+              "pitch": 64,
+              "start_beat": 0.0,
+              "duration": 1.75,
+              "velocity": 105
+            },
+            {
+              "pitch": 67,
+              "start_beat": 0.0,
+              "duration": 1.75,
+              "velocity": 95
+            },
+            {
+              "pitch": 53,
+              "start_beat": 2.0,
+              "duration": 1.75,
+              "velocity": 105
+            },
+            {
+              "pitch": 57,
+              "start_beat": 2.0,
+              "duration": 1.75,
+              "velocity": 100
+            },
+            {
+              "pitch": 60,
+              "start_beat": 2.0,
+              "duration": 1.75,
+              "velocity": 100
+            },
+            {
+              "pitch": 64,
+              "start_beat": 2.0,
+              "duration": 1.75,
+              "velocity": 95
+            },
+            {
+              "pitch": 48,
+              "start_beat": 4.0,
+              "duration": 1.75,
+              "velocity": 110
+            },
+            {
+              "pitch": 55,
+              "start_beat": 4.0,
+              "duration": 1.75,
+              "velocity": 100
+            },
+            {
+              "pitch": 60,
+              "start_beat": 4.0,
+              "duration": 1.75,
+              "velocity": 100
+            },
+            {
+              "pitch": 64,
+              "start_beat": 4.0,
+              "duration": 1.75,
+              "velocity": 95
+            },
+            {
+              "pitch": 52,
+              "start_beat": 6.0,
+              "duration": 1.75,
+              "velocity": 105
+            },
+            {
+              "pitch": 55,
+              "start_beat": 6.0,
+              "duration": 1.75,
+              "velocity": 100
+            },
+            {
+              "pitch": 59,
+              "start_beat": 6.0,
+              "duration": 1.75,
+              "velocity": 100
+            },
+            {
+              "pitch": 64,
+              "start_beat": 6.0,
+              "duration": 1.75,
+              "velocity": 95
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

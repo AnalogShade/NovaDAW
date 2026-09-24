@@ -23,12 +23,15 @@ def _get_or_create_synth_plugin(app, track_id_or_name: str):
         synth_plugin = plugin_registry.create_plugin("novadaw.synth")
         if synth_plugin:
             track.plugins.insert(0, synth_plugin)
-            if track.track_type == "midi":
-                track.plugin_path = "novadaw.synth"
-                track.plugin_name = "NovaSynth"
 
     if not synth_plugin:
         raise RuntimeError("Impossible d'instancier l'instrument NovaSynth.")
+
+    if track.track_type == "midi":
+        track.plugin_path = "novadaw.synth"
+        track.plugin_name = "NovaSynth"
+        if hasattr(app.project, "add_rack_plugin"):
+            app.project.add_rack_plugin("novadaw.synth", "NovaSynth", "instrument")
 
     return track, synth_plugin
 

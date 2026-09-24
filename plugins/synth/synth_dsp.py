@@ -29,16 +29,18 @@ def generate_oscillator(
     fm_ratio: float = 2.0,
     fm_depth: float = 1.0,
     unison_detune: float = 0.25,
-    unison_spread: float = 0.5
+    unison_spread: float = 0.5,
+    time_offset: float = 0.0
 ) -> np.ndarray:
     """
     Génère un buffer audio stéréo (num_samples, 2) FP32 pour la forme d'onde demandée.
     Applique un anti-aliasing PolyBLEP sur les ondes riches en harmoniques (Saw, Square).
+    Garantit une continuité de phase parfaite d'un bloc à l'autre grâce à time_offset.
     """
     if num_samples <= 0:
         return np.zeros((0, 2), dtype=np.float32)
 
-    t = (np.arange(num_samples, dtype=np.float64) / sample_rate)
+    t = (np.arange(num_samples, dtype=np.float64) / sample_rate) + float(time_offset)
     wave_lower = (wave_type or "sine").lower().strip()
 
     # Fréquence normalisée
@@ -121,15 +123,14 @@ def generate_oscillator(
         # SuperSaw 7 voix detuned avec répartition panoramique stéréo (style Roland JP-8000)
         detune_factors = np.array([-0.11, -0.06, -0.02, 0.0, 0.02, 0.06, 0.11]) * max(0.01, min(1.0, unison_detune))
         pans = np.linspace(-unison_spread, unison_spread, 7)
+        seed_phases = np.array([0.0, 0.142857, 0.285714, 0.428571, 0.571428, 0.714285, 0.857142])
 
         left = np.zeros(num_samples, dtype=np.float32)
         right = np.zeros(num_samples, dtype=np.float32)
 
-        for d_st, pan in zip(detune_factors, pans):
+        for idx, (d_st, pan) in enumerate(zip(detune_factors, pans)):
             f_voice = freq * (2.0 ** (d_st / 12.0))
-            # Phase pseudo-aléatoire déterministe
-            rand_phase = ((phase_offset * 7.13 + d_st * 13.7) % 1.0)
-            p_v = (t * f_voice + rand_phase) % 1.0
+            p_v = (t * f_voice + seed_phases[idx] + phase_offset) % 1.0
             saw_v = (2.0 * p_v - 1.0).astype(np.float32)
 
             gain_l = float(np.sqrt(0.5 * (1.0 - pan)))

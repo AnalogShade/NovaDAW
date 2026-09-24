@@ -211,6 +211,8 @@ class NovaSynthPlugin(BasePlugin):
 
         # Filtre interne de secours pour traitement audio entrant
         self._input_svf = ChamberlinSVF()
+        # Filtres continus par voix active pour éliminer tout clic entre blocs
+        self._voice_svfs: Dict[Tuple[int, float, str], ChamberlinSVF] = {}
 
         # Liste des couches sonores empilées (Sound Layers)
         self.layers: List[SynthLayer] = []
@@ -361,18 +363,18 @@ class NovaSynthPlugin(BasePlugin):
                 "reverb": {"enabled": True, "room_size": 0.70, "mix": 0.30},
                 "layers": [
                     {
-                        "name": "SuperSaw 7-Voices", "waveform": "supersaw", "octave": 0, "volume": 0.85, "pan": 0.0, "output_bus": 0,
-                        "unison_detune": 0.35, "unison_spread": 0.8, "cutoff": 12000.0, "resonance": 0.8,
+                        "name": "SuperSaw 7-Voices", "waveform": "supersaw", "octave": 0, "volume": 0.80, "pan": 0.0, "output_bus": 0,
+                        "unison_detune": 0.28, "unison_spread": 0.75, "cutoff": 6500.0, "resonance": 0.8,
                         "attack": 0.040, "decay": 0.5, "sustain": 0.8, "release": 0.6
                     },
                     {
-                        "name": "Warm Octave Down", "waveform": "saw", "octave": -1, "volume": 0.60, "pan": 0.0, "output_bus": 0,
-                        "cutoff": 3500.0, "resonance": 1.0,
+                        "name": "Warm Octave Down", "waveform": "saw", "octave": -1, "volume": 0.55, "pan": 0.0, "output_bus": 0,
+                        "cutoff": 3200.0, "resonance": 1.0,
                         "attack": 0.020, "decay": 0.4, "sustain": 0.75, "release": 0.5
                     },
                     {
-                        "name": "Air Noise Shimmer", "waveform": "noise", "octave": 1, "volume": 0.25, "pan": 0.0, "output_bus": 1,
-                        "cutoff": 6000.0, "resonance": 1.5, "filter_type": "highpass",
+                        "name": "Air Noise Shimmer", "waveform": "noise", "octave": 1, "volume": 0.03, "pan": 0.0, "output_bus": 1,
+                        "cutoff": 4500.0, "resonance": 0.8, "filter_type": "highpass",
                         "attack": 0.100, "decay": 0.4, "sustain": 0.2, "release": 0.8
                     }
                 ]
@@ -596,7 +598,7 @@ class NovaSynthPlugin(BasePlugin):
                     elif layer.lfo_target == "amp":
                         amp_env *= np.clip(1.0 + lfo_mod * 0.5, 0.0, 1.5)
 
-                # 3. Synthèse de l'oscillateur
+                # 3. Synthèse de l'oscillateur avec continuité temporelle et de phase
                 raw_osc = generate_oscillator(
                     wave_type=layer.waveform,
                     freq=freq,
@@ -607,11 +609,16 @@ class NovaSynthPlugin(BasePlugin):
                     fm_ratio=layer.fm_ratio,
                     fm_depth=layer.fm_depth,
                     unison_detune=layer.unison_detune,
-                    unison_spread=layer.unison_spread
+                    unison_spread=layer.unison_spread,
+                    time_offset=t_start_rel
                 )
 
-                # 4. Traitement par le filtre State-Variable
-                svf = ChamberlinSVF()
+                # 4. Traitement par le filtre State-Variable continu (sans clics inter-blocs)
+                voice_key = (pitch, round(note_start_b, 4), layer.layer_id)
+                if voice_key not in self._voice_svfs:
+                    self._voice_svfs[voice_key] = ChamberlinSVF()
+                svf = self._voice_svfs[voice_key]
+
                 filtered = svf.process(
                     audio=raw_osc,
                     sample_rate=sample_rate,
@@ -649,13 +656,22 @@ class NovaSynthPlugin(BasePlugin):
         for b in buses:
             master_mix += b
 
+        # Soft limiting & polyphony headroom scaling pour un son riche et propre sans saturation agressive
+        total_active_sources = max(1, len(notes) * len(active_layers))
+        if total_active_sources > 1:
+            poly_headroom = 1.0 / np.sqrt(total_active_sources * 0.65)
+            master_mix *= min(1.0, poly_headroom)
+
         # Master FX
         if self.delay.enabled:
             master_mix = self.delay.process(master_mix)
         if self.reverb.enabled:
             master_mix = self.reverb.process(master_mix)
 
-        return (master_mix * self.master_volume).astype(np.float32)
+        # Saturation analogique musicale douce (soft knee)
+        out = master_mix * self.master_volume
+        out = np.tanh(out * 0.90) * 1.05
+        return out.astype(np.float32)
 
     def render_slice_all_buses(
         self,
@@ -710,6 +726,7 @@ class NovaSynthPlugin(BasePlugin):
         self.delay.reset()
         self.reverb.reset()
         self._input_svf.reset()
+        self._voice_svfs.clear()
 
     # -------------------------------------------------------------------------
     # Sérialisation & État

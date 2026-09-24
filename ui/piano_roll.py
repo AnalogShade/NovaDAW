@@ -396,6 +396,32 @@ class PianoRoll(QWidget):
 
         tb_layout.addStretch()
 
+        # Bouton Ouvrir Interface Plugin
+        self.btn_open_instrument = QPushButton("⚡ Éditer Instrument [e]")
+        self.btn_open_instrument.setEnabled(False)
+        self.btn_open_instrument.setStyleSheet("""
+            QPushButton {
+                background-color: #1a1e2e;
+                color: #00f0ff;
+                font-weight: bold;
+                border: 1px solid #00f0ff;
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #0284c7;
+                color: #ffffff;
+            }
+            QPushButton:disabled {
+                border-color: #282a36;
+                color: #475569;
+                background-color: transparent;
+            }
+        """)
+        self.btn_open_instrument.clicked.connect(self._on_open_instrument_editor)
+        tb_layout.addWidget(self.btn_open_instrument)
+
         # Bouton Vider
         self.btn_clear = QPushButton("🗑 Tout effacer")
         self.btn_clear.setMinimumWidth(110)
@@ -466,7 +492,14 @@ class PianoRoll(QWidget):
         else:
             inst_tag = "Synthé Interne NovaDAW"
 
-        # Piste MIDI
+        has_plugin = bool(track and track.plugin_path)
+        self.btn_open_instrument.setEnabled(has_plugin)
+        if has_plugin:
+            icon = "⚡" if track.plugin_path == "novadaw.synth" else ("🥁" if track.plugin_path == "novadaw.drum_machine" else "🎹")
+            self.btn_open_instrument.setText(f"{icon} Éditer {track.plugin_name or 'Instrument'} [e]")
+        else:
+            self.btn_open_instrument.setText("⚡ Éditer Instrument [e]")
+
         if track.clips and isinstance(track.clips[0], MidiClip):
             # Si le clip actuel fait déjà partie des clips de cette piste, on le conserve
             if self.current_clip not in track.clips:
@@ -485,6 +518,15 @@ class PianoRoll(QWidget):
 
         self.current_track = track
         self.current_clip = clip
+
+        has_plugin = bool(track and track.plugin_path)
+        self.btn_open_instrument.setEnabled(has_plugin)
+        if has_plugin:
+            icon = "⚡" if track.plugin_path == "novadaw.synth" else ("🥁" if track.plugin_path == "novadaw.drum_machine" else "🎹")
+            self.btn_open_instrument.setText(f"{icon} Éditer {track.plugin_name or 'Instrument'} [e]")
+        else:
+            self.btn_open_instrument.setText("⚡ Éditer Instrument [e]")
+
         is_multibus = any(k.lower() in (track.plugin_name or "").lower() for k in ["kontakt", "sampletank"])
         if track.plugin_path == "novadaw.synth" or "synth" in (track.plugin_name or "").lower():
             inst_tag = f"⚡ {track.plugin_name} (Synthé Polyphonique Multi-Couches) ✅"
@@ -498,6 +540,24 @@ class PianoRoll(QWidget):
             inst_tag = "Synthé Interne NovaDAW"
         self.lbl_title.setText(f"🎹 PIANO ROLL : [{track.name}] ➔ {clip.name} — {inst_tag}")
         self.note_grid.set_clip(clip)
+
+    def _on_open_instrument_editor(self):
+        if not self.current_track or not self.current_track.plugin_path:
+            return
+        if self.current_track.plugin_path in ("novadaw.synth", "novadaw.drum_machine"):
+            from ui.plugin_dialogs import open_native_plugin_editor
+            from plugins.registry import plugin_registry, ensure_plugins_loaded
+            native_plugin = next((p for p in getattr(self.current_track, "plugins", []) if getattr(p, "plugin_type_id", None) == self.current_track.plugin_path), None)
+            if not native_plugin:
+                ensure_plugins_loaded()
+                native_plugin = plugin_registry.create_plugin(self.current_track.plugin_path)
+                if native_plugin:
+                    self.current_track.plugins.insert(0, native_plugin)
+            if native_plugin:
+                open_native_plugin_editor(native_plugin, self)
+        else:
+            from ui.plugin_dialogs import open_plugin_editor_gui
+            open_plugin_editor_gui(self.current_track.plugin_path, self, f"track:{self.current_track.id}:instrument:{self.current_track.plugin_path}")
 
     def clear(self):
         """Réinitialise le piano roll à un état vide."""

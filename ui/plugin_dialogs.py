@@ -259,6 +259,8 @@ class NativePluginDialog(QDialog):
             self.resize(680, 460)
         elif getattr(plugin, "plugin_type_id", "") == "novadaw.drum_machine":
             self.resize(800, 640)
+        elif getattr(plugin, "plugin_type_id", "") == "novadaw.synth":
+            self.resize(920, 680)
         else:
             self.resize(650, 450)
 

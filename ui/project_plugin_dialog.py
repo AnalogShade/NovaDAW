@@ -47,6 +47,7 @@ class ProjectPluginDialog(QDialog):
         self.list.clear()
         entries = [
             ("Nova Drums VSTi (Batterie IA)", "novadaw.drum_machine", "instrument"),
+            ("⚡ NovaSynth (Synthétiseur Polyphonique)", "novadaw.synth", "instrument"),
             ("Égaliseur Paramétrique", "novadaw.equalizer", "effect"),
             ("Compresseur Dynamique", "novadaw.compressor", "effect"),
             ("Mixeur de Pistes", "novadaw.mixer", "effect"),

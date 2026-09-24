@@ -617,9 +617,19 @@ class TrackHeaderWidget(QFrame):
     def _on_editor_state_changed(self, path=None):
         if not hasattr(self, "btn_edit_plugin"):
             return
-        is_open = global_plugin_manager.is_editor_open(f"track:{self.track.id}:instrument:{self.track.plugin_path}") if self.track.plugin_path else False
-        if not is_open and self.track.plugin_path:
-            is_open = global_plugin_manager.is_editor_open(self.track.plugin_path)
+        is_open = False
+        if self.track.plugin_path in ("novadaw.synth", "novadaw.drum_machine"):
+            from ui.plugin_dialogs import _open_native_editors
+            for p in getattr(self.track, "plugins", []):
+                if getattr(p, "plugin_type_id", None) == self.track.plugin_path:
+                    inst_id = getattr(p, "instance_id", None)
+                    if inst_id and inst_id in _open_native_editors:
+                        is_open = _open_native_editors[inst_id].isVisible()
+                    break
+        elif self.track.plugin_path:
+            is_open = global_plugin_manager.is_editor_open(f"track:{self.track.id}:instrument:{self.track.plugin_path}")
+            if not is_open:
+                is_open = global_plugin_manager.is_editor_open(self.track.plugin_path)
 
         if is_open:
             self.btn_edit_plugin.setStyleSheet("""
