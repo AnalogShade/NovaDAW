@@ -179,3 +179,93 @@ class DrumReverb:
         out_r = (in_r * self.dry_mix) + out_wet_r
 
         return np.column_stack((out_l, out_r)).astype(np.float32)
+
+    def process_burst(self, input_audio: np.ndarray) -> np.ndarray:
+        """
+        Version ultra-rapide vectorisée (via scipy.signal.lfilter) spécialement optimisée
+        pour le pré-rendu et la mise en cache RAM instantanée des pads de batterie.
+        Ne perturbe pas l'état des registres temps réel.
+        """
+        if not self.enabled or (self.wet_mix <= 0.001 and self.dry_mix >= 0.999):
+            if input_audio.ndim == 1:
+                return np.column_stack((input_audio, input_audio)).astype(np.float32)
+            return input_audio.astype(np.float32)
+
+        try:
+            import scipy.signal as sig
+        except ImportError:
+            # Fallback direct si scipy non disponible
+            return self.process(input_audio)
+
+        if input_audio.ndim == 1:
+            in_l = input_audio
+            in_r = input_audio
+        else:
+            in_l = input_audio[:, 0]
+            in_r = input_audio[:, 1]
+
+        sr = self.sample_rate
+        # Pour une réverbération de percussion vive, limiter le signal d'excitation de réverb à 1.5s
+        max_rev_len = min(len(input_audio), int(1.5 * sr))
+        in_mix = (in_l[:max_rev_len] + in_r[:max_rev_len]) * 0.015
+
+        feedback = float(0.70 + (self.room_size * 0.28))
+        damp = float(np.clip(self.damping * 0.4, 0.0, 0.4))
+
+        scale = sr / 44100.0
+        combs_l = [max(1, int(t * scale)) for t in self.COMB_TUNINGS_L]
+        combs_r = [max(1, int(t * scale)) for t in self.COMB_TUNINGS_R]
+        ap_l = [max(1, int(t * scale)) for t in self.ALLPASS_TUNINGS_L]
+        ap_r = [max(1, int(t * scale)) for t in self.ALLPASS_TUNINGS_R]
+
+        def _fast_comb(x: np.ndarray, M: int) -> np.ndarray:
+            b = np.zeros(M + 2, dtype=np.float64)
+            b[M] = 1.0
+            b[M + 1] = -damp
+            a = np.zeros(M + 1, dtype=np.float64)
+            a[0] = 1.0
+            a[1] = -damp
+            a[M] = -feedback * (1.0 - damp)
+            return sig.lfilter(b, a, x).astype(np.float32)
+
+        def _fast_allpass(x: np.ndarray, M: int, fb: float = 0.5) -> np.ndarray:
+            b = np.zeros(M + 1, dtype=np.float64)
+            b[0] = -1.0
+            b[M] = 1.0 + fb
+            a = np.zeros(M + 1, dtype=np.float64)
+            a[0] = 1.0
+            a[M] = -fb
+            return sig.lfilter(b, a, x).astype(np.float32)
+
+        out_comb_l = np.zeros(max_rev_len, dtype=np.float32)
+        for m in combs_l:
+            out_comb_l += _fast_comb(in_mix, m)
+
+        out_comb_r = np.zeros(max_rev_len, dtype=np.float32)
+        for m in combs_r:
+            out_comb_r += _fast_comb(in_mix, m)
+
+        out_ap_l = out_comb_l
+        for m in ap_l:
+            out_ap_l = _fast_allpass(out_ap_l, m)
+
+        out_ap_r = out_comb_r
+        for m in ap_r:
+            out_ap_r = _fast_allpass(out_ap_r, m)
+
+        wet1 = self.wet_mix * (self.width / 2.0 + 0.5)
+        wet2 = self.wet_mix * ((1.0 - self.width) / 2.0)
+
+        out_wet_l = out_ap_l * wet1 + out_ap_r * wet2
+        out_wet_r = out_ap_r * wet1 + out_ap_l * wet2
+
+        full_len = len(input_audio)
+        if full_len > max_rev_len:
+            out_wet_l = np.pad(out_wet_l, (0, full_len - max_rev_len))
+            out_wet_r = np.pad(out_wet_r, (0, full_len - max_rev_len))
+
+        out_l = (in_l * self.dry_mix) + out_wet_l
+        out_r = (in_r * self.dry_mix) + out_wet_r
+
+        return np.column_stack((out_l, out_r)).astype(np.float32)
+

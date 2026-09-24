@@ -3,7 +3,7 @@ ui/main_window.py - Fenêtre principale du DAW inspirée de Cubase Pro
 """
 import os
 import time
-from typing import Optional
+from typing import Optional, Dict, Any
 import soundfile as sf
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
@@ -21,6 +21,7 @@ from core.hardware_manager import hardware_manager
 from ui.transport_bar import TransportBar
 from ui.track_header import TrackHeaderWidget
 from ui.timeline_view import TimelineRuler, TimelineGrid
+from ui.editing_toolbar import EditingToolbar
 from ui.piano_roll import PianoRoll
 from ui.audio_editor import AudioEditor
 from ui.dialogs import AddTrackDialog
@@ -30,7 +31,8 @@ from core.ipc import NovaIpcServer
 from core.plugin_manager import global_plugin_manager
 from ui.inspector import TrackInspector
 from ui.vst_rack import VstRackWidget
-from ui.plugin_dialogs import PluginManagerDialog, PluginFolderManagerDialog, open_plugin_editor_gui, open_native_plugin_editor
+from ui.floating_plugin_rack import FloatingPluginRackDialog
+from ui.plugin_dialogs import analyze_plugin_file, PluginManagerDialog, PluginFolderManagerDialog, open_plugin_editor_gui, open_native_plugin_editor
 from plugins.registry import plugin_registry, ensure_plugins_loaded
 import core.actions
 
@@ -54,6 +56,8 @@ class MainWindow(QMainWindow):
 
         self.is_lower_zone_minimized = False
         self._saved_lower_height = 270
+        self._active_recording_clips: Dict[str, Any] = {}
+        self.floating_vst_rack: Optional[FloatingPluginRackDialog] = None
 
         # 2. Construction de l'interface
         self._init_menus()
@@ -74,6 +78,9 @@ class MainWindow(QMainWindow):
         self.ipc_server = NovaIpcServer(self)
         if self.ipc_server.start():
             print(f"[NovaDAW] Serveur IPC actif sur le port {self.ipc_server.actual_port} (Support MCP prêt).")
+
+        # 5. Déclenchement automatique et non-bloquant de la détection de nouveaux plugins (2s après démarrage)
+        QTimer.singleShot(2000, lambda: global_plugin_manager.trigger_background_scan())
 
     def _init_menus(self):
         menubar = self.menuBar()
@@ -130,6 +137,48 @@ class MainWindow(QMainWindow):
         act_exit.triggered.connect(self.close)
         menu_file.addAction(act_exit)
 
+        # Menu Édition
+        menu_edit = menubar.addMenu("&Édition")
+
+        act_cut = QAction("✂️ &Couper", self)
+        act_cut.setShortcut("Ctrl+X")
+        act_cut.triggered.connect(self._on_cut_clip)
+        menu_edit.addAction(act_cut)
+
+        act_copy = QAction("📋 &Copier", self)
+        act_copy.setShortcut("Ctrl+C")
+        act_copy.triggered.connect(self._on_copy_clip)
+        menu_edit.addAction(act_copy)
+
+        act_paste = QAction("📥 Co&ller à la tête de lecture", self)
+        act_paste.setShortcut("Ctrl+V")
+        act_paste.triggered.connect(self._on_paste_clip)
+        menu_edit.addAction(act_paste)
+
+        act_dup = QAction("📑 &Dupliquer", self)
+        act_dup.setShortcut("Ctrl+D")
+        act_dup.triggered.connect(self._on_duplicate_clip)
+        menu_edit.addAction(act_dup)
+
+        act_del = QAction("🗑️ &Supprimer", self)
+        act_del.setShortcut("Delete")
+        act_del.triggered.connect(self._on_delete_clip)
+        menu_edit.addAction(act_del)
+
+        menu_edit.addSeparator()
+
+        act_split = QAction("✂️ &Scinder au curseur (Playhead)", self)
+        act_split.setShortcut("Ctrl+K")
+        act_split.triggered.connect(self._on_split_playhead)
+        menu_edit.addAction(act_split)
+
+        menu_edit.addSeparator()
+
+        act_snap = QAction("🧲 Activer / Désactiver &Aimantage (Snap)", self)
+        act_snap.setShortcut("J")
+        act_snap.triggered.connect(self._toggle_snap)
+        menu_edit.addAction(act_snap)
+
         # Menu Piste
         menu_track = menubar.addMenu("&Piste")
 
@@ -145,6 +194,10 @@ class MainWindow(QMainWindow):
 
         # Menu Plugins
         menu_plugins = menubar.addMenu("&Plugins")
+        act_project_plugin = QAction("➕ Ajouter un plugin au projet…", self)
+        act_project_plugin.triggered.connect(self.add_project_plugin)
+        menu_plugins.addAction(act_project_plugin)
+        menu_plugins.addSeparator()
 
         act_mixer = QAction("🎛️ &Console de Mixage (Mixeur)...", self)
         act_mixer.setShortcut("F5")
@@ -161,9 +214,9 @@ class MainWindow(QMainWindow):
 
         menu_plugins.addSeparator()
 
-        act_rack = QAction("🎛️ &Rack VST du Projet (Stack F11)...", self)
+        act_rack = QAction("🎛️ &Rack de Plugins Flottant (F11)…", self)
         act_rack.setShortcut("F11")
-        act_rack.triggered.connect(self.show_vst_rack)
+        act_rack.triggered.connect(self.show_floating_vst_rack)
         menu_plugins.addAction(act_rack)
 
         menu_plugins.addSeparator()
@@ -342,6 +395,27 @@ class MainWindow(QMainWindow):
         btn_quick_mixer.clicked.connect(self.show_mixer_console)
         bb_layout.addWidget(btn_quick_mixer)
 
+        self.btn_quick_plugins = QPushButton("🎛️ Plugins (F11)")
+        self.btn_quick_plugins.setFixedHeight(26)
+        self.btn_quick_plugins.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                font-weight: bold;
+                padding: 2px 12px;
+                background-color: #162032;
+                color: #38bdf8;
+                border: 1px solid #0284c7;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #0284c7;
+                color: #ffffff;
+            }
+        """)
+        self.btn_quick_plugins.setToolTip("Ouvrir la Fenêtre Flottante du Rack de Plugins (F11 - Style Cubase)")
+        self.btn_quick_plugins.clicked.connect(self.show_floating_vst_rack)
+        bb_layout.addWidget(self.btn_quick_plugins)
+
         bb_layout.addStretch()
 
         # Côté droit : Accès Périphériques Audio & GPU et Statut IA
@@ -358,6 +432,10 @@ class MainWindow(QMainWindow):
         bb_layout.addWidget(self.lbl_mcp_badge)
 
         main_layout.addWidget(brand_bar)
+
+        # Palette & Barre d'outils d'édition vers le haut de l'arrangement
+        self.editing_toolbar = EditingToolbar(self)
+        main_layout.addWidget(self.editing_toolbar)
 
         # Splitter Vertical : Arrangement en haut, Panneau Inférieur (Transport + Éditeurs) en bas
         self.main_splitter = QSplitter(Qt.Vertical)
@@ -452,6 +530,22 @@ class MainWindow(QMainWindow):
         self.timeline_grid.clip_double_clicked.connect(self._on_clip_double_clicked)
         self.timeline_grid.project_modified.connect(self._on_project_modified)
         self.timeline_grid.track_height_changed.connect(self._on_track_height_changed)
+        self.timeline_grid.status_message.connect(self.statusBar().showMessage)
+
+        # Connexions de la barre d'outils d'édition
+        self.editing_toolbar.tool_changed.connect(self._on_tool_changed)
+        self.editing_toolbar.split_playhead_requested.connect(self._on_split_playhead)
+        self.editing_toolbar.copy_requested.connect(self._on_copy_clip)
+        self.editing_toolbar.cut_requested.connect(self._on_cut_clip)
+        self.editing_toolbar.paste_requested.connect(self._on_paste_clip)
+        self.editing_toolbar.duplicate_requested.connect(self._on_duplicate_clip)
+        self.editing_toolbar.delete_requested.connect(self._on_delete_clip)
+        self.editing_toolbar.snap_toggled.connect(self._on_snap_toggled)
+        self.editing_toolbar.grid_resolution_changed.connect(self._on_grid_resolution_changed)
+        self.editing_toolbar.zoom_in_requested.connect(self._zoom_timeline_in)
+        self.editing_toolbar.zoom_out_requested.connect(self._zoom_timeline_out)
+        self.editing_toolbar.zoom_reset_requested.connect(self._zoom_timeline_reset)
+
         self.timeline_scroll.setWidget(self.timeline_grid)
 
         # Synchronisation des scrolls
@@ -532,7 +626,7 @@ class MainWindow(QMainWindow):
 
         self.vst_rack = VstRackWidget(self.project, self)
         self.vst_rack.rack_changed.connect(self._on_rack_changed)
-        self.lower_zone.addTab(self.vst_rack, "🎛️ Rack VST Projet (Stack F11)")
+        self.lower_zone.addTab(self.vst_rack, "🎛️ Plugins du projet (F11)")
 
         bottom_layout.addWidget(self.lower_zone)
         self.main_splitter.addWidget(bottom_container)
@@ -599,6 +693,8 @@ class MainWindow(QMainWindow):
             self.inspector.project = self.project
         if hasattr(self, "vst_rack"):
             self.vst_rack.set_project(self.project)
+        if hasattr(self, "floating_vst_rack") and self.floating_vst_rack:
+            self.floating_vst_rack.set_project(self.project)
         if hasattr(self, "mixer_widget") and self.mixer_widget:
             master_t = self.project.ensure_master_track()
             for p in master_t.plugins:
@@ -616,7 +712,7 @@ class MainWindow(QMainWindow):
                 child.widget().deleteLater()
 
         for track in self.project.tracks:
-            header = TrackHeaderWidget(track)
+            header = TrackHeaderWidget(track, parent=self.headers_container, project=self.project)
             header.track_modified.connect(self._on_project_modified)
             header.track_deleted.connect(self._on_track_deleted)
             header.track_selected.connect(self._on_track_selected)
@@ -681,7 +777,13 @@ class MainWindow(QMainWindow):
         """Appelé lors d'un changement dans la stack de plugins du projet"""
         if hasattr(self, "inspector") and self.inspector.current_track:
             self.inspector.set_track(self.inspector.current_track)
+        self._on_project_modified()
         self.refresh_project_ui()
+
+    def add_project_plugin(self):
+        self.show_floating_vst_rack()
+        if self.floating_vst_rack:
+            self.floating_vst_rack.rack_widget.show_add_dialog()
 
     def show_vst_rack(self):
         """Bascule immédiatement vers l'onglet du Rack VST (F11)"""
@@ -689,6 +791,17 @@ class MainWindow(QMainWindow):
             self._expand_lower_zone()
         self.lower_zone.setCurrentWidget(self.vst_rack)
         self.statusBar().showMessage("Rack VST du Projet affiché (F11)", 2000)
+
+    def show_floating_vst_rack(self):
+        """Ouvre ou bascule sur la fenêtre flottante dédiée du Rack de Plugins (F11 - Style Cubase)."""
+        if not self.floating_vst_rack:
+            self.floating_vst_rack = FloatingPluginRackDialog(self.project, self)
+            self.floating_vst_rack.rack_changed.connect(self._on_rack_changed)
+        else:
+            self.floating_vst_rack.set_project(self.project)
+
+        self.floating_vst_rack.show_and_focus()
+        self.statusBar().showMessage("Rack de Plugins flottant affiché (F11)", 2000)
 
     def show_mixer_console(self):
         """Bascule immédiatement vers l'onglet de la Console de Mixage (F5)"""
@@ -789,7 +902,11 @@ class MainWindow(QMainWindow):
                 plugin_name=data.get("plugin_name"),
             )
             self.project.add_track(new_track)
+            if new_track.plugin_path:
+                self.project.add_rack_plugin(new_track.plugin_path, new_track.plugin_name, "instrument")
+            self.selected_track_id = new_track.id
             self.refresh_project_ui()
+            self._on_track_selected(new_track.id)
             inst_info = f" (Instrument : {new_track.plugin_name})" if new_track.plugin_name else ""
             self.statusBar().showMessage(f"Piste '{new_track.name}'{inst_info} ajoutée.", 3000)
 
@@ -826,8 +943,74 @@ class MainWindow(QMainWindow):
             self.audio_editor.open_clip(track, clip)
             self.statusBar().showMessage(f"Édition du clip Audio : {clip.name}", 3000)
 
+    def _on_tool_changed(self, tool_name: str):
+        self.timeline_grid.set_active_tool(tool_name)
+        tool_labels = {"select": "Pointeur (1)", "split": "Ciseaux / Scission (2)", "erase": "Gomme (3)"}
+        self.statusBar().showMessage(f"Outil actif : {tool_labels.get(tool_name, tool_name)}", 2500)
+
+    def _on_copy_clip(self):
+        self.timeline_grid.copy_selected_clip()
+
+    def _on_cut_clip(self):
+        self.timeline_grid.cut_selected_clip()
+
+    def _on_paste_clip(self):
+        self.timeline_grid.paste_clip_at_playhead()
+
+    def _on_duplicate_clip(self):
+        self.timeline_grid.duplicate_selected_clip()
+
+    def _on_delete_clip(self):
+        self.timeline_grid.delete_selected_clip()
+
+    def _on_split_playhead(self):
+        self.timeline_grid.split_at_playhead()
+
+    def _on_snap_toggled(self, enabled: bool):
+        self.timeline_grid.set_snap_enabled(enabled)
+        state_str = "activé" if enabled else "désactivé"
+        self.statusBar().showMessage(f"Aimantage à la grille (Snap) {state_str}", 2000)
+
+    def _toggle_snap(self):
+        new_val = not self.timeline_grid.snap_enabled
+        self.editing_toolbar.set_snap_enabled(new_val)
+
+    def _on_grid_resolution_changed(self, res_beats: float):
+        self.timeline_grid.set_grid_resolution(res_beats)
+        if res_beats <= 0:
+            self.statusBar().showMessage("Grille : Désactivée / Libre", 2000)
+        else:
+            self.statusBar().showMessage(f"Résolution de grille réglée à {res_beats} temps", 2000)
+
+    def _zoom_timeline_in(self):
+        new_ppb = min(240.0, self.timeline_grid.pixels_per_beat * 1.25)
+        self.timeline_grid.set_zoom(new_ppb)
+        self.ruler.set_zoom(new_ppb)
+        self.statusBar().showMessage(f"Zoom arrangement : {int((new_ppb / 40.0) * 100)}%", 1500)
+
+    def _zoom_timeline_out(self):
+        new_ppb = max(8.0, self.timeline_grid.pixels_per_beat / 1.25)
+        self.timeline_grid.set_zoom(new_ppb)
+        self.ruler.set_zoom(new_ppb)
+        self.statusBar().showMessage(f"Zoom arrangement : {int((new_ppb / 40.0) * 100)}%", 1500)
+
+    def _zoom_timeline_reset(self):
+        self.timeline_grid.set_zoom(40.0)
+        self.ruler.set_zoom(40.0)
+        self.statusBar().showMessage("Zoom arrangement : 100%", 1500)
+
     def _on_play_toggled(self, playing: bool):
         if playing:
+            from ui.plugin_dialogs import ensure_plugin_loaded
+            for track in self.project.tracks + ([self.project.master_track] if self.project.master_track else []):
+                paths = [(track.plugin_path, f"track:{track.id}:instrument:{track.plugin_path}")]
+                paths += [(path, f"track:{track.id}:effect:{path}") for i, path in enumerate(track.insert_effects)]
+                for path, key in paths:
+                    if not path or path.startswith("novadaw."):
+                        continue
+                    if not ensure_plugin_loaded(path, self, key):
+                        self.transport_bar.set_playing_state(False)
+                        return
             self.audio_engine.play()
             self.statusBar().showMessage("Lecture en cours...", 2000)
         else:
@@ -849,50 +1032,94 @@ class MainWindow(QMainWindow):
 
     def _on_record_toggled(self, recording: bool):
         if recording:
-            # 1. Vérifier si au moins une piste est armée
-            armed_tracks = [t for t in self.project.tracks if getattr(t, "armed", False)]
-            if not armed_tracks:
-                # Armer automatiquement la piste sélectionnée ou la première piste
-                target_track = None
-                if getattr(self, "selected_track_id", None):
-                    target_track = self.project.get_track(self.selected_track_id)
-                if not target_track and self.project.tracks:
-                    target_track = self.project.tracks[0]
-                if not target_track:
-                    target_track = Track(name="Piste Audio 1", track_type="audio", color="#ef4444")
-                    self.project.add_track(target_track)
-                    self.refresh_project_ui()
+            # 0. Règle absolue : si aucune piste n'existe, NE PAS créer de piste automatiquement.
+            # L'utilisateur doit explicitement créer sa piste d'abord.
+            if not self.project.tracks:
+                self.transport_bar.set_recording_state(False)
+                if self.isVisible():
+                    QMessageBox.information(
+                        self,
+                        "Aucune piste",
+                        "Veuillez créer une piste avant d'enregistrer (Ctrl+T ou '+ Piste')."
+                    )
+                self.statusBar().showMessage("⚠️ Enregistrement impossible : aucune piste. Veuillez d'abord ajouter une piste (Ctrl+T).", 4000)
+                return
 
+            # 1. Vérifier si l'utilisateur a sélectionné une piste existante
+            # Si aucune piste n'est armée, ou si une seule piste était précédemment armée et que l'utilisateur
+            # a sélectionné une autre piste, transférer l'armement sur la piste sélectionnée.
+            sel_track = self.project.get_track(self.selected_track_id) if getattr(self, "selected_track_id", None) else None
+            currently_armed = [t for t in self.project.tracks if getattr(t, "armed", False)]
+
+            if not currently_armed:
+                target_track = sel_track or self.project.tracks[0]
                 target_track.armed = True
-                for i in range(self.headers_layout.count() - 1):
-                    item = self.headers_layout.itemAt(i)
-                    if item and item.widget() and isinstance(item.widget(), TrackHeaderWidget):
-                        if item.widget().track.id == target_track.id:
-                            item.widget().update_arm_state(True)
-                            break
-                if hasattr(self, "inspector") and self.inspector.current_track and self.inspector.current_track.id == target_track.id:
-                    self.inspector.btn_rec.setChecked(True)
+                self.selected_track_id = target_track.id
+            elif sel_track and len(currently_armed) == 1 and currently_armed[0].id != sel_track.id:
+                currently_armed[0].armed = False
+                sel_track.armed = True
 
-                self.statusBar().showMessage(f"Piste '{target_track.name}' armée automatiquement pour l'enregistrement.", 3000)
+            # Synchroniser les boutons d'armement sur les en-têtes et l'inspecteur
+            for i in range(self.headers_layout.count() - 1):
+                item = self.headers_layout.itemAt(i)
+                if item and item.widget() and isinstance(item.widget(), TrackHeaderWidget):
+                    item.widget().update_arm_state(item.widget().track.armed)
+                    item.widget().set_selected(item.widget().track.id == self.selected_track_id)
 
-            # 2. Démarrer l'enregistrement audio
+            if hasattr(self, "inspector") and self.inspector.current_track:
+                self.inspector.btn_rec.setChecked(getattr(self.inspector.current_track, "armed", False))
+
+            armed_tracks = [t for t in self.project.tracks if getattr(t, "armed", False)]
+
+            # 2. Création immédiate des blocs d'enregistrement en direct sur chaque piste armée
             start_beat = self.audio_engine.current_beat
+            self._active_recording_clips.clear()
+
+            for track in armed_tracks:
+                has_instrument = bool(track.plugin_path or (hasattr(self.audio_engine, "get_native_instrument") and self.audio_engine.get_native_instrument(track)))
+                is_audio_target = (track.track_type == "audio") or (not has_instrument)
+
+                if is_audio_target:
+                    live_clip = AudioClip(
+                        name=f"Prise Audio {len(track.clips) + 1}",
+                        start_beat=start_beat,
+                        length_beats=0.1,
+                        color="#ef4444"
+                    )
+                    setattr(live_clip, "_is_recording", True)
+                    track.clips.append(live_clip)
+                    self._active_recording_clips[track.id] = live_clip
+                else:
+                    live_clip = MidiClip(
+                        name=f"Prise MIDI {len(track.clips) + 1}",
+                        start_beat=start_beat,
+                        length_beats=0.1,
+                        color="#f59e0b"
+                    )
+                    setattr(live_clip, "_is_recording", True)
+                    track.clips.append(live_clip)
+                    self._active_recording_clips[track.id] = live_clip
+
+            self.timeline_grid.update_dimensions()
+            self.timeline_grid.update()
+
+            # 3. Démarrer l'enregistrement audio
             self.audio_engine.start_recording(start_beat)
 
-            # 3. Lancer la lecture simultanément !
+            # 4. Lancer la lecture simultanément
             if not self.audio_engine.is_playing:
                 self.audio_engine.play()
                 self.transport_bar.set_playing_state(True)
 
             self.transport_bar.set_recording_state(True)
-            self.statusBar().showMessage("🔴 Enregistrement et lecture en cours... (Stop ou [0] pour terminer)", 4000)
+            self.statusBar().showMessage("🔴 Enregistrement en direct... (Espace ou [0] pour terminer)", 4000)
 
         else:
             self._finish_recording()
             self.transport_bar.set_recording_state(False)
 
     def _finish_recording(self):
-        """Finalise la session d'enregistrement, sauvegarde l'audio et ajoute les blocs sur les pistes armées."""
+        """Finalise la session d'enregistrement, sauvegarde l'audio et pérennise les blocs."""
         if not getattr(self.audio_engine, "is_recording", False):
             return
 
@@ -911,10 +1138,30 @@ class MainWindow(QMainWindow):
         os.makedirs(rec_dir, exist_ok=True)
 
         for track in armed_tracks:
-            if track.track_type == "audio":
-                clip_name = f"Prise Audio {len(track.clips) + 1}"
-                file_path = None
+            clip = self._active_recording_clips.get(track.id)
+            has_instrument = bool(track.plugin_path or (hasattr(self.audio_engine, "get_native_instrument") and self.audio_engine.get_native_instrument(track)))
+            is_audio_target = (track.track_type == "audio") or (not has_instrument) or (audio_data is not None and len(audio_data) > 0 and not midi_notes)
 
+            if is_audio_target:
+                if track.track_type != "audio" and not has_instrument:
+                    track.track_type = "audio"
+
+                if not clip or clip not in track.clips:
+                    clip = AudioClip(
+                        name=f"Prise Audio {len(track.clips) + 1}",
+                        start_beat=start_beat,
+                        length_beats=dur_beats,
+                        color="#ef4444"
+                    )
+                    track.clips.append(clip)
+
+                setattr(clip, "_is_recording", False)
+                clip.start_beat = start_beat
+                clip.length_beats = dur_beats
+                clip.name = f"Prise Audio {len(track.clips)}"
+                clip.color = track.color or "#10b981"
+
+                file_path = None
                 if audio_data is not None and len(audio_data) > 0:
                     timestamp = int(time.time())
                     safe_name = "".join(c for c in track.name if c.isalnum() or c in (' ', '_', '-')).strip().replace(' ', '_')
@@ -925,31 +1172,31 @@ class MainWindow(QMainWindow):
                     except Exception as e:
                         print(f"[MainWindow] Erreur sauvegarde WAV enregistrement : {e}")
 
-                clip = AudioClip(
-                    name=clip_name,
-                    start_beat=start_beat,
-                    length_beats=dur_beats,
-                    file_path=file_path,
-                    audio_data=audio_data,
-                    sample_rate=self.audio_engine.sample_rate,
-                    color="#ef4444"
-                )
-                track.clips.append(clip)
+                clip.file_path = file_path
+                clip.audio_data = audio_data
+                clip.sample_rate = self.audio_engine.sample_rate
+                clip._waveform_cache = None
                 created_clips_count += 1
 
             elif track.track_type == "midi":
-                clip_name = f"Prise MIDI {len(track.clips) + 1}"
-                clip = MidiClip(
-                    name=clip_name,
-                    start_beat=start_beat,
-                    length_beats=dur_beats,
-                    color="#f59e0b"
-                )
+                if not clip or clip not in track.clips:
+                    clip = MidiClip(
+                        name=f"Prise MIDI {len(track.clips) + 1}",
+                        start_beat=start_beat,
+                        length_beats=dur_beats,
+                        color="#f59e0b"
+                    )
+                    track.clips.append(clip)
+
+                setattr(clip, "_is_recording", False)
+                clip.start_beat = start_beat
+                clip.length_beats = dur_beats
+                clip.name = f"Prise MIDI {len(track.clips)}"
                 if midi_notes:
                     clip.notes = list(midi_notes)
-                track.clips.append(clip)
                 created_clips_count += 1
 
+        self._active_recording_clips.clear()
         self.timeline_grid.update_dimensions()
         self.timeline_grid.update()
         self._on_project_modified()
@@ -958,6 +1205,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"✅ Enregistrement terminé ({dur_beats:.1f} temps) : {created_clips_count} bloc(s) inséré(s) sur la timeline !", 4000)
         else:
             self.statusBar().showMessage("Enregistrement terminé.", 2000)
+
 
     def _on_stop(self):
         if getattr(self.audio_engine, "is_recording", False):
@@ -1047,12 +1295,33 @@ class MainWindow(QMainWindow):
                     item.widget().sync_controls_from_track()
 
     def _update_playback_ui(self):
+        if self.audio_engine.plugin_errors:
+            errors = list(self.audio_engine.plugin_errors.values())
+            self.audio_engine.plugin_errors.clear()
+            self.statusBar().showMessage("Plugin indisponible — " + errors[-1], 10000)
+
         if self.audio_engine.is_playing:
             beat = self.audio_engine.current_beat
             self.ruler.set_playhead(beat)
             self.timeline_grid.set_playhead(beat)
             self.piano_roll.set_playhead(beat)
             self.transport_bar.update_position(beat, self.project.bpm)
+
+            # Si enregistrement actif, mise à jour des blocs et forme d'onde en temps réel
+            if getattr(self.audio_engine, "is_recording", False) and getattr(self, "_active_recording_clips", None):
+                live_audio = self.audio_engine.get_live_recording_audio()
+                live_notes = self.audio_engine.get_live_recording_notes()
+                for track_id, clip in list(self._active_recording_clips.items()):
+                    clip.length_beats = max(0.1, beat - clip.start_beat)
+                    if isinstance(clip, AudioClip) and live_audio is not None and len(live_audio) > 0:
+                        clip.audio_data = live_audio
+                        clip._waveform_cache = None
+                    elif isinstance(clip, MidiClip) and live_notes:
+                        clip.notes = list(live_notes)
+
+                self.timeline_grid.update_dimensions()
+                self.timeline_grid.update()
+
 
     # --- Actions Fichier ---
 
@@ -1178,7 +1447,7 @@ class MainWindow(QMainWindow):
             "Plugins VST3 (*.vst3);;Tous les fichiers (*.*)"
         )
         if file_path:
-            info = global_plugin_manager.add_plugin_file(file_path)
+            info = analyze_plugin_file(file_path, self)
             status = "compatible et prêt à l'emploi ✅" if info.is_compatible else f"incompatible ❌ ({info.error_message})"
             QMessageBox.information(
                 self,
@@ -1239,4 +1508,5 @@ class MainWindow(QMainWindow):
         if hasattr(self, "ipc_server"):
             self.ipc_server.stop()
         self.audio_engine.close()
+        global_plugin_manager.release_instances()
         super().closeEvent(event)

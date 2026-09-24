@@ -71,9 +71,10 @@ class TrackHeaderWidget(QFrame):
 
     RESIZE_MARGIN = 6
 
-    def __init__(self, track: Track, parent=None):
+    def __init__(self, track: Track, parent=None, project=None):
         super().__init__(parent)
         self.track = track
+        self._project_override = project
         self.is_selected = False
         self._resizing_height = False
         self._drag_start_y = 0
@@ -424,6 +425,7 @@ class TrackHeaderWidget(QFrame):
             self.txt_pan.setText(self._format_pan(int(round(self.track.pan * 100))))
         if hasattr(self, "txt_name") and not self.txt_name.hasFocus():
             self.txt_name.setText(self.track.name)
+        self._populate_plugin_combo()
 
     @staticmethod
     def _format_pan(value: int) -> str:
@@ -508,22 +510,58 @@ class TrackHeaderWidget(QFrame):
         else:
             self.txt_pan.setText(self._format_pan(self.slider_pan.value()))
 
+    @property
+    def project(self):
+        if getattr(self, "_project_override", None):
+            return self._project_override
+        win = self.window()
+        if win and win is not self and hasattr(win, "project") and getattr(win, "project", None):
+            return win.project
+        p = self.parent()
+        while p:
+            if hasattr(p, "project") and getattr(p, "project", None):
+                return p.project
+            p = p.parent()
+        return getattr(global_plugin_manager, "current_project", None)
+
     def _populate_plugin_combo(self):
-        """Remplit la liste déroulante des instruments (Synthé interne ou VST3)"""
+        """Remplit la liste déroulante des instruments (Synthé interne, Nova Drums, Rack du projet et VST3)"""
         if not hasattr(self, "combo_plugin"):
             return
         self.combo_plugin.blockSignals(True)
         self.combo_plugin.clear()
+
+        # 1. Synthé interne
         self.combo_plugin.addItem("🎹 Synthé Interne", userData=None)
 
+        # 2. Nova Drums VSTi
+        self.combo_plugin.addItem("🥁 Nova Drums VSTi", userData="novadaw.drum_machine")
+
+        # 3. Instruments déjà chargés dans le Rack du projet
+        rack_paths = set()
+        proj = self.project
+        if proj and hasattr(proj, "plugin_rack"):
+            rack_insts = [p for p in proj.plugin_rack if p.get("plugin_type") == "instrument"]
+            for idx, r in enumerate(rack_insts, 1):
+                rack_paths.add(r.get("file_path"))
+                self.combo_plugin.addItem(f"🎹 [Rack #{idx:02d}] {r['name']}", userData=r["file_path"])
+
+        # 4. Tous les autres instruments compatibles scannés
         instruments = global_plugin_manager.get_compatible_instruments()
+        for inst in instruments:
+            if inst.file_path not in rack_paths and inst.file_path != "novadaw.drum_machine":
+                self.combo_plugin.addItem(f"🎹 {inst.name}", userData=inst.file_path)
+
+        # 5. Option pour ajouter au rack
+        self.combo_plugin.addItem("➕ Assigner un instrument au Rack…", userData="__ADD_TO_RACK__")
+
+        # Trouver l'élément sélectionné
         selected_idx = 0
-        for idx, inst in enumerate(instruments, start=1):
-            is_multibus = any(k.lower() in inst.name.lower() for k in ["kontakt", "sampletank"])
-            badge = " ⚠️" if is_multibus else " ✅"
-            self.combo_plugin.addItem(f"🎹 {inst.name}{badge}", userData=inst.file_path)
-            if self.track.plugin_path and inst.file_path == self.track.plugin_path:
-                selected_idx = idx
+        if self.track.plugin_path:
+            for idx in range(self.combo_plugin.count()):
+                if self.combo_plugin.itemData(idx) == self.track.plugin_path:
+                    selected_idx = idx
+                    break
 
         self.combo_plugin.setCurrentIndex(selected_idx)
         self.combo_plugin.blockSignals(False)
@@ -532,22 +570,52 @@ class TrackHeaderWidget(QFrame):
 
     def _on_plugin_changed(self, index: int):
         file_path = self.combo_plugin.currentData()
+        if file_path == "__ADD_TO_RACK__":
+            win = self.window()
+            if hasattr(win, "floating_vst_rack") and win.floating_vst_rack:
+                win.floating_vst_rack.show_and_focus()
+                win.floating_vst_rack.rack_widget.show_add_dialog()
+            elif hasattr(win, "vst_rack") and win.vst_rack:
+                win.vst_rack.show_add_dialog()
+            self._populate_plugin_combo()
+            return
+
         if file_path:
             self.track.plugin_path = file_path
-            raw = self.combo_plugin.currentText().replace("🎹 ", "")
-            raw = raw.replace(" ⚠️", "").replace(" ✅", "")
+            raw = self.combo_plugin.currentText().replace("🎹 ", "").replace("🥁 ", "")
+            if "[Rack #" in raw:
+                raw = raw.split("]", 1)[-1].strip()
             self.track.plugin_name = raw.strip()
             self.btn_edit_plugin.setEnabled(True)
+
+            # S'assurer que le plugin est bien ajouté au rack du projet
+            proj = self.project
+            if proj and hasattr(proj, "add_rack_plugin"):
+                proj.add_rack_plugin(file_path, self.track.plugin_name, "instrument")
+
+            # Si Nova Drums, s'assurer qu'il est instancié
+            if file_path == "novadaw.drum_machine":
+                has_drum = any(getattr(p, "plugin_type_id", None) == "novadaw.drum_machine" for p in getattr(self.track, "plugins", []))
+                if not has_drum:
+                    from plugins.registry import plugin_registry, ensure_plugins_loaded
+                    ensure_plugins_loaded()
+                    dp = plugin_registry.create_plugin("novadaw.drum_machine")
+                    if dp:
+                        self.track.plugins.insert(0, dp)
         else:
             self.track.plugin_path = None
             self.track.plugin_name = None
             self.btn_edit_plugin.setEnabled(False)
+
         self.track_modified.emit()
 
     def _on_editor_state_changed(self, path=None):
         if not hasattr(self, "btn_edit_plugin"):
             return
-        is_open = global_plugin_manager.is_editor_open(self.track.plugin_path) if self.track.plugin_path else False
+        is_open = global_plugin_manager.is_editor_open(f"track:{self.track.id}:instrument:{self.track.plugin_path}") if self.track.plugin_path else False
+        if not is_open and self.track.plugin_path:
+            is_open = global_plugin_manager.is_editor_open(self.track.plugin_path)
+
         if is_open:
             self.btn_edit_plugin.setStyleSheet("""
                 QPushButton {
@@ -582,6 +650,17 @@ class TrackHeaderWidget(QFrame):
             self.btn_edit_plugin.setToolTip("Éditer l'instrument VST (Ouvrir l'interface)")
 
     def _on_open_plugin_editor(self):
-        if self.track.plugin_path:
+        if self.track.plugin_path == "novadaw.drum_machine":
+            from ui.plugin_dialogs import open_native_plugin_editor
+            from plugins.registry import plugin_registry, ensure_plugins_loaded
+            drum_plugin = next((p for p in getattr(self.track, "plugins", []) if getattr(p, "plugin_type_id", None) == "novadaw.drum_machine"), None)
+            if not drum_plugin:
+                ensure_plugins_loaded()
+                drum_plugin = plugin_registry.create_plugin("novadaw.drum_machine")
+                if drum_plugin:
+                    self.track.plugins.insert(0, drum_plugin)
+            if drum_plugin:
+                open_native_plugin_editor(drum_plugin, self)
+        elif self.track.plugin_path:
             from ui.plugin_dialogs import open_plugin_editor_gui
-            open_plugin_editor_gui(self.track.plugin_path, self)
+            open_plugin_editor_gui(self.track.plugin_path, self, f"track:{self.track.id}:instrument:{self.track.plugin_path}")

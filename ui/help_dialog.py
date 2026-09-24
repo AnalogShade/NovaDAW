@@ -147,6 +147,20 @@ class HelpDialog(QDialog):
             ("Ctrl + E", "⚡ Exporter le mixage audio complet en fichier WAV", "Projet"),
             ("Ctrl + Q", "Quitter l'application", "Projet"),
             
+            # Catégorie Édition & Outils
+            ("1", "Outil Pointeur (Sélection & Déplacement)", "Édition"),
+            ("2", "Outil Scinder / Ciseaux (Découper un clip au clic)", "Édition"),
+            ("3", "Outil Gomme (Supprimer un clip au clic)", "Édition"),
+            ("Ctrl + K ou S", "Scinder le clip sélectionné à la tête de lecture", "Édition"),
+            ("Ctrl + C", "Copier le clip sélectionné", "Édition"),
+            ("Ctrl + X", "Couper le clip sélectionné", "Édition"),
+            ("Ctrl + V", "Coller le clip à la position de la tête de lecture", "Édition"),
+            ("Ctrl + D", "Dupliquer le clip sélectionné immédiatement à sa suite", "Édition"),
+            ("Suppr / Backspace", "Supprimer le clip sélectionné", "Édition"),
+            ("J", "Activer / Désactiver le magnétisme de grille (Snap)", "Édition"),
+            ("Ctrl + + / Ctrl + -", "Zoom horizontal avant / arrière sur la timeline", "Affichage"),
+            ("Ctrl + 0", "Réinitialiser le zoom horizontal de la timeline (100%)", "Affichage"),
+            
             # Catégorie Pistes & Timeline
             ("Ctrl + T", "Ajouter une nouvelle piste (MIDI ou Audio)", "Pistes & Timeline"),
             ("Glisser bord inférieur de piste", "Redimensionner interactivement la hauteur d'une piste (ou sur la timeline)", "Pistes & Timeline"),
@@ -157,9 +171,9 @@ class HelpDialog(QDialog):
             ("Bouton ◀ / ▶", "Masquer ou afficher rapidement le volet inspecteur / en-têtes à gauche", "Interface"),
             ("Double-clic sur piste vide", "Créer automatiquement un nouveau bloc/clip sur la mesure ou sur la boucle", "Pistes & Timeline"),
             ("Double-clic sur un bloc", "Ouvrir l'éditeur correspondant (Piano Roll pour MIDI, Inspecteur pour Audio)", "Pistes & Timeline"),
-            ("Glisser un bloc", "Déplacer le bloc temporellement sur la timeline", "Pistes & Timeline"),
-            ("Glisser le bord droit d'un bloc", "Redimensionner la longueur du bloc", "Pistes & Timeline"),
-            ("Clic droit sur un bloc", "Menu contextuel : renommer, supprimer", "Pistes & Timeline"),
+            ("Glisser un bloc", "Déplacer le bloc temporellement sur la timeline (avec magnétisme)", "Pistes & Timeline"),
+            ("Glisser le bord droit d'un bloc", "Redimensionner la longueur du bloc (rognage audio 1:1 sans distorsion)", "Pistes & Timeline"),
+            ("Clic droit sur un bloc", "Menu contextuel : scinder, copier, couper, supprimer", "Pistes & Timeline"),
             ("Shift + Glisser sur la règle", "Définir rapidement la région de boucle [L / R]", "Pistes & Timeline"),
             
             # Catégorie Piano Roll (Séquenceur MIDI)
@@ -169,9 +183,14 @@ class HelpDialog(QDialog):
             ("Glisser bord droit d'une note", "Ajuster la durée de la note", "Piano Roll"),
             ("Clic droit sur une note", "Supprimer immédiatement la note", "Piano Roll"),
             
-            # Catégorie Affichage
+            # Catégorie Affichage & Plugins
             ("F1", "Ouvrir cette fenêtre d'aide et documentation", "Interface"),
+            ("F2", "Afficher / Masquer l'Inspecteur de Piste", "Interface"),
             ("F3 ou Bouton ▼/▲", "Minimiser la zone d'édition (ne voir que les onglets) / Agrandir", "Interface"),
+            ("F4", "Ouvrir le Gestionnaire de Plugins (Scanner & Diagnostic VST3/VST2)", "Plugins"),
+            ("F5", "Ouvrir la Console de Mixage intégrée", "Mixeur"),
+            ("F11", "Ouvrir le Rack de Plugins Flottant du Projet (Style Cubase Pro)", "Plugins"),
+            ("Ctrl + ,", "Configuration Audio, Périphériques & GPU", "Configuration"),
         ]
 
         table = QTableWidget(len(shortcuts), 3)
@@ -227,11 +246,31 @@ class HelpDialog(QDialog):
             </li>
         </ul>
 
-        <h3 style="color: #34d399;">2. La Timeline & Création de Blocs</h3>
+        <h3 style="color: #34d399;">2. La Timeline & Outils d'Édition</h3>
         <ul>
-            <li><b>Créer un bloc / clip :</b> <i>Double-cliquez</i> simplement sur n'importe quel endroit vide d'une piste. Un bloc est instantanément créé, calé sur la mesure ou sur votre zone de boucle !</li>
-            <li><b>Éditer un bloc :</b> <i>Double-cliquez</i> sur un bloc pour l'ouvrir immédiatement dans la zone inférieure.</li>
-            <li><b>Déplacer & Redimensionner :</b> Cliquez et glissez le corps du bloc pour le bouger dans le temps. Attrapez son bord droit pour l'allonger ou le raccourcir.</li>
+            <li><b>Palette d'outils :</b>
+                <ul>
+                    <li><b>Pointeur [1] :</b> Outil standard pour sélectionner, déplacer et redimensionner les clips.</li>
+                    <li><b>Scinder / Ciseaux [2] :</b> Cliquez sur n'importe quel clip pour le scinder instantanément en deux morceaux (avec ligne de guidage visuelle et magnétisme).</li>
+                    <li><b>Gomme [3] :</b> Cliquez sur un clip pour le supprimer en un clic.</li>
+                    <li><b>Scinder Tête (Ctrl+K / S) :</b> Découpe le clip sélectionné précisément à la position de la tête de lecture.</li>
+                    <li><b>Presse-papiers (Copier / Couper / Coller / Dupliquer) :</b> Dupliquez ou collez vos blocs audio et MIDI directement à la tête de lecture.</li>
+                </ul>
+            </li>
+            <li><b>Grille Musicale & Magnétisme (Snap) :</b>
+                <ul>
+                    <li>La timeline affiche désormais une grille musicale dynamique synchronisée sur le BPM du projet (Mesure, 1/2, 1/4, 1/8, 1/16, 1/32).</li>
+                    <li>Le bouton <b>🧲 Snap [J]</b> active ou désactive l'alignement magnétique automatique lors du déplacement, du redimensionnement et du découpage des clips.</li>
+                </ul>
+            </li>
+            <li><b>Édition & Rognage Audio Non-Destructif :</b>
+                <ul>
+                    <li>Redimensionner un bloc audio ne déforme ni n'étire jamais sa waveform : la prévisualisation reste parfaitement calée à l'échelle temporelle 1:1.</li>
+                    <li>Rétrécir un bloc masque proprement le début ou la fin sans décaler l'audio lu.</li>
+                    <li>Un clip audio ne peut pas être étendu au-delà de la durée réelle de son fichier audio source.</li>
+                </ul>
+            </li>
+            <li><b>Créer un bloc / clip :</b> <i>Double-cliquez</i> simplement sur n'importe quel endroit vide d'une piste.</li>
             <li><b>Région de boucle (Loop) :</b> La règle en haut affiche des marqueurs ambre <b>[L]</b> et <b>[R]</b>. Maintenez <i>Shift + Glisser</i> sur la règle pour ajuster la boucle à la souris.</li>
         </ul>
 
@@ -270,6 +309,15 @@ class HelpDialog(QDialog):
         <ul>
             <li><b>Format propriétaire (.ndaw) :</b> Enregistrez votre projet avec <i>Ctrl + S</i> pour conserver toutes vos pistes, réglages, volumes et notes MIDI.</li>
             <li><b>Export Audio (WAV) :</b> Utilisez le menu <b>Fichier ➔ Exporter Mixage Audio (WAV)...</b> (ou <i>Ctrl + E</i>) pour générer un fichier audio stéréo 44.1 kHz de votre morceau complet !</li>
+        </ul>
+
+        <h3 style="color: #34d399;">7. Rack de Plugins & VST Instruments / Effets (F11)</h3>
+        <ul>
+            <li><b>Fenêtre Flottante (F11) :</b> Appuyez sur <b>F11</b> ou cliquez sur <b>🎛️ Plugins (F11)</b> pour ouvrir le Rack de Plugins flottant dédié inspiré de Cubase Pro.</li>
+            <li><b>Stay on Top (📌) :</b> Le rack peut rester épinglé au premier plan pendant que vous éditez vos notes ou arrangez vos pistes.</li>
+            <li><b>Slots interactifs :</b> Cliquez directement sur le bouton <i>+ Cliquer pour charger un plugin</i> au bas de la pile pour ajouter un synthétiseur ou un effet. Activez/désactivez chaque slot en un clic avec le bouton <b>⏻ Bypass</b>.</li>
+            <li><b>Routage MIDI type Cubase :</b> Sur chaque piste MIDI, le sélecteur d'instrument liste vos plugins du Rack (ex: <i>🎹 [Rack #01] Kontakt</i>). Le signal MIDI de la piste est envoyé dans le plugin du rack qui génère l'audio.</li>
+            <li><b>Détection automatique transparente :</b> NovaDAW scanne automatiquement tous les dossiers standards de votre ordinateur en arrière-plan sans ralentir le démarrage. Les plugins VST3 64-bit sont chargés nativement, et les anciens plugins VST 2.4 sont identifiés avec un diagnostic clair.</li>
         </ul>
         """
         browser.setHtml(html_content)

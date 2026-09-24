@@ -94,6 +94,18 @@ Pour lancer le logiciel, assurez-vous d'être dans le dossier du projet et exéc
 python main.py
 ```
 
+### Ajouter un plugin au projet et l’utiliser sur une piste
+
+1. Ouvrir **Plugins > Ajouter un plugin au projet…**. Rechercher un nom, sélectionner un instrument ou un effet, puis cliquer **Ajouter au projet**. Le rack reste accessible avec **F11**.
+2. Créer une piste MIDI avec **Ctrl+T** et choisir son **Instrument de sortie**, ou sélectionner une piste existante et changer **Sortie MIDI — Instrument** dans l’inspecteur.
+3. Ouvrir l’interface depuis l’inspecteur pour régler cette piste. Le rack fournit les réglages de départ des nouvelles instances ; chaque piste conserve ensuite ses propres réglages.
+4. Pour un effet, utiliser **Pile de plugins & effets > Ajouter un Plugin** sur la piste ou le Master.
+5. Enregistrer le projet : le rack, le routage et les états VST sont conservés. Les plugins et banques de sons doivent rester installés sur la machine.
+
+Les VST3 sont hébergés dans des processus séparés : une erreur native du plugin ne ferme plus NovaDAW. Le scan valide le chargement, pas toutes les fonctions du plugin. Un instrument qui ne fonctionne pas reste silencieux et signale une erreur, sans remplacement automatique par le synthétiseur interne.
+
+Voir [le compte rendu des tests du parcours plugins](tests/PLUGIN_WORKFLOW_QA.md) pour les vérifications et limites de compatibilité observées.
+
 ### Raccourcis Clavier :
 - **Espace** : Lecture / Pause
 - **0 (Pavé numérique)** : Stop (retour au début ou au repère de boucle)

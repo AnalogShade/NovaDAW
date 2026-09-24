@@ -124,10 +124,14 @@ class AddTrackDialog(QDialog):
         """)
         self.combo_inst.addItem("🎹 Synthé Polyphonique NovaDAW (Défaut)", userData=None)
         self.combo_inst.addItem("🥁 Nova Drums VSTi (Batterie IA)", userData="novadaw.drum_machine")
+        project = getattr(parent, "project", None)
+        rack = project.plugin_rack if project else []
+        for item in rack:
+            if item.get("plugin_type") == "instrument" and item["file_path"] != "novadaw.drum_machine":
+                self.combo_inst.addItem(item["name"], userData=item["file_path"])
         for inst in global_plugin_manager.get_compatible_instruments():
-            is_multibus = any(k.lower() in inst.name.lower() for k in ["kontakt", "sampletank"])
-            tag = " (Sampler Multi-bus) ⚠️" if is_multibus else " (VST3 Direct) ✅"
-            self.combo_inst.addItem(f"🎹 {inst.name}{tag}", userData=inst.file_path)
+            if not any(item["file_path"] == inst.file_path for item in rack):
+                self.combo_inst.addItem(inst.name, userData=inst.file_path)
         self.combo_inst.currentIndexChanged.connect(self._on_instrument_selected)
         layout.addWidget(self.combo_inst)
 

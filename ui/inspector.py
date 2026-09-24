@@ -5,18 +5,19 @@ Affiche les réglages complets de la piste sélectionnée :
 - Chaîne d'effets d'insert et boutons [e] pour les pistes Audio
 - Faders Volume, Panoramique, Mute, Solo, Record
 """
+import os
 from typing import Optional, Any
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QSlider, QComboBox, QFrame, QScrollArea,
-    QFileDialog, QMessageBox, QSizePolicy
+    QFileDialog, QMessageBox, QSizePolicy, QMenu
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 
 from core.project import Track, Project
 from core.plugin_manager import global_plugin_manager
-from ui.plugin_dialogs import open_plugin_editor_gui, open_native_plugin_editor
+from ui.plugin_dialogs import analyze_plugin_file, open_plugin_editor_gui, open_native_plugin_editor
 from plugins.registry import plugin_registry, ensure_plugins_loaded
 from ui.track_header import ResetableSlider, CompactNumEdit, TrackHeaderWidget
 from ui.glow_effects import set_button_glow
@@ -173,11 +174,11 @@ class TrackInspector(QFrame):
         fm_layout.setContentsMargins(8, 8, 8, 8)
         fm_layout.setSpacing(6)
 
-        lbl_inst_title = QLabel("SORTIE INSTRUMENT VST")
+        lbl_inst_title = QLabel("SORTIE MIDI — INSTRUMENT")
         lbl_inst_title.setObjectName("section_title")
         fm_layout.addWidget(lbl_inst_title)
 
-        lbl_inst_desc = QLabel("Périphérique de synthèse :")
+        lbl_inst_desc = QLabel("Jouer cette piste avec :")
         fm_layout.addWidget(lbl_inst_desc)
 
         self.combo_instrument = QComboBox()
@@ -451,39 +452,10 @@ class TrackInspector(QFrame):
                 "Échantillonneur de batterie FP32 avec réverbération stéréo intégrée."
             )
             self.lbl_inst_status.setVisible(True)
-        elif is_multibus:
-            self.lbl_inst_status.setStyleSheet("""
-                QLabel {
-                    background-color: #2e1d10;
-                    color: #fcd34d;
-                    border: 1px solid #f59e0b;
-                    border-radius: 4px;
-                    padding: 6px;
-                    font-size: 11px;
-                }
-            """)
-            self.lbl_inst_status.setText(
-                "⚠️ <b>Sampler Multi-bus (Kontakt / SampleTank)</b><br>"
-                "Ce plugin utilise 16 bus de sorties audio. Pour garantir une stabilité absolue "
-                "sans crash mémoire, le moteur audio bascule automatiquement les notes du clavier et du séquenceur "
-                "sur le synthé de secours.<br>"
-                "💡 <i>Pour un rendu audio 100% VST3 en temps réel, sélectionnez un synthé direct comme <b>Syntronik</b> ou <b>Prologue</b> !</i>"
-            )
-            self.lbl_inst_status.setVisible(True)
         else:
-            self.lbl_inst_status.setStyleSheet("""
-                QLabel {
-                    background-color: #0f291e;
-                    color: #4ade80;
-                    border: 1px solid #16a34a;
-                    border-radius: 4px;
-                    padding: 6px;
-                    font-size: 11px;
-                }
-            """)
             self.lbl_inst_status.setText(
-                f"✅ <b>Rendu VST3 Direct Actif ({plugin_name})</b><br>"
-                "Le signal sonore est généré directement par le moteur VST3 lors de la saisie sur le clavier ou en lecture."
+                "Instrument du projet. Ouvrez son interface pour choisir un son ou une banque. "
+                "Un plugin indisponible reste silencieux."
             )
             self.lbl_inst_status.setVisible(True)
 
@@ -501,8 +473,7 @@ class TrackInspector(QFrame):
         self.combo_instrument.addItem("🥁 Nova Drums VSTi (Batterie IA)", userData="novadaw.drum_machine")
 
         def format_inst_label(name: str) -> str:
-            is_multibus = any(k.lower() in name.lower() for k in ["kontakt", "sampletank"])
-            return f"🎹 {name} (Sampler Multi-bus) ⚠️" if is_multibus else f"🎹 {name} (VST3 Direct) ✅"
+            return f"🎹 {name}"
 
         # Option 3 : Instruments du Rack du projet
         rack_insts = [p for p in self.project.plugin_rack if p.get("plugin_type") == "instrument"]
@@ -528,6 +499,10 @@ class TrackInspector(QFrame):
                     selected_idx = idx
                     break
 
+        if self.current_track.plugin_path and selected_idx == 0:
+            self.combo_instrument.addItem(f"{self.current_track.plugin_name or self.current_track.plugin_path} — indisponible",
+                                          self.current_track.plugin_path)
+            selected_idx = self.combo_instrument.count() - 1
         self.combo_instrument.setCurrentIndex(selected_idx)
         self.combo_instrument.blockSignals(False)
         self.btn_edit_instrument.setEnabled(bool(self.current_track.plugin_path))
@@ -546,8 +521,10 @@ class TrackInspector(QFrame):
                 "Plugins VST3 (*.vst3);;Tous les fichiers (*.*)"
             )
             if file_path:
-                info = global_plugin_manager.add_plugin_file(file_path)
-                if info.is_compatible:
+                info = analyze_plugin_file(file_path, self)
+                if info.is_compatible and info.plugin_type == "instrument":
+                    self.current_track.plugins = [p for p in self.current_track.plugins if not getattr(p, "is_instrument", False)]
+                    self.project.add_rack_plugin(file_path, info.name, "instrument")
                     self.current_track.plugin_path = file_path
                     self.current_track.plugin_name = info.name
                     self._populate_instrument_combo()
@@ -559,6 +536,15 @@ class TrackInspector(QFrame):
                 self._populate_instrument_combo()
             return
 
+        if data and not data.startswith("novadaw."):
+            from ui.plugin_dialogs import ensure_plugin_loaded
+            key = f"track:{self.current_track.id}:instrument:{data}"
+            if not ensure_plugin_loaded(data, self, key):
+                self._populate_instrument_combo()
+                return
+        if data != self.current_track.plugin_path:
+            self.current_track.plugins = [p for p in self.current_track.plugins
+                                          if not getattr(p, "is_instrument", False)]
         if data == "novadaw.drum_machine":
             self.current_track.plugin_path = "novadaw.drum_machine"
             self.current_track.plugin_name = "Nova Drums VSTi"
@@ -568,6 +554,9 @@ class TrackInspector(QFrame):
                 ensure_plugins_loaded()
                 dp = plugin_registry.create_plugin("novadaw.drum_machine")
                 if dp:
+                    template = self.project.get_rack_native_plugin(data)
+                    if template:
+                        dp.set_state(template.get_state())
                     self.current_track.plugins.insert(0, dp)
             self.btn_edit_instrument.setEnabled(True)
             self._rebuild_plugin_stack()
@@ -584,13 +573,17 @@ class TrackInspector(QFrame):
             self.current_track.plugin_name = None
             self.btn_edit_instrument.setEnabled(False)
 
+        if self.current_track.plugin_path:
+            self.project.add_rack_plugin(self.current_track.plugin_path,
+                                         self.current_track.plugin_name, "instrument")
+        self._rebuild_plugin_stack()
         self._update_instrument_status_label()
         self.track_modified.emit()
 
     def _on_editor_state_changed(self, file_path: str = ""):
         """Met à jour l'apparence des boutons d'édition selon si la fenêtre est ouverte ou fermée"""
         if self.current_track and self.current_track.track_type == "midi":
-            is_open = global_plugin_manager.is_editor_open(self.current_track.plugin_path) if self.current_track.plugin_path else False
+            is_open = global_plugin_manager.is_editor_open(f"track:{self.current_track.id}:instrument:{self.current_track.plugin_path}") if self.current_track.plugin_path else False
             if is_open:
                 self.btn_edit_instrument.setText("🎹 Fermer Interface Plugin [e]")
                 self.btn_edit_instrument.setStyleSheet("""
@@ -629,7 +622,7 @@ class TrackInspector(QFrame):
             if drum_plugin:
                 open_native_plugin_editor(drum_plugin, self)
         elif self.current_track.plugin_path:
-            open_plugin_editor_gui(self.current_track.plugin_path, self)
+            open_plugin_editor_gui(self.current_track.plugin_path, self, f"track:{self.current_track.id}:instrument:{self.current_track.plugin_path}")
 
     def _show_add_plugin_menu(self):
         """Affiche le menu de sélection de plugin à empiler sur la piste"""
@@ -743,7 +736,14 @@ class TrackInspector(QFrame):
             return
         if not hasattr(self.current_track, "insert_effects"):
             self.current_track.insert_effects = []
+        if file_path in self.current_track.insert_effects:
+            return
+        from ui.plugin_dialogs import ensure_plugin_loaded
+        if not ensure_plugin_loaded(file_path, self, f"track:{self.current_track.id}:effect:{file_path}"):
+            return
         self.current_track.insert_effects.append(file_path)
+        info = next((p for p in global_plugin_manager.plugins if p.file_path == file_path), None)
+        self.project.add_rack_plugin(file_path, info.name if info else os.path.basename(file_path), "effect")
         self._rebuild_plugin_stack()
         self.track_modified.emit()
 
@@ -757,8 +757,8 @@ class TrackInspector(QFrame):
             "Plugins VST3 (*.vst3);;Tous les fichiers (*.*)"
         )
         if file_path:
-            info = global_plugin_manager.add_plugin_file(file_path)
-            if info.is_compatible:
+            info = analyze_plugin_file(file_path, self)
+            if info.is_compatible and info.plugin_type == "effect":
                 self._add_vst_plugin(file_path)
             else:
                 QMessageBox.warning(self, "Incompatible", f"Le plugin n'a pas pu être chargé :\n{info.error_message}")
@@ -888,7 +888,7 @@ class TrackInspector(QFrame):
                 btn_e = QPushButton("e")
                 btn_e.setFixedSize(18, 18)
                 btn_e.setStyleSheet("background-color: #2e1065; color: #c084fc; font-weight: bold; border: 1px solid #7e22ce; border-radius: 3px;")
-                btn_e.clicked.connect(lambda _, p=fx_path: open_plugin_editor_gui(p, self))
+                btn_e.clicked.connect(lambda _, p=fx_path, key=f"track:{self.current_track.id}:effect:{fx_path}": open_plugin_editor_gui(p, self, key))
                 row.addWidget(btn_e)
 
                 btn_del = QPushButton("✕")

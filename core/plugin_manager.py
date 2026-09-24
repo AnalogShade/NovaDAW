@@ -1,34 +1,19 @@
 """
-core/plugin_manager.py - Gestionnaire et scanner dynamique de plugins VST3
-Détection multiplateforme (zéro chemin codé en dur), validation de compatibilité,
-mise en cache JSON et support des instruments et effets.
+core/plugin_manager.py - Gestionnaire et scanner dynamique de plugins VST3 & VST2
+Détection multiplateforme étendue (Windows Registry, Steinberg, Common Files, ProgramData),
+validation de compatibilité avec isolation des crashs, mise en cache JSON instantanée,
+scan incrémental rapide et surveillance automatique en arrière-plan sans ralentir le démarrage.
 """
 import os
 import sys
 import json
 import threading
+import time
 from dataclasses import dataclass, asdict
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Set
 
-from PySide6.QtCore import QObject, Signal, QThread
-
-
-class PluginLoadWorker(QThread):
-    """Worker asynchrone pour charger un plugin VST3 lourd sans figer l'interface"""
-    loaded = Signal(str, object)  # file_path, plugin_instance
-    error = Signal(str, str)      # file_path, error_message
-
-    def __init__(self, file_path: str, parent=None):
-        super().__init__(parent)
-        self.file_path = file_path
-
-    def run(self):
-        try:
-            import pedalboard
-            plugin = pedalboard.load_plugin(self.file_path)
-            self.loaded.emit(self.file_path, plugin)
-        except Exception as e:
-            self.error.emit(self.file_path, str(e))
+from PySide6.QtCore import QObject, Signal, QThread, QFileSystemWatcher, QTimer
+from core.vst_host import IsolatedPlugin
 
 
 @dataclass
@@ -39,6 +24,9 @@ class PluginInfo:
     is_compatible: bool
     error_message: Optional[str] = None
     parameters_count: int = 0
+    format: str = "vst3"  # "vst3", "vst2", "native"
+    file_mtime: float = 0.0
+    file_size: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -52,67 +40,165 @@ class PluginInfo:
             is_compatible=data.get("is_compatible", False),
             error_message=data.get("error_message"),
             parameters_count=data.get("parameters_count", 0),
+            format=data.get("format", "vst3"),
+            file_mtime=float(data.get("file_mtime", 0.0)),
+            file_size=int(data.get("file_size", 0)),
         )
 
 
-def get_default_vst3_directories() -> List[str]:
+def is_vst2_dll(file_path: str) -> bool:
     """
-    Retourne dynamiquement les répertoires standards de plugins VST3 pour le système
-    d'exploitation actuel, sans AUCUN chemin spécifique codé en dur pour un utilisateur.
+    Vérifie si une bibliothèque DLL Windows est un plugin audio VST2 sans l'exécuter.
+    Inspecte la table d'exportation PE pour la présence de 'main' ou 'VSTPluginMain'.
+    """
+    if not file_path.lower().endswith(".dll") or not os.path.isfile(file_path):
+        return False
+    try:
+        import pefile
+        pe = pefile.PE(file_path, fast_load=True)
+        pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_EXPORT']])
+        if hasattr(pe, 'DIRECTORY_ENTRY_EXPORT') and pe.DIRECTORY_ENTRY_EXPORT:
+            for exp in pe.DIRECTORY_ENTRY_EXPORT.symbols:
+                if exp.name and exp.name.lower() in (b"main", b"vstpluginmain"):
+                    return True
+    except Exception:
+        try:
+            with open(file_path, "rb") as f:
+                head = f.read(1024 * 1024)
+                if b"VSTPluginMain" in head or b"VstPluginMain" in head:
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def get_default_plugin_directories() -> List[str]:
+    """
+    Retourne dynamiquement l'ensemble des répertoires standards de plugins audio (VST3 et VST2)
+    pour le système d'exploitation actuel, incluant les clés de registre Windows et dossiers réputés.
     """
     dirs: List[str] = []
 
+    def _add_if_dir(path: Optional[str]):
+        if path and os.path.isdir(path) and path not in dirs:
+            dirs.append(os.path.normpath(path))
+
     if sys.platform == "win32":
-        # 1. Standard Windows 64-bit Common Files VST3
+        # 1. Standard Windows 64-bit Common Files VST3 et VST2
         common_files = os.environ.get("COMMONPROGRAMFILES", r"C:\Program Files\Common Files")
-        std_vst3 = os.path.join(common_files, "VST3")
-        if os.path.isdir(std_vst3) and std_vst3 not in dirs:
-            dirs.append(std_vst3)
+        _add_if_dir(os.path.join(common_files, "VST3"))
+        _add_if_dir(os.path.join(common_files, "Steinberg", "VST3"))
+        _add_if_dir(os.path.join(common_files, "VST2"))
 
-        # 2. Dossier Local de l'utilisateur (AppData\Local\Programs\Common\VST3)
-        local_appdata = os.environ.get("LOCALAPPDATA")
-        if local_appdata:
-            user_vst3 = os.path.join(local_appdata, "Programs", "Common", "VST3")
-            if os.path.isdir(user_vst3) and user_vst3 not in dirs:
-                dirs.append(user_vst3)
-
-        # 3. Dossier Steinberg standard
-        prog_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
-        steinberg_dir = os.path.join(prog_files, "Steinberg")
-        if os.path.isdir(steinberg_dir):
-            for root, subdirs, _ in os.walk(steinberg_dir):
-                if os.path.basename(root).lower() == "vst3" and root not in dirs:
-                    dirs.append(root)
-
-        # 4. Standard 32-bit (si présent sur système 64-bit)
+        # 2. Standard 32-bit Common Files
         common_x86 = os.environ.get("COMMONPROGRAMFILES(X86)")
         if common_x86:
-            std_x86 = os.path.join(common_x86, "VST3")
-            if os.path.isdir(std_x86) and std_x86 not in dirs:
-                dirs.append(std_x86)
+            _add_if_dir(os.path.join(common_x86, "VST3"))
+            _add_if_dir(os.path.join(common_x86, "Steinberg", "VST3"))
+            _add_if_dir(os.path.join(common_x86, "VST2"))
+
+        # 3. Dossier Local de l'utilisateur (AppData\Local\Programs\Common\VST3)
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            _add_if_dir(os.path.join(local_appdata, "Programs", "Common", "VST3"))
+
+        # 4. Program Files standards (Steinberg, VstPlugins, Native Instruments, Cakewalk)
+        prog_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+        _add_if_dir(os.path.join(prog_files, "VSTPlugins"))
+        _add_if_dir(os.path.join(prog_files, "Steinberg", "VstPlugins"))
+        _add_if_dir(os.path.join(prog_files, "Steinberg", "VST3"))
+        _add_if_dir(os.path.join(prog_files, "Native Instruments", "VSTPlugins 64 bit"))
+        _add_if_dir(os.path.join(prog_files, "Cakewalk", "VstPlugins"))
+
+        # 5. Program Files (x86) standards
+        prog_x86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+        _add_if_dir(os.path.join(prog_x86, "VSTPlugins"))
+        _add_if_dir(os.path.join(prog_x86, "Steinberg", "VstPlugins"))
+        _add_if_dir(os.path.join(prog_x86, "Native Instruments", "VSTPlugins 32 bit"))
+
+        # 6. Spectrasonics plug-ins (Omnisphere, Trilian, Keyscape)
+        prog_data = os.environ.get("PROGRAMDATA", r"C:\ProgramData")
+        _add_if_dir(os.path.join(prog_data, "Spectrasonics", "plug-ins", "64bit"))
+        _add_if_dir(os.path.join(prog_data, "Spectrasonics", "plug-ins"))
+
+        # 7. Clés de Registre Windows pour VSTPluginsPath
+        try:
+            import winreg
+            for root_key, subkey, val_name in [
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\VST", "VSTPluginsPath"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\VST", "VSTPluginsPath"),
+                (winreg.HKEY_CURRENT_USER, r"SOFTWARE\VST", "VSTPluginsPath"),
+            ]:
+                try:
+                    with winreg.OpenKey(root_key, subkey) as key:
+                        val, _ = winreg.QueryValueEx(key, val_name)
+                        _add_if_dir(val)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     elif sys.platform == "darwin":  # macOS
-        for path in ["/Library/Audio/Plug-Ins/VST3", os.path.expanduser("~/Library/Audio/Plug-Ins/VST3")]:
-            if os.path.isdir(path) and path not in dirs:
-                dirs.append(path)
+        for path in [
+            "/Library/Audio/Plug-Ins/VST3",
+            os.path.expanduser("~/Library/Audio/Plug-Ins/VST3"),
+            "/Library/Audio/Plug-Ins/Components",
+            os.path.expanduser("~/Library/Audio/Plug-Ins/Components"),
+        ]:
+            _add_if_dir(path)
 
     else:  # Linux
-        for path in ["/usr/lib/vst3", "/usr/local/lib/vst3", os.path.expanduser("~/.vst3")]:
-            if os.path.isdir(path) and path not in dirs:
-                dirs.append(path)
+        for path in [
+            "/usr/lib/vst3",
+            "/usr/local/lib/vst3",
+            os.path.expanduser("~/.vst3"),
+            os.path.expanduser("~/.lxvst"),
+        ]:
+            _add_if_dir(path)
 
     return dirs
 
 
+# Rétrocompatibilité avec les tests et le code existant
+get_default_vst3_directories = get_default_plugin_directories
+
+
+class PluginLoadWorker(QThread):
+    """Worker asynchrone pour charger un plugin VST3 lourd sans figer l'interface"""
+    loaded = Signal(str, object)  # file_path, plugin_instance
+    error = Signal(str, str)      # file_path, error_message
+
+    def __init__(self, file_path: str, parent=None, instance_key=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.instance_key = instance_key
+
+    def run(self):
+        try:
+            plugin = global_plugin_manager.get_or_load_plugin(self.file_path, self.instance_key)
+            if plugin is None:
+                raise RuntimeError(global_plugin_manager.load_errors.get(self.instance_key or self.file_path, "Chargement impossible"))
+            self.loaded.emit(self.file_path, plugin)
+        except Exception as e:
+            self.error.emit(self.file_path, str(e))
+
+
 class PluginScanWorker(QThread):
-    """Worker en arrière-plan pour scanner les dossiers de plugins sans figer l'interface"""
+    """
+    Worker en arrière-plan pour scanner les dossiers de plugins sans figer l'interface.
+    Supporte le scan incrémental ultra-rapide (évite de ré-analyser les fichiers déjà connus et inchangés).
+    """
     progress = Signal(int, int, str)  # index, total, plugin_name
     plugin_found = Signal(object)      # PluginInfo
     finished_scan = Signal(list)       # List[PluginInfo]
 
-    def __init__(self, directories: List[str], parent=None):
+    def __init__(self, directories: List[str], parent=None, incremental: bool = True,
+                 existing_cache: Optional[Dict[str, PluginInfo]] = None, deep_scan: bool = False):
         super().__init__(parent)
-        self.directories = directories
+        self.directories = list(directories)
+        self.incremental = incremental
+        self.existing_cache = existing_cache or {}
+        self.deep_scan = deep_scan
 
     def run(self):
         try:
@@ -121,30 +207,76 @@ class PluginScanWorker(QThread):
         except ImportError:
             has_pedalboard = False
 
-        # 1. Recherche récursive de tous les fichiers .vst3
+        # 1. Recherche récursive de tous les fichiers .vst3 et .dll VST2
         found_files = []
-        for directory in self.directories:
+        visited_dirs: Set[str] = set()
+
+        scan_dirs = list(self.directories)
+        if self.deep_scan and sys.platform == "win32":
+            # Ajouter les racines Program Files pour un scan approfondi de tout le PC
+            prog_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+            prog_x86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+            for root_prog in [prog_files, prog_x86]:
+                if os.path.isdir(root_prog) and root_prog not in scan_dirs:
+                    scan_dirs.append(root_prog)
+
+        for directory in scan_dirs:
             if not os.path.isdir(directory):
                 continue
+            norm_d = os.path.normpath(directory).lower()
+            if norm_d in visited_dirs:
+                continue
+            visited_dirs.add(norm_d)
+
             for root, dirs, files in os.walk(directory):
-                # Sous Windows, un plugin peut être un fichier .vst3 ou un dossier .vst3 bundle
+                if self.isInterruptionRequested():
+                    break
+
+                # Traitement des bundles .vst3 (qui se présentent sous forme de dossier sur Windows/macOS)
                 for d in list(dirs):
                     if d.lower().endswith(".vst3"):
-                        full_bundle = os.path.join(root, d)
+                        full_bundle = os.path.normpath(os.path.join(root, d))
                         found_files.append(full_bundle)
-                        dirs.remove(d)  # Ne pas descendre plus bas dans le bundle
+                        dirs.remove(d)  # Ne pas descendre dans le bundle
+
                 for f in files:
-                    if f.lower().endswith(".vst3"):
-                        found_files.append(os.path.join(root, f))
+                    lower_f = f.lower()
+                    if lower_f.endswith(".vst3"):
+                        found_files.append(os.path.normpath(os.path.join(root, f)))
+                    elif lower_f.endswith(".dll"):
+                        # Vérifier uniquement si le dossier ou le fichier évoque un plugin audio
+                        in_vst_dir = any(k in root.lower() for k in ["vst", "steinberg", "spectrasonics", "native instruments", "plugins", "plug-ins"])
+                        if in_vst_dir:
+                            full_dll = os.path.normpath(os.path.join(root, f))
+                            found_files.append(full_dll)
 
         found_files = sorted(list(set(found_files)))
         total = len(found_files)
         results: List[PluginInfo] = []
 
         for idx, file_path in enumerate(found_files):
+            if self.isInterruptionRequested():
+                break
+
             base_name = os.path.splitext(os.path.basename(file_path))[0]
             self.progress.emit(idx + 1, total, base_name)
 
+            # Vérification incrémentale rapide : si le fichier est en cache et non modifié, réutiliser
+            if self.incremental and file_path in self.existing_cache:
+                cached = self.existing_cache[file_path]
+                try:
+                    cur_mtime = os.path.getmtime(file_path)
+                    cur_size = os.path.getsize(file_path)
+                    if (cached.file_mtime == cur_mtime and cached.file_size == cur_size) or (cached.file_mtime == 0.0 and cached.is_compatible):
+                        cached.file_mtime = cur_mtime
+                        cached.file_size = cur_size
+                        results.append(cached)
+                        self.plugin_found.emit(cached)
+                        continue
+                except OSError:
+                    pass
+
+            # Analyse du plugin (nouveau ou modifié)
             if not has_pedalboard:
                 info = PluginInfo(
                     name=base_name,
@@ -164,8 +296,9 @@ class PluginScanWorker(QThread):
 
 class PluginManager(QObject):
     """
-    Gestionnaire central des plugins VST3 pour NovaDAW.
-    Gère le stockage des chemins personnalisés, le cache et les instances de plugins.
+    Gestionnaire central des plugins audio (VST3 et VST2) pour NovaDAW.
+    Gère le stockage des chemins personnalisés, le cache ultra-rapide au démarrage,
+    l'auto-détection en arrière-plan et les instances actives de plugins.
     """
     scan_updated = Signal()
     editor_opened = Signal(str)  # file_path
@@ -183,8 +316,66 @@ class PluginManager(QObject):
         self.active_instances: Dict[str, Any] = {}  # file_path -> pedalboard plugin instance
         self.open_editors: Dict[str, threading.Event] = {}  # file_path -> close_event
 
+        self._loading = set()
+        self.saved_states = {}
+        self.load_errors = {}
+        self._instance_lock = threading.RLock()
+
+        # Surveillance automatique des dossiers de plugins
+        self._dir_watcher = QFileSystemWatcher(self)
+        self._dir_watcher.directoryChanged.connect(self._on_watched_directory_changed)
+        self._background_scan_worker: Optional[PluginScanWorker] = None
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.setInterval(1200)
+        self._debounce_timer.timeout.connect(self.trigger_background_scan)
+
         self.load_settings()
         self.load_cache()
+        self._update_watcher_paths()
+
+    def _update_watcher_paths(self):
+        """Met à jour la liste des répertoires surveillés par QFileSystemWatcher"""
+        current_watched = set(self._dir_watcher.directories())
+        all_dirs = set(self.get_all_directories())
+        to_remove = [d for d in current_watched if d not in all_dirs]
+        to_add = [d for d in all_dirs if d not in current_watched and os.path.isdir(d)]
+        if to_remove:
+            self._dir_watcher.removePaths(to_remove)
+        if to_add:
+            self._dir_watcher.addPaths(to_add)
+
+    def _on_watched_directory_changed(self, path: str):
+        """Déclenché lorsqu'un fichier ou sous-dossier est modifié/ajouté dans un dossier surveillé"""
+        self._debounce_timer.start()
+
+    def trigger_background_scan(self, deep_scan: bool = False):
+        """Lance une vérification incrémentale en arrière-plan sans bloquer l'interface"""
+        if self._background_scan_worker and self._background_scan_worker.isRunning():
+            return
+        dirs = self.get_all_directories()
+        if not dirs:
+            return
+        cache_map = {p.file_path: p for p in self.plugins}
+        self._background_scan_worker = PluginScanWorker(
+            directories=dirs,
+            parent=self,
+            incremental=True,
+            existing_cache=cache_map,
+            deep_scan=deep_scan
+        )
+        self._background_scan_worker.finished_scan.connect(self._on_background_scan_finished)
+        self._background_scan_worker.start()
+
+    def _on_background_scan_finished(self, results: List[PluginInfo]):
+        # Si de nouveaux plugins ont été détectés ou si la liste a évolué
+        old_map = {p.file_path: p for p in self.plugins}
+        new_map = {p.file_path: p for p in results}
+        if set(old_map.keys()) != set(new_map.keys()):
+            self.plugins = results
+            self.save_cache()
+            self.scan_updated.emit()
+            print(f"[PluginManager] Surveillance automatique : {len(results)} plugins mis à jour.")
 
     def is_editor_open(self, file_path: str) -> bool:
         """Indique si l'éditeur VST d'un plugin donné est actuellement ouvert"""
@@ -207,30 +398,35 @@ class PluginManager(QObject):
 
     def get_all_directories(self) -> List[str]:
         """Combine répertoires standards du système et dossiers personnalisés de l'utilisateur"""
-        all_dirs = list(get_default_vst3_directories())
+        all_dirs = list(get_default_plugin_directories())
         for cd in self.custom_directories:
-            if cd not in all_dirs and os.path.isdir(cd):
-                all_dirs.append(cd)
+            norm_cd = os.path.normpath(cd)
+            if norm_cd not in all_dirs and os.path.isdir(norm_cd):
+                all_dirs.append(norm_cd)
         return all_dirs
 
     def add_custom_directory(self, path: str) -> bool:
-        if os.path.isdir(path) and path not in self.custom_directories:
-            self.custom_directories.append(path)
+        norm_path = os.path.normpath(path)
+        if os.path.isdir(norm_path) and norm_path not in self.custom_directories:
+            self.custom_directories.append(norm_path)
             self.save_settings()
+            self._update_watcher_paths()
             return True
         return False
 
     def remove_custom_directory(self, path: str):
-        if path in self.custom_directories:
-            self.custom_directories.remove(path)
+        norm_path = os.path.normpath(path)
+        if norm_path in self.custom_directories:
+            self.custom_directories.remove(norm_path)
             self.save_settings()
+            self._update_watcher_paths()
 
     def load_settings(self):
         if os.path.exists(self.settings_file):
             try:
                 with open(self.settings_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    self.custom_directories = data.get("custom_directories", [])
+                    self.custom_directories = [os.path.normpath(d) for d in data.get("custom_directories", [])]
             except Exception as e:
                 print(f"[PluginManager] Erreur lecture paramètres : {e}")
 
@@ -242,6 +438,7 @@ class PluginManager(QObject):
             print(f"[PluginManager] Erreur sauvegarde paramètres : {e}")
 
     def load_cache(self):
+        """Charge instantanément la liste des plugins depuis le cache JSON sans aucun délai."""
         if os.path.exists(self.cache_file):
             try:
                 with open(self.cache_file, "r", encoding="utf-8") as f:
@@ -260,28 +457,73 @@ class PluginManager(QObject):
     @staticmethod
     def probe_plugin(file_path: str) -> PluginInfo:
         """
-        Teste la compatibilité d'un plugin VST3 avec isolation des erreurs.
+        Teste la compatibilité d'un plugin (VST3 ou VST2) avec isolation complète des erreurs.
         Ne fait JAMAIS planter l'application en cas de crash ou d'incompatibilité.
         """
+        file_path = os.path.normpath(file_path)
         base_name = os.path.splitext(os.path.basename(file_path))[0]
+        cur_mtime = 0.0
+        cur_size = 0
         try:
-            import pedalboard
-            # Tentative de chargement du plugin
-            plugin = pedalboard.load_plugin(file_path)
-            name = getattr(plugin, "name", None) or base_name
-            is_inst = getattr(plugin, "is_instrument", False)
-            is_fx = getattr(plugin, "is_effect", False)
+            cur_mtime = os.path.getmtime(file_path)
+            cur_size = os.path.getsize(file_path)
+        except OSError:
+            pass
 
-            p_type = "instrument" if is_inst else ("effect" if is_fx else "unknown")
-            param_count = len(getattr(plugin, "parameters", {}))
+        # 1. Traitement des plugins DLL VST 2.4 (ex: Omnisphere.dll)
+        if file_path.lower().endswith(".dll"):
+            if is_vst2_dll(file_path):
+                # Identifier si c'est probablement un instrument ou un effet
+                lower_name = base_name.lower()
+                is_inst = any(k in lower_name for k in [
+                    "omnisphere", "trilian", "keyscape", "synth", "piano",
+                    "bass", "drum", "organ", "kontakt", "sampletank", "inst"
+                ])
+                help_msg = (
+                    "Plugin VST 2.4 hérité (.dll) détecté. NovaDAW prend en charge le standard VST3 moderne 64-bit. "
+                    "Pour utiliser ce plugin dans NovaDAW, installez la mise à jour officielle VST3 (ex: Omnisphere.vst3) "
+                    "ou utilisez un bridge VST3 vers VST2."
+                )
+                return PluginInfo(
+                    name=base_name,
+                    file_path=file_path,
+                    plugin_type="instrument" if is_inst else "effect",
+                    is_compatible=False,
+                    error_message=help_msg,
+                    parameters_count=0,
+                    format="vst2",
+                    file_mtime=cur_mtime,
+                    file_size=cur_size,
+                )
+            else:
+                return PluginInfo(
+                    name=base_name,
+                    file_path=file_path,
+                    plugin_type="unknown",
+                    is_compatible=False,
+                    error_message="Bibliothèque DLL non-VST ou incompatible",
+                    parameters_count=0,
+                    format="dll",
+                    file_mtime=cur_mtime,
+                    file_size=cur_size,
+                )
 
-            return PluginInfo(
-                name=name,
-                file_path=file_path,
-                plugin_type=p_type,
-                is_compatible=True,
-                parameters_count=param_count
-            )
+        # 2. Traitement standard des plugins VST3
+        try:
+            plugin = IsolatedPlugin(file_path)
+            try:
+                return PluginInfo(
+                    name=plugin.name or base_name,
+                    file_path=file_path,
+                    plugin_type="instrument" if plugin.is_instrument else "effect",
+                    is_compatible=True,
+                    parameters_count=plugin.parameters_count,
+                    format="vst3",
+                    file_mtime=cur_mtime,
+                    file_size=cur_size,
+                )
+            finally:
+                plugin.dispose()
         except Exception as e:
             err = str(e)
             return PluginInfo(
@@ -289,13 +531,15 @@ class PluginManager(QObject):
                 file_path=file_path,
                 plugin_type="unknown",
                 is_compatible=False,
-                error_message=err
+                error_message=err,
+                format="vst3",
+                file_mtime=cur_mtime,
+                file_size=cur_size,
             )
 
     def add_plugin_file(self, file_path: str) -> PluginInfo:
-        """Ajoute manuellement un plugin VST3 sélectionné par l'utilisateur"""
+        """Ajoute manuellement un plugin VST3 ou VST2 sélectionné par l'utilisateur"""
         info = self.probe_plugin(file_path)
-        # Remplacer si déjà présent, sinon ajouter
         self.plugins = [p for p in self.plugins if p.file_path != file_path]
         self.plugins.append(info)
         self.save_cache()
@@ -310,22 +554,72 @@ class PluginManager(QObject):
         """Retourne uniquement les effets VST FX compatibles"""
         return [p for p in self.plugins if p.is_compatible and p.plugin_type == "effect"]
 
-    def get_or_load_plugin(self, file_path: str) -> Optional[Any]:
+    def get_all_detected_plugins(self) -> List[PluginInfo]:
+        """Retourne tous les plugins détectés sur le système (compatibles et VST2 hérités)"""
+        return list(self.plugins)
+
+    def get_or_load_plugin(self, file_path: str, instance_key=None) -> Optional[Any]:
         """Charge ou récupère une instance en cache d'un plugin VST3"""
-        if file_path in self.active_instances:
-            return self.active_instances[file_path]
+        key = instance_key or file_path
+        with self._instance_lock:
+            if key in self.active_instances:
+                return self.active_instances[key]
+            if key in self.load_errors:
+                return None
+            plugin = None
+            try:
+                plugin = IsolatedPlugin(file_path)
+                state = self.saved_states.get(key, self.saved_states.get(file_path))
+                if state is None and key != file_path and file_path in self.active_instances:
+                    state = self.active_instances[file_path].raw_state
+                if state is not None:
+                    plugin.raw_state = state
+                self.active_instances[key] = plugin
+                return plugin
+            except Exception as exc:
+                if plugin is not None:
+                    plugin.dispose()
+                self.load_errors[key] = str(exc)
+                return None
 
-        if not os.path.exists(file_path):
-            return None
+    def get_ready_plugin(self, path, key):
+        """The audio callback never initializes a native plugin."""
+        if key in self.active_instances:
+            return self.active_instances[key]
+        if threading.current_thread() is threading.main_thread():
+            return self.get_or_load_plugin(path, key)
+        if key not in self._loading and key not in self.load_errors:
+            self._loading.add(key)
+            def load():
+                try:
+                    self.get_or_load_plugin(path, key)
+                finally:
+                    self._loading.discard(key)
+            threading.Thread(target=load, daemon=True).start()
+        return None
 
-        try:
-            import pedalboard
-            plugin = pedalboard.load_plugin(file_path)
-            self.active_instances[file_path] = plugin
-            return plugin
-        except Exception as e:
-            print(f"[PluginManager] Impossible d'instancier {file_path}: {e}")
-            return None
+    def capture_states(self):
+        import base64
+        for key, plugin in list(self.active_instances.items()):
+            try:
+                self.saved_states[key] = plugin.raw_state
+            except Exception:
+                pass
+        return {key: base64.b64encode(value).decode("ascii")
+                for key, value in self.saved_states.items()}
+
+    def restore_states(self, states):
+        import base64
+        self.release_instances()
+        self.saved_states = {key: base64.b64decode(value) for key, value in states.items()}
+
+    def release_instances(self):
+        self.close_all_editors()
+        with self._instance_lock:
+            for plugin in self.active_instances.values():
+                plugin.dispose()
+            self.active_instances.clear()
+            self.load_errors.clear()
 
 
 # Instance globale partagée

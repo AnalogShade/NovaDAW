@@ -176,6 +176,8 @@ def test_finish_recording_creates_clip_on_timeline(qapp):
 
 def test_mcp_record_action(qapp):
     window = MainWindow()
+    window.project.add_track(Track(name="Piste Test", track_type="audio"))
+    window.refresh_project_ui()
     state = get_transport_state(window)
     assert state["is_recording"] is False
 

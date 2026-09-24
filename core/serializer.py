@@ -9,6 +9,13 @@ from core.project import Project, AudioClip
 
 def save_project(project: Project, file_path: str) -> None:
     """Enregistre l'état complet du projet dans un fichier .ndaw"""
+    from core.plugin_manager import global_plugin_manager
+    if getattr(global_plugin_manager, "current_project", None) is project:
+        project.plugin_states = global_plugin_manager.capture_states()
+    for item in project.plugin_rack:
+        native = getattr(project, "_rack_native_plugins", {}).get(item["file_path"])
+        if native:
+            item["native_state"] = native.get_state()
     project_dict = {
         "format_version": "1.1",
         "name": project.name,
@@ -19,6 +26,7 @@ def save_project(project: Project, file_path: str) -> None:
         "loop_start_beat": project.loop_start_beat,
         "loop_end_beat": project.loop_end_beat,
         "plugin_rack": list(project.plugin_rack),
+        "plugin_states": project.plugin_states,
         "master_track": project.master_track.to_dict() if project.master_track else None,
         "tracks": [t.to_dict() for t in project.tracks],
     }
@@ -43,6 +51,7 @@ def load_project(file_path: str) -> Project:
         loop_start_beat=float(data.get("loop_start_beat", 0.0)),
         loop_end_beat=float(data.get("loop_end_beat", 16.0)),
         plugin_rack=data.get("plugin_rack", []),
+        plugin_states=data.get("plugin_states", {}),
         file_path=file_path,
     )
 

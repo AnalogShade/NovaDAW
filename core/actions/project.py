@@ -291,3 +291,177 @@ def load_demo_project_action(app) -> Dict[str, Any]:
     return {"status": "success", "message": "Projet de démonstration chargé."}
 
 
+def _find_clip_and_track(app, clip_id_or_name: Optional[str] = None, track_id_or_name: Optional[str] = None):
+    if not getattr(app, "project", None):
+        return None, None
+    for track in app.project.tracks:
+        if track_id_or_name:
+            t_needle = str(track_id_or_name).strip().lower()
+            if track.id.lower() != t_needle and track.name.lower() != t_needle:
+                continue
+        for clip in track.clips:
+            if clip_id_or_name:
+                c_needle = str(clip_id_or_name).strip().lower()
+                if clip.id.lower() == c_needle or clip.name.lower() == c_needle:
+                    return track, clip
+            else:
+                return track, clip
+    return None, None
+
+
+@action_registry.register(
+    name="novadaw_split_clip",
+    description="Scinde un clip audio ou MIDI en deux parties à la position temporelle indiquée (en temps absolus).",
+    tags=["clip", "editing"]
+)
+def split_clip_action(app, track_id_or_name: Optional[str] = None, clip_id_or_name: Optional[str] = None, split_beat: Optional[float] = None) -> Dict[str, Any]:
+    track, clip = _find_clip_and_track(app, clip_id_or_name, track_id_or_name)
+    if not clip or not track:
+        raise ValueError("Aucun clip correspondant trouvé pour la scission.")
+
+    target_beat = float(split_beat) if split_beat is not None else float(getattr(app.audio_engine, "current_beat", 0.0))
+    if not (clip.start_beat < target_beat < clip.start_beat + clip.length_beats):
+        raise ValueError(f"Le temps de scission ({target_beat}) doit être strictement compris entre le début ({clip.start_beat}) et la fin ({clip.start_beat + clip.length_beats}) du bloc.")
+
+    if hasattr(app, "timeline_grid"):
+        p1, p2 = app.timeline_grid.split_clip_at(track, clip, target_beat)
+    else:
+        bpm = getattr(app.project, "bpm", 120.0)
+        p1, p2 = clip.split(target_beat, bpm=bpm) if hasattr(clip, "split") else (None, None)
+        if p1 and p2:
+            idx = track.clips.index(clip)
+            track.clips[idx] = p1
+            track.clips.insert(idx + 1, p2)
+
+    return {
+        "status": "success",
+        "message": f"Clip '{clip.name}' scindé à {target_beat:.2f} temps.",
+        "track_id": track.id,
+        "part1_id": p1.id if p1 else None,
+        "part1_length": p1.length_beats if p1 else None,
+        "part2_id": p2.id if p2 else None,
+        "part2_length": p2.length_beats if p2 else None,
+    }
+
+
+@action_registry.register(
+    name="novadaw_copy_clip",
+    description="Copie un clip audio ou MIDI dans le presse-papier de NovaDAW.",
+    tags=["clip", "clipboard"]
+)
+def copy_clip_action(app, clip_id_or_name: Optional[str] = None) -> Dict[str, Any]:
+    track, clip = _find_clip_and_track(app, clip_id_or_name)
+    if not clip:
+        raise ValueError("Aucun clip sélectionné ou trouvé à copier.")
+
+    import copy
+    copied = copy.deepcopy(clip)
+    if hasattr(app, "timeline_grid"):
+        app.timeline_grid._clip_clipboard = copied
+    setattr(app, "_global_clip_clipboard", copied)
+
+    return {
+        "status": "success",
+        "clip_id": clip.id,
+        "clip_name": clip.name,
+        "message": f"Clip '{clip.name}' copié dans le presse-papier."
+    }
+
+
+@action_registry.register(
+    name="novadaw_paste_clip",
+    description="Colle le clip du presse-papier à la position temporelle indiquée (ou à la tête de lecture) sur la piste cible.",
+    tags=["clip", "clipboard"]
+)
+def paste_clip_action(app, track_id_or_name: Optional[str] = None, target_beat: Optional[float] = None) -> Dict[str, Any]:
+    target_track = None
+    if track_id_or_name:
+        target_track = app.project.get_track(track_id_or_name)
+    if not target_track and hasattr(app, "selected_track_id"):
+        target_track = app.project.get_track(app.selected_track_id)
+    if not target_track and app.project.tracks:
+        target_track = app.project.tracks[0]
+
+    if not target_track:
+        raise ValueError("Aucune piste valide trouvée pour coller le bloc.")
+
+    if hasattr(app, "timeline_grid") and hasattr(app.timeline_grid, "paste_clip_at_playhead"):
+        if target_beat is not None:
+            old_beat = app.timeline_grid.playhead_beat
+            app.timeline_grid.playhead_beat = float(target_beat)
+            new_clip = app.timeline_grid.paste_clip_at_playhead(target_track=target_track)
+            app.timeline_grid.playhead_beat = old_beat
+        else:
+            new_clip = app.timeline_grid.paste_clip_at_playhead(target_track=target_track)
+    else:
+        cb = getattr(app, "_global_clip_clipboard", None)
+        if not cb:
+            raise ValueError("Presse-papier vide.")
+        import copy, uuid
+        new_clip = copy.deepcopy(cb)
+        new_clip.id = str(uuid.uuid4())[:8]
+        new_clip.start_beat = float(target_beat) if target_beat is not None else float(getattr(app.audio_engine, "current_beat", 0.0))
+        target_track.clips.append(new_clip)
+
+    if not new_clip:
+        raise RuntimeError("Échec du collage du clip.")
+
+    return {
+        "status": "success",
+        "track_id": target_track.id,
+        "track_name": target_track.name,
+        "clip_id": new_clip.id,
+        "clip_name": new_clip.name,
+        "start_beat": new_clip.start_beat,
+        "length_beats": new_clip.length_beats,
+        "message": f"Clip '{new_clip.name}' collé avec succès."
+    }
+
+
+@action_registry.register(
+    name="novadaw_set_grid",
+    description="Configure la résolution temporelle de la grille musicale (en temps) et l'aimantage (snap).",
+    tags=["grid", "editing"]
+)
+def set_grid_action(app, resolution_beats: float = 1.0, snap_enabled: bool = True) -> Dict[str, Any]:
+    res = float(resolution_beats)
+    snap = bool(snap_enabled)
+
+    if hasattr(app, "timeline_grid"):
+        app.timeline_grid.set_grid_resolution(res)
+        app.timeline_grid.set_snap_enabled(snap)
+
+    if hasattr(app, "editing_toolbar"):
+        app.editing_toolbar.set_grid_resolution(res)
+        app.editing_toolbar.set_snap_enabled(snap)
+
+    return {
+        "status": "success",
+        "grid_resolution_beats": res,
+        "snap_enabled": snap,
+        "message": f"Grille réglée à {res} temps, aimantage {'activé' if snap else 'désactivé'}."
+    }
+
+
+@action_registry.register(
+    name="novadaw_set_editing_tool",
+    description="Sélectionne l'outil d'édition actif dans la palette ('select', 'split', 'erase').",
+    tags=["tool", "editing"]
+)
+def set_editing_tool_action(app, tool_name: str = "select") -> Dict[str, Any]:
+    tool = str(tool_name).strip().lower()
+    if tool not in ("select", "split", "erase"):
+        raise ValueError(f"Outil invalide '{tool_name}'. Les outils valides sont 'select', 'split', 'erase'.")
+
+    if hasattr(app, "editing_toolbar"):
+        app.editing_toolbar.set_active_tool(tool)
+    elif hasattr(app, "timeline_grid"):
+        app.timeline_grid.set_active_tool(tool)
+
+    return {
+        "status": "success",
+        "active_tool": tool,
+        "message": f"Outil d'édition '{tool}' activé."
+    }
+
+

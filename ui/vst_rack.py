@@ -13,7 +13,7 @@ from PySide6.QtGui import QColor
 
 from core.project import Project
 from core.plugin_manager import global_plugin_manager
-from ui.plugin_dialogs import open_plugin_editor_gui
+from ui.plugin_dialogs import analyze_plugin_file, open_plugin_editor_gui, open_native_plugin_editor
 
 
 class VstRackWidget(QWidget):
@@ -80,19 +80,19 @@ class VstRackWidget(QWidget):
 
         # Barre d'actions supérieure
         top_bar = QHBoxLayout()
-        lbl_title = QLabel("🎛️ RACK VST DU PROJET (Stack Instruments & Effets)")
+        lbl_title = QLabel("🎛️ PLUGINS DU PROJET — INSTRUMENTS & EFFETS")
         lbl_title.setStyleSheet("font-weight: bold; font-size: 13px; color: #38bdf8;")
         top_bar.addWidget(lbl_title)
         top_bar.addStretch()
 
-        self.btn_add_inst = QPushButton("+ Charger un Instrument...")
+        self.btn_add_inst = QPushButton("+ Ajouter un plugin au projet…")
         self.btn_add_inst.setObjectName("btn_add")
         self.btn_add_inst.setMinimumWidth(160)
         self.btn_add_inst.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        self.btn_add_inst.clicked.connect(self._show_add_instrument_menu)
+        self.btn_add_inst.clicked.connect(self.show_add_dialog)
         top_bar.addWidget(self.btn_add_inst)
 
-        self.btn_add_fx = QPushButton("+ Charger un Effet...")
+        self.btn_add_fx = QPushButton("+ Ajouter un effet…")
         self.btn_add_fx.setMinimumWidth(130)
         self.btn_add_fx.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.btn_add_fx.clicked.connect(self._show_add_effect_menu)
@@ -103,6 +103,12 @@ class VstRackWidget(QWidget):
         self.btn_browse.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.btn_browse.clicked.connect(self._browse_vst_file)
         top_bar.addWidget(self.btn_browse)
+
+        self.btn_scan_rack = QPushButton("🔍 Scanner…")
+        self.btn_scan_rack.setMinimumWidth(100)
+        self.btn_scan_rack.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.btn_scan_rack.clicked.connect(self._trigger_scan)
+        top_bar.addWidget(self.btn_scan_rack)
 
         main_layout.addLayout(top_bar)
 
@@ -131,29 +137,55 @@ class VstRackWidget(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-        if not hasattr(self.project, "plugin_rack") or not self.project.plugin_rack:
-            empty_frame = QFrame()
-            ef_layout = QVBoxLayout(empty_frame)
-            ef_layout.setContentsMargins(20, 30, 20, 30)
-            ef_layout.setAlignment(Qt.AlignCenter)
-
-            lbl_empty = QLabel("Aucun plugin chargé dans le Rack du projet pour le moment.")
-            lbl_empty.setStyleSheet("color: #64748b; font-size: 13px; font-style: italic;")
-            ef_layout.addWidget(lbl_empty)
-
-            btn_quick_add = QPushButton("+ Charger Kontakt, SampleTank ou un autre VST")
-            btn_quick_add.setObjectName("btn_add")
-            btn_quick_add.setMinimumWidth(280)
-            btn_quick_add.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-            btn_quick_add.clicked.connect(self._show_add_instrument_menu)
-            ef_layout.addWidget(btn_quick_add, alignment=Qt.AlignCenter)
-
-            self.stack_layout.insertWidget(0, empty_frame)
-            return
-
-        for idx, rack_item in enumerate(self.project.plugin_rack, 1):
+        items = getattr(self.project, "plugin_rack", [])
+        for idx, rack_item in enumerate(items, 1):
             slot_widget = self._create_slot_card(idx, rack_item)
             self.stack_layout.insertWidget(self.stack_layout.count() - 1, slot_widget)
+
+        # Ajouter la carte de slot cliquable en bas de la stack
+        empty_card = self._create_empty_slot_card(len(items) + 1)
+        self.stack_layout.insertWidget(self.stack_layout.count() - 1, empty_card)
+
+    def _create_empty_slot_card(self, next_idx: int) -> QWidget:
+        card = QFrame()
+        card.setObjectName("empty_rack_slot")
+        card.setMinimumHeight(48)
+        card.setCursor(Qt.PointingHandCursor)
+        card.setStyleSheet("""
+            QFrame#empty_rack_slot {
+                background-color: #161822;
+                border: 1px dashed #334155;
+                border-radius: 6px;
+            }
+            QFrame#empty_rack_slot:hover {
+                background-color: #1c2230;
+                border-color: #38bdf8;
+            }
+        """)
+        c_layout = QHBoxLayout(card)
+        c_layout.setContentsMargins(14, 6, 14, 6)
+        c_layout.setSpacing(12)
+
+        lbl_num = QLabel(f"#{next_idx:02d}")
+        lbl_num.setStyleSheet("font-weight: bold; color: #475569; font-size: 11px;")
+        c_layout.addWidget(lbl_num)
+
+        lbl_icon = QLabel("➕")
+        lbl_icon.setStyleSheet("font-size: 14px; color: #38bdf8;")
+        c_layout.addWidget(lbl_icon)
+
+        lbl_text = QLabel("Cliquer pour assigner un nouvel Instrument ou Effet dans le Rack…")
+        lbl_text.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 500;")
+        c_layout.addWidget(lbl_text, stretch=1)
+
+        btn_add = QPushButton("+ Assigner…")
+        btn_add.setObjectName("btn_add")
+        btn_add.setFixedWidth(110)
+        btn_add.clicked.connect(self.show_add_dialog)
+        c_layout.addWidget(btn_add)
+
+        card.mousePressEvent = lambda e: self.show_add_dialog()
+        return card
 
     def _create_slot_card(self, index: int, rack_item: dict) -> QWidget:
         card = QFrame()
@@ -163,7 +195,45 @@ class VstRackWidget(QWidget):
 
         c_layout = QHBoxLayout(card)
         c_layout.setContentsMargins(12, 6, 12, 6)
-        c_layout.setSpacing(12)
+        c_layout.setSpacing(10)
+
+        # Bouton On/Off (Bypass)
+        is_enabled = rack_item.get("enabled", True)
+        btn_pwr = QPushButton("⏻")
+        btn_pwr.setFixedSize(26, 26)
+        if is_enabled:
+            btn_pwr.setStyleSheet("""
+                QPushButton {
+                    background-color: #0369a1;
+                    color: #ffffff;
+                    border: 1px solid #38bdf8;
+                    border-radius: 13px;
+                    font-size: 13px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #0284c7; }
+            """)
+            btn_pwr.setToolTip("Plugin actif (Cliquer pour bypasser)")
+        else:
+            btn_pwr.setStyleSheet("""
+                QPushButton {
+                    background-color: #1e2230;
+                    color: #64748b;
+                    border: 1px solid #334155;
+                    border-radius: 13px;
+                    font-size: 13px;
+                }
+                QPushButton:hover { background-color: #262c3e; color: #94a3b8; }
+            """)
+            btn_pwr.setToolTip("Plugin désactivé/bypassé (Cliquer pour activer)")
+
+        def _toggle_power():
+            rack_item["enabled"] = not rack_item.get("enabled", True)
+            self.refresh_rack()
+            self.rack_changed.emit()
+
+        btn_pwr.clicked.connect(_toggle_power)
+        c_layout.addWidget(btn_pwr)
 
         # Numéro de slot
         lbl_num = QLabel(f"#{index:02d}")
@@ -180,12 +250,14 @@ class VstRackWidget(QWidget):
         info_layout = QVBoxLayout()
         info_layout.setSpacing(1)
 
-        lbl_name = QLabel(rack_item.get("name", "Plugin"))
+        path = rack_item.get("file_path", "")
+        fmt = "Natif" if path.startswith("novadaw.") else ("VST2" if path.lower().endswith(".dll") else "VST3")
+        lbl_name = QLabel(f"{rack_item.get('name', 'Plugin')} <span style='font-size: 10px; color: #64748b;'>[{fmt}]</span>")
+        lbl_name.setTextFormat(Qt.RichText)
         lbl_name.setStyleSheet("font-weight: bold; font-size: 13px; color: #ffffff;")
         info_layout.addWidget(lbl_name)
 
         # Compter les pistes utilisant ce plugin
-        path = rack_item.get("file_path", "")
         used_by = []
         for t in self.project.tracks:
             if t.plugin_path == path:
@@ -194,10 +266,10 @@ class VstRackWidget(QWidget):
                 used_by.append(t.name)
 
         if used_by:
-            usage_str = f"Utilisé par : {', '.join(used_by)}"
+            usage_str = f"Sortie pour : {', '.join(used_by)}"
             usage_color = "#10b981"
         else:
-            usage_str = "Non affecté (prêt dans le projet)"
+            usage_str = "Prêt dans le projet (sélectionnable comme sortie)"
             usage_color = "#64748b"
 
         lbl_used = QLabel(usage_str)
@@ -239,19 +311,30 @@ class VstRackWidget(QWidget):
                     color: #ffffff;
                 }
             """)
-            btn_e.setToolTip("Ouvrir l'interface graphique du plugin VST3")
-        btn_e.clicked.connect(lambda _, p=path: open_plugin_editor_gui(p, self))
+            btn_e.setToolTip("Ouvrir l'interface graphique du plugin [e]")
+        btn_e.clicked.connect(lambda _, p=path: self.open_editor(p))
         c_layout.addWidget(btn_e)
 
         # Bouton Supprimer
         btn_del = QPushButton("✕")
         btn_del.setFixedSize(24, 24)
         btn_del.setStyleSheet("background: transparent; border: none; color: #ef4444; font-size: 13px; font-weight: bold; padding: 0px;")
-        btn_del.setToolTip("Retirer ce plugin du projet")
+        btn_del.setToolTip("Retirer ce plugin du rack")
         btn_del.clicked.connect(lambda _, rid=rack_item["id"]: self._remove_plugin(rid))
         c_layout.addWidget(btn_del)
 
         return card
+
+    def show_add_dialog(self):
+        from ui.project_plugin_dialog import ProjectPluginDialog
+        ProjectPluginDialog(self).exec()
+
+    def open_editor(self, path):
+        if path.startswith("novadaw."):
+            plugin = self.project.get_rack_native_plugin(path)
+            open_native_plugin_editor(plugin, self)
+        else:
+            open_plugin_editor_gui(path, self)
 
     def _show_add_instrument_menu(self):
         instruments = global_plugin_manager.get_compatible_instruments()
@@ -298,7 +381,7 @@ class VstRackWidget(QWidget):
             "Plugins VST3 (*.vst3);;Tous les fichiers (*.*)"
         )
         if file_path:
-            info = global_plugin_manager.add_plugin_file(file_path)
+            info = analyze_plugin_file(file_path, self)
             if info.is_compatible:
                 self._add_plugin(file_path, info.name, info.plugin_type)
             else:
@@ -310,14 +393,25 @@ class VstRackWidget(QWidget):
 
         # Vérifier si déjà présent
         if any(p.get("file_path") == file_path for p in self.project.plugin_rack):
-            QMessageBox.information(self, "Déjà présent", f"Le plugin '{name}' est déjà chargé dans le Rack du projet.")
-            return
+            return True
 
+        if not file_path.startswith("novadaw.") and file_path not in global_plugin_manager.active_instances:
+            from ui.plugin_dialogs import PluginLoadingDialog
+            dlg = PluginLoadingDialog(file_path, name, self)
+            if not dlg.exec():
+                QMessageBox.warning(self, "Plugin indisponible", dlg.error_message or "Chargement impossible")
+                return
         self.project.add_rack_plugin(file_path, name, plugin_type)
         self.refresh_rack()
         self.rack_changed.emit()
+        return True
 
     def _remove_plugin(self, rack_id: str):
+        item = next((p for p in self.project.plugin_rack if p["id"] == rack_id), None)
+        if item and any(t.plugin_path == item["file_path"] or item["file_path"] in t.insert_effects
+                        for t in self.project.tracks):
+            QMessageBox.information(self, "Plugin utilisé", "Changez la sortie MIDI ou retirez les inserts des pistes avant de retirer ce plugin du projet.")
+            return
         self.project.remove_rack_plugin(rack_id)
         self.refresh_rack()
         self.rack_changed.emit()

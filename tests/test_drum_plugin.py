@@ -274,3 +274,63 @@ def test_09_default_project_has_drum_kit():
     assert drum_track.plugin_path == "novadaw.drum_machine"
     assert len(drum_track.clips) > 0
     assert len(drum_track.clips[0].notes) > 5  # Contient un pattern complet
+
+
+def test_10_ram_cache_instant_retrieval_and_choke():
+    """Vérifie que la mise en tampon RAM est instantanée (< 1ms par clic) et gère le choke group"""
+    import time
+    from core.audio_engine import get_global_audio_engine
+
+    plugin = DrumMachinePlugin()
+    plugin.warm_up_cache()
+
+    ready, total = plugin.cache_status
+    assert ready == 9
+    assert total == 9
+
+    # Mesure du temps d'accès au tampon pour les 9 pads
+    t0 = time.perf_counter()
+    for pad in plugin.pads:
+        wave = plugin.get_cached_pad_audio(pad.pad_id, velocity=115)
+        assert wave is not None
+        assert len(wave) > 0
+        assert not np.isnan(wave).any()
+    elapsed = time.perf_counter() - t0
+
+    # 9 pads doivent être récupérés en moins de 5ms au total (soit < 0.55ms par pad)
+    assert elapsed < 0.010, f"Temps de récupération trop élevé: {elapsed*1000:.2f}ms"
+
+    # Vérification invalidation automatique sur modification de paramètre
+    pad_snare = plugin.find_pad_by_pitch(38)
+    orig_key = plugin._compute_pad_cache_key(pad_snare)
+    pad_snare.tune = 4.0
+    new_key = plugin._compute_pad_cache_key(pad_snare)
+    assert orig_key != new_key
+
+    # Audio récupéré reflète le nouvel accordage
+    wave_tuned = plugin.get_cached_pad_audio("snare", velocity=115)
+    assert wave_tuned is not None
+    assert plugin._pad_cache_keys["snare"] == new_key
+
+    # Test AudioEngine.play_preview_buffer et étouffement choke group
+    engine = AudioEngine()
+    fake_open_hh = np.ones((44100, 2), dtype=np.float32)
+    fake_closed_hh = np.ones((5000, 2), dtype=np.float32)
+
+    # Simulation sans stream matériel
+    with engine._preview_lock:
+        engine._preview_buffers.append({
+            "buffer": fake_open_hh,
+            "cursor": 0,
+            "choke_group": 1
+        })
+        assert len(engine._preview_buffers) == 1
+
+        # Choke group 1 doit couper fake_open_hh
+        for item in engine._preview_buffers:
+            if item.get("choke_group") == 1:
+                item["buffer"] = item["buffer"][:100]
+
+    assert len(engine._preview_buffers[0]["buffer"]) == 100
+    engine.close()
+

@@ -11,6 +11,7 @@ Caractéristiques :
 - Rendu temps réel pour Piano Roll et export audio sans perte
 """
 import os
+import threading
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 import numpy as np
@@ -179,6 +180,11 @@ class DrumMachinePlugin(BasePlugin):
         # Voix actives en cours de lecture pour le rendu continu
         self._active_voices: List[Dict[str, Any]] = []
 
+        # Système de mise en tampon audio instantané (Cache RAM FP32)
+        self._cache_lock = threading.Lock()
+        self._pad_audio_cache: Dict[str, np.ndarray] = {}
+        self._pad_cache_keys: Dict[str, tuple] = {}
+
         # Chargement des samples audio
         self.reload_samples()
 
@@ -193,13 +199,16 @@ class DrumMachinePlugin(BasePlugin):
         ]
 
     def reload_samples(self):
-        """Recharge tous les samples audio des pads"""
+        """Recharge tous les samples audio des pads et réchauffe le tampon RAM"""
         dirs = self.get_sample_dirs()
         for pad in self.pads:
             loaded = pad.load_sample(dirs)
             if not loaded:
                 # Créer un son de remplacement synthétique propre en attendant
                 self._generate_fallback_sample(pad)
+        # Pré-chargement des tampons en tâche de fond pour réactivité maximale
+        self.warm_up_cache(async_bg=True)
+
 
     def _generate_fallback_sample(self, pad: DrumPad):
         """Génère un sample synthétique doux si le WAV n'a pas encore été généré"""
@@ -241,47 +250,143 @@ class DrumMachinePlugin(BasePlugin):
         fallback_idx = pitch % len(self.pads)
         return self.pads[fallback_idx]
 
-    def render_note(self, pitch: int, duration_sec: float = 0.5, sample_rate: int = 44100, velocity: int = 100) -> np.ndarray:
+    def _compute_pad_cache_key(self, pad: DrumPad) -> tuple:
+        """Calcule la signature acoustique pour valider la fraîcheur du tampon audio en RAM"""
+        has_any_solo = any(p.soloed for p in self.pads)
+        effective_muted = pad.muted or (has_any_solo and not pad.soloed)
+        return (
+            pad.pad_id,
+            effective_muted,
+            round(pad.volume, 4),
+            round(pad.pan, 4),
+            round(pad.tune, 2),
+            round(pad.decay, 4),
+            round(pad.reverb_send, 4),
+            round(self.master_volume, 4),
+            self.reverb.enabled,
+            round(self.reverb.room_size, 4),
+            round(self.reverb.damping, 4),
+            round(self.reverb.wet_mix, 4),
+            id(pad.sample_data),
+            len(pad.sample_data) if pad.sample_data is not None else 0
+        )
+
+    def _render_pad_sound_base(self, pad: DrumPad) -> np.ndarray:
         """
-        Rend immédiatement le son d'un pad (utilisé pour les aperçus Piano Roll ou les clics de pad).
-        Retourne un buffer numpy float32 (samples, 2).
+        Calcule le rendu acoustique complet du pad (tune, decay, pan, gain master, réverbération) à vélocité max (127).
+        Ce buffer est mis en mémoire vive (RAM) pour permettre une écoute 100% instantanée (0 ms).
         """
-        pad = self.find_pad_by_pitch(pitch)
-        if not pad:
-            return np.zeros((max(1, int(duration_sec * sample_rate)), 2), dtype=np.float32)
+        has_any_solo = any(p.soloed for p in self.pads)
+        if pad.muted or (has_any_solo and not pad.soloed):
+            return np.zeros((100, 2), dtype=np.float32)
 
         data = pad.get_audio_data()
-        vel_gain = (max(1, min(127, velocity)) / 127.0) * pad.volume * self.master_volume
+        if data is None or len(data) == 0:
+            return np.zeros((100, 2), dtype=np.float32)
 
-        # Panoramique
+        gain = pad.volume * self.master_volume
         pan = max(-1.0, min(1.0, pad.pan))
-        gain_l = vel_gain * (1.0 - max(0.0, pan))
-        gain_r = vel_gain * (1.0 + min(0.0, pan))
+        gain_l = gain * (1.0 - max(0.0, pan))
+        gain_r = gain * (1.0 + min(0.0, pan))
 
-        # Enveloppe de decay
         decay_factor = max(0.1, min(2.0, pad.decay))
-        n_samples = int(len(data) * decay_factor)
-        
+        n_samples = max(10, int(len(data) * decay_factor))
+
         if abs(decay_factor - 1.0) > 0.05:
-            # Interpolation de durée
             idx_orig = np.linspace(0, len(data) - 1, n_samples)
             dry_sound = np.zeros((n_samples, 2), dtype=np.float32)
             dry_sound[:, 0] = np.interp(idx_orig, np.arange(len(data)), data[:, 0]) * gain_l
             dry_sound[:, 1] = np.interp(idx_orig, np.arange(len(data)), data[:, 1]) * gain_r
         else:
-            dry_sound = np.zeros_like(data)
+            dry_sound = np.zeros((len(data), 2), dtype=np.float32)
             dry_sound[:, 0] = data[:, 0] * gain_l
             dry_sound[:, 1] = data[:, 1] * gain_r
 
-        # Application réverbération selon le send du pad
+        # Réverbération stéréo intégrée pré-calculée dans le tampon
         if self.reverb.enabled and pad.reverb_send > 0.01:
             wet_send = dry_sound * pad.reverb_send
-            rev_out = self.reverb.process(wet_send)
+            if hasattr(self.reverb, "process_burst"):
+                rev_out = self.reverb.process_burst(wet_send)
+            else:
+                rev_out = self.reverb.process(wet_send)
             out = dry_sound + rev_out
         else:
             out = dry_sound
 
         return out.astype(np.float32)
+
+    def get_cached_pad_audio(self, pad_id: str, velocity: int = 115) -> np.ndarray:
+        """
+        Retourne le buffer audio pré-mis en tampon en RAM (latence de calcul < 0.05ms).
+        Si les paramètres du pad ont changé, le tampon est recalculé de manière transparente.
+        """
+        pad = next((p for p in self.pads if p.pad_id == pad_id), None)
+        if not pad:
+            return np.zeros((100, 2), dtype=np.float32)
+
+        key = self._compute_pad_cache_key(pad)
+        with self._cache_lock:
+            cached = self._pad_audio_cache.get(pad_id)
+            if cached is None or self._pad_cache_keys.get(pad_id) != key:
+                cached = self._render_pad_sound_base(pad)
+                self._pad_audio_cache[pad_id] = cached
+                self._pad_cache_keys[pad_id] = key
+
+        vel_scale = max(1, min(127, velocity)) / 127.0
+        if abs(vel_scale - 1.0) < 0.005:
+            return cached
+        return (cached * vel_scale).astype(np.float32)
+
+    def warm_up_cache(self, pad_ids: Optional[List[str]] = None, async_bg: bool = False):
+        """Met en tampon tous les échantillons audio en RAM pour une disponibilité instantanée"""
+        targets = [p for p in self.pads if pad_ids is None or p.pad_id in pad_ids]
+
+        def _do_warmup():
+            for p in targets:
+                key = self._compute_pad_cache_key(p)
+                buf = self._render_pad_sound_base(p)
+                with self._cache_lock:
+                    self._pad_audio_cache[p.pad_id] = buf
+                    self._pad_cache_keys[p.pad_id] = key
+
+        if async_bg:
+            t = threading.Thread(target=_do_warmup, daemon=True)
+            t.start()
+        else:
+            _do_warmup()
+
+    def invalidate_cache(self, pad_id: Optional[str] = None):
+        """Invalide le cache pour un pad donné ou pour tous les pads"""
+        with self._cache_lock:
+            if pad_id:
+                self._pad_audio_cache.pop(pad_id, None)
+                self._pad_cache_keys.pop(pad_id, None)
+            else:
+                self._pad_audio_cache.clear()
+                self._pad_cache_keys.clear()
+
+    @property
+    def cache_status(self) -> Tuple[int, int]:
+        """Retourne (nombre de pads en tampon RAM, nombre total de pads)"""
+        with self._cache_lock:
+            valid_count = sum(
+                1 for p in self.pads
+                if p.pad_id in self._pad_audio_cache
+                and self._pad_cache_keys.get(p.pad_id) == self._compute_pad_cache_key(p)
+            )
+            return valid_count, len(self.pads)
+
+    def render_note(self, pitch: int, duration_sec: float = 0.5, sample_rate: int = 44100, velocity: int = 100) -> np.ndarray:
+        """
+        Rend immédiatement le son d'un pad (utilisé pour les aperçus Piano Roll ou les clics de pad).
+        Bénéficie de la mise en tampon RAM ultra-rapide (0 ms de calcul lors du clic).
+        """
+        pad = self.find_pad_by_pitch(pitch)
+        if not pad:
+            return np.zeros((max(1, int(duration_sec * sample_rate)), 2), dtype=np.float32)
+
+        return self.get_cached_pad_audio(pad.pad_id, velocity=velocity)
+
 
     def render_slice(
         self,
@@ -475,6 +580,9 @@ class DrumMachinePlugin(BasePlugin):
                 p.decay = 0.80
                 p.reverb_send = 0.02
 
+        self.invalidate_cache()
+        self.warm_up_cache(async_bg=True)
+
     def get_state(self) -> Dict[str, Any]:
         return {
             "preset_name": self.preset_name,
@@ -508,6 +616,10 @@ class DrumMachinePlugin(BasePlugin):
         for pad in self.pads:
             if pad.pad_id in pads_map:
                 pad.from_dict(pads_map[pad.pad_id])
+
+        self.invalidate_cache()
+        self.warm_up_cache(async_bg=True)
+
 
     def create_editor(self, parent=None):
         from plugins.drum_machine.drum_gui import DrumMachineWidget

@@ -1,10 +1,12 @@
 """
 core/project.py - Modèle de données pour le DAW
 """
+import os
 from dataclasses import dataclass, field
-from typing import List, Optional, Union, Any
+from typing import List, Optional, Union, Any, Tuple
 import uuid
 import numpy as np
+
 
 
 @dataclass
@@ -65,6 +67,43 @@ class MidiClip:
         return clip
 
 
+    def split(self, split_beat: float) -> Tuple["MidiClip", "MidiClip"]:
+        """Scinde le clip MIDI en deux parties à la position split_beat (en temps absolus du projet)"""
+        rel_split = max(0.0, min(self.length_beats, split_beat - self.start_beat))
+        notes1 = []
+        notes2 = []
+        for n in self.notes:
+            n_start = n.start_beat
+            n_end = n.start_beat + n.duration
+            if n_start < rel_split:
+                d1 = min(n.duration, rel_split - n_start)
+                if d1 > 0.01:
+                    notes1.append(MidiNote(n.pitch, n_start, d1, n.velocity))
+            if n_end > rel_split:
+                d2 = n_end - max(rel_split, n_start)
+                s2 = max(0.0, n_start - rel_split)
+                if d2 > 0.01:
+                    notes2.append(MidiNote(n.pitch, s2, d2, n.velocity))
+
+        part1 = MidiClip(
+            id=str(uuid.uuid4())[:8],
+            name=f"{self.name} (Part 1)",
+            start_beat=self.start_beat,
+            length_beats=rel_split,
+            notes=notes1,
+            color=self.color
+        )
+        part2 = MidiClip(
+            id=str(uuid.uuid4())[:8],
+            name=f"{self.name} (Part 2)",
+            start_beat=self.start_beat + rel_split,
+            length_beats=max(0.1, self.length_beats - rel_split),
+            notes=notes2,
+            color=self.color
+        )
+        return part1, part2
+
+
 @dataclass
 class AudioClip:
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
@@ -74,6 +113,7 @@ class AudioClip:
     file_path: Optional[str] = None
     gain: float = 1.0
     color: str = "#10b981"
+    source_offset_beats: float = 0.0  # Décalage de départ dans le fichier audio source (en temps)
     # Données audio non sérialisées en JSON (chargées à la volée)
     audio_data: Optional[np.ndarray] = None
     sample_rate: int = 44100
@@ -88,6 +128,7 @@ class AudioClip:
             "file_path": self.file_path,
             "gain": float(self.gain),
             "color": self.color,
+            "source_offset_beats": float(getattr(self, "source_offset_beats", 0.0)),
         }
 
     @classmethod
@@ -100,8 +141,157 @@ class AudioClip:
             file_path=data.get("file_path"),
             gain=data.get("gain", 1.0),
             color=data.get("color", "#10b981"),
+            source_offset_beats=data.get("source_offset_beats", 0.0),
         )
         return clip
+
+    def _ensure_audio_loaded(self):
+        """Assure que les données audio sont chargées depuis file_path si nécessaire"""
+        if self.audio_data is None and self.file_path and os.path.exists(self.file_path):
+            try:
+                import soundfile as sf
+                data, sr = sf.read(self.file_path, dtype="float32")
+                self.audio_data = data
+                self.sample_rate = sr
+            except Exception:
+                pass
+
+    def get_total_duration_seconds(self) -> float:
+        """Retourne la durée totale du fichier audio source en secondes"""
+        self._ensure_audio_loaded()
+        if self.audio_data is not None and self.sample_rate > 0:
+            return len(self.audio_data) / float(self.sample_rate)
+        return 0.0
+
+    def get_total_duration_beats(self, bpm: float = 120.0) -> float:
+        """Retourne la durée totale du fichier audio source en temps (beats) selon le BPM"""
+        dur_sec = self.get_total_duration_seconds()
+        eff_bpm = max(20.0, float(bpm))
+        return (dur_sec * eff_bpm) / 60.0
+
+    def get_max_allowed_length_beats(self, bpm: float = 120.0) -> float:
+        """Retourne la longueur maximale autorisée pour ce clip afin de ne pas dépasser la fin de l'audio"""
+        total_b = self.get_total_duration_beats(bpm)
+        if total_b <= 0:
+            return 9999.0
+        offset_b = max(0.0, float(getattr(self, "source_offset_beats", 0.0)))
+        return max(0.25, total_b - offset_b)
+
+    def get_waveform_peaks(self, num_bins: int = 1000) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Calcule et met en cache les crêtes (min, max) de l'ensemble de l'onde pour un affichage global.
+        Retourne (mins, maxs) avec valeurs entre -1.0 et 1.0.
+        """
+        self._ensure_audio_loaded()
+        if self.audio_data is None or len(self.audio_data) == 0:
+            return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.float32)
+
+        data = self.audio_data
+        if data.ndim > 1:
+            data = data[:, 0]  # Canal gauche / mono pour vue globale
+
+        total_samples = len(data)
+        bins = max(1, min(int(num_bins), total_samples))
+
+        cache = getattr(self, "_waveform_cache", None)
+        if cache is not None:
+            c_len, c_bins, c_gain, c_mins, c_maxs = cache
+            if c_len == total_samples and c_bins == bins and c_gain == self.gain:
+                return c_mins, c_maxs
+
+        samples_per_bin = total_samples // bins
+        usable_samples = bins * samples_per_bin
+
+        if samples_per_bin > 1:
+            reshaped = data[:usable_samples].reshape(bins, samples_per_bin)
+            mins = np.min(reshaped, axis=1).astype(np.float32)
+            maxs = np.max(reshaped, axis=1).astype(np.float32)
+        else:
+            mins = data[:bins].astype(np.float32)
+            maxs = data[:bins].astype(np.float32)
+
+        eff_gain = float(getattr(self, "gain", 1.0))
+        if eff_gain != 1.0:
+            mins = np.clip(mins * eff_gain, -1.0, 1.0)
+            maxs = np.clip(maxs * eff_gain, -1.0, 1.0)
+
+        self._waveform_cache = (total_samples, bins, eff_gain, mins, maxs)
+        return mins, maxs
+
+    def get_slice_waveform_peaks(self, start_sample: int, end_sample: int, num_bins: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Calcule les crêtes (min, max) pour une tranche précise [start_sample, end_sample].
+        Garantit que la forme d'onde ne s'étire pas lors du rognage de bloc.
+        """
+        self._ensure_audio_loaded()
+        if self.audio_data is None or len(self.audio_data) == 0:
+            return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.float32)
+
+        data = self.audio_data
+        if data.ndim > 1:
+            data = data[:, 0]
+
+        total_samples = len(data)
+        s_start = max(0, min(total_samples, int(start_sample)))
+        s_end = max(s_start, min(total_samples, int(end_sample)))
+
+        slice_len = s_end - s_start
+        if slice_len <= 0 or num_bins <= 0:
+            return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.float32)
+
+        bins = max(1, min(int(num_bins), slice_len))
+        slice_data = data[s_start:s_end]
+
+        samples_per_bin = slice_len // bins
+        usable = bins * samples_per_bin
+
+        if samples_per_bin > 1:
+            reshaped = slice_data[:usable].reshape(bins, samples_per_bin)
+            mins = np.min(reshaped, axis=1).astype(np.float32)
+            maxs = np.max(reshaped, axis=1).astype(np.float32)
+        else:
+            mins = slice_data[:bins].astype(np.float32)
+            maxs = slice_data[:bins].astype(np.float32)
+
+        eff_gain = float(getattr(self, "gain", 1.0))
+        if eff_gain != 1.0:
+            mins = np.clip(mins * eff_gain, -1.0, 1.0)
+            maxs = np.clip(maxs * eff_gain, -1.0, 1.0)
+
+        return mins, maxs
+
+    def split(self, split_beat: float, bpm: float = 120.0) -> Tuple["AudioClip", "AudioClip"]:
+        """Scinde le clip audio en deux parties à split_beat (temps absolu) sans altérer l'alignement sonore"""
+        rel_split = max(0.0, min(self.length_beats, split_beat - self.start_beat))
+        cur_offset = float(getattr(self, "source_offset_beats", 0.0))
+
+        part1 = AudioClip(
+            id=str(uuid.uuid4())[:8],
+            name=f"{self.name} (Part 1)",
+            start_beat=self.start_beat,
+            length_beats=rel_split,
+            file_path=self.file_path,
+            gain=self.gain,
+            color=self.color,
+            source_offset_beats=cur_offset,
+            audio_data=self.audio_data,
+            sample_rate=self.sample_rate
+        )
+
+        part2 = AudioClip(
+            id=str(uuid.uuid4())[:8],
+            name=f"{self.name} (Part 2)",
+            start_beat=self.start_beat + rel_split,
+            length_beats=max(0.1, self.length_beats - rel_split),
+            file_path=self.file_path,
+            gain=self.gain,
+            color=self.color,
+            source_offset_beats=cur_offset + rel_split,
+            audio_data=self.audio_data,
+            sample_rate=self.sample_rate
+        )
+        return part1, part2
+
 
 
 ClipType = Union[MidiClip, AudioClip]
@@ -225,6 +415,7 @@ class Project:
     loop_end_beat: float = 16.0  # 4 mesures par défaut
     tracks: List[Track] = field(default_factory=list)
     master_track: Optional[Track] = None
+    plugin_states: dict = field(default_factory=dict)
     plugin_rack: List[dict] = field(default_factory=list)  # VST Instrument / Effect Stack du projet
     file_path: Optional[str] = None
 
@@ -255,6 +446,9 @@ class Project:
         return self.master_track
 
     def add_rack_plugin(self, file_path: str, name: str, plugin_type: str = "instrument") -> dict:
+        for existing in self.plugin_rack:
+            if existing.get("file_path") == file_path:
+                return existing
         item = {
             "id": str(uuid.uuid4())[:8],
             "name": name,
@@ -264,6 +458,20 @@ class Project:
         }
         self.plugin_rack.append(item)
         return item
+
+    def get_rack_native_plugin(self, path):
+        from plugins.registry import plugin_registry, ensure_plugins_loaded
+        ensure_plugins_loaded()
+        cache = getattr(self, "_rack_native_plugins", None)
+        if cache is None:
+            cache = self._rack_native_plugins = {}
+        if path not in cache:
+            item = next((p for p in self.plugin_rack if p["file_path"] == path), {})
+            plugin = plugin_registry.create_plugin(path)
+            if plugin and item.get("native_state"):
+                plugin.set_state(item["native_state"])
+            cache[path] = plugin
+        return cache[path]
 
     def remove_rack_plugin(self, rack_id: str):
         self.plugin_rack = [p for p in self.plugin_rack if p["id"] != rack_id]

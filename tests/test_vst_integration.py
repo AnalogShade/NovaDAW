@@ -92,7 +92,7 @@ def test_editor_tracking_and_close_helpers():
     assert len(global_plugin_manager.open_editors) == 0
 
 
-def test_audio_engine_offline_midi_protection():
+def test_isolated_host_allows_multibus_instruments():
     """Vérifie que l'AudioEngine protège contre les crashs natifs pour les plugins multi-bus complexes"""
     engine = AudioEngine()
 
@@ -106,8 +106,8 @@ def test_audio_engine_offline_midi_protection():
     synth = FakePlugin("Syntronik")
     fx = FakePlugin("TR5 Black 76", is_instrument=False)
 
-    assert engine._can_render_vst_offline(kontakt) is False
-    assert engine._can_render_vst_offline(sampletank) is False
+    assert engine._can_render_vst_offline(kontakt) is True
+    assert engine._can_render_vst_offline(sampletank) is True
     assert engine._can_render_vst_offline(synth) is True
     assert engine._can_render_vst_offline(fx) is False
     assert engine._can_render_vst_offline(None) is False

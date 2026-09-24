@@ -2,7 +2,7 @@
 ui/audio_editor.py - Éditeur et inspecteur de clip audio avec affichage de forme d'onde
 """
 import os
-from typing import Optional
+from typing import Optional, Tuple
 import numpy as np
 import soundfile as sf
 from PySide6.QtWidgets import (
@@ -17,17 +17,23 @@ from core.audio_importer import load_audio_file, QT_FILE_DIALOG_FILTER
 
 
 class WaveformWidget(QWidget):
-    """Visualiseur de forme d'onde audio haute résolution"""
+    """Visualiseur de forme d'onde audio haute résolution avec mise en valeur de la zone active"""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.audio_data: Optional[np.ndarray] = None
         self.sample_rate = 44100
+        self.active_range: Optional[Tuple[float, float]] = None  # (start_ratio, end_ratio) de 0.0 à 1.0
         self.setFixedHeight(120)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-    def set_audio_data(self, data: Optional[np.ndarray], sr: int = 44100):
+    def set_audio_data(self, data: Optional[np.ndarray], sr: int = 44100, active_range: Optional[Tuple[float, float]] = None):
         self.audio_data = data
         self.sample_rate = sr
+        self.active_range = active_range
+        self.update()
+
+    def set_active_range(self, start_ratio: float, end_ratio: float):
+        self.active_range = (max(0.0, float(start_ratio)), min(1.0, float(end_ratio)))
         self.update()
 
     def paintEvent(self, event: QPaintEvent):
@@ -48,18 +54,31 @@ class WaveformWidget(QWidget):
         if self.audio_data is None or len(self.audio_data) == 0:
             painter.setPen(QColor("#64748b"))
             painter.setFont(QFont("Segoe UI", 11))
-            painter.drawText(self.rect(), Qt.AlignCenter, "Aucun échantillon audio chargé - Cliquez sur 'Importer WAV'")
+            painter.drawText(self.rect(), Qt.AlignCenter, "Aucun échantillon audio chargé - Cliquez sur 'Importer Fichier Audio'")
             return
 
-        # Calculer les crêtes (peaks) par colonne de pixels pour un affichage instantané
+        # Surligner la zone active (non rognée) si spécifiée
+        active_x1 = 0
+        active_x2 = w
+        if self.active_range:
+            r1, r2 = self.active_range
+            active_x1 = int(r1 * w)
+            active_x2 = int(r2 * w)
+            rect_active = QRectF(active_x1, 2, max(2, active_x2 - active_x1), h - 4)
+            painter.fillRect(rect_active, QColor(16, 185, 129, 30))
+            painter.setPen(QPen(QColor("#10b981"), 1, Qt.DashLine))
+            painter.drawRect(rect_active)
+
+        # Calculer les crêtes (peaks) par colonne de pixels
         data = self.audio_data
         if data.ndim > 1:
-            data = data[:, 0]  # Canal gauche pour la vue d'ensemble
+            data = data[:, 0]
 
         total_samples = len(data)
         samples_per_pixel = max(1, total_samples // w)
 
-        painter.setPen(QPen(QColor("#10b981"), 1))
+        pen_active = QPen(QColor("#10b981"), 1)
+        pen_dimmed = QPen(QColor("#475569"), 1)
 
         for x in range(w):
             start_idx = x * samples_per_pixel
@@ -75,6 +94,12 @@ class WaveformWidget(QWidget):
 
             y1 = int(mid_y - (max_val * (h * 0.45)))
             y2 = int(mid_y - (min_val * (h * 0.45)))
+
+            if active_x1 <= x <= active_x2:
+                painter.setPen(pen_active)
+            else:
+                painter.setPen(pen_dimmed)
+
             painter.drawLine(x, y1, x, y2)
 
 
@@ -170,10 +195,29 @@ class AudioEditor(QWidget):
         self.lbl_gain_val.setText(f"{int(clip.gain * 100)}%")
 
         if clip.audio_data is not None:
-            self.waveform.set_audio_data(clip.audio_data, clip.sample_rate)
+            bpm = 120.0
+            if hasattr(self.current_track, "bpm") and self.current_track.bpm:
+                bpm = self.current_track.bpm
+            elif hasattr(self.audio_engine, "project") and self.audio_engine.project:
+                bpm = self.audio_engine.project.bpm
+
+            total_beats = clip.get_total_duration_beats(bpm)
+            offset_beats = float(getattr(clip, "source_offset_beats", 0.0))
+            if total_beats > 0:
+                start_r = max(0.0, offset_beats / total_beats)
+                end_r = min(1.0, (offset_beats + clip.length_beats) / total_beats)
+            else:
+                start_r, end_r = 0.0, 1.0
+
+            self.waveform.set_audio_data(clip.audio_data, clip.sample_rate, active_range=(start_r, end_r))
             dur_sec = len(clip.audio_data) / clip.sample_rate
+            visible_dur_sec = (clip.length_beats * 60.0) / bpm
+            offset_sec = (offset_beats * 60.0) / bpm
             fmt = os.path.splitext(clip.file_path or "")[1].upper().replace(".", "") or "AUDIO"
-            self.lbl_info.setText(f"Format : {fmt} | Échantillonnage : {clip.sample_rate} Hz | Durée : {dur_sec:.2f}s | Fichier : {os.path.basename(clip.file_path or '')}")
+            self.lbl_info.setText(
+                f"Format : {fmt} | {clip.sample_rate} Hz | Fichier total : {dur_sec:.2f}s | "
+                f"Visible : {visible_dur_sec:.2f}s (Décalage : {offset_sec:.2f}s) | {os.path.basename(clip.file_path or '')}"
+            )
         else:
             self.waveform.set_audio_data(None)
             self.lbl_info.setText("Aucun fichier audio chargé")
