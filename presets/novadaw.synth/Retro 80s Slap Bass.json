@@ -1,0 +1,55 @@
+{
+  "version": "1.0",
+  "name": "Retro 80s Slap Bass",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Retro 80s Slap Bass",
+  "state": {
+    "master_volume": 1.0,
+    "glide_time": 0.0,
+    "delay": {
+      "enabled": false,
+      "mix": 0.0
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.35,
+      "mix": 0.15
+    },
+    "layers": [
+      {
+        "name": "Slap Thumb",
+        "waveform": "square",
+        "pulse_width": 0.25,
+        "octave": -1,
+        "volume": 0.85,
+        "pan": 0.0,
+        "output_bus": 0,
+        "cutoff": 3600.0,
+        "resonance": 2.4,
+        "filter_env_amount": 0.7,
+        "filter_decay": 0.12,
+        "attack": 0.003,
+        "decay": 0.22,
+        "sustain": 0.15,
+        "release": 0.2
+      },
+      {
+        "name": "Pluck Snap",
+        "waveform": "saw",
+        "octave": 0,
+        "volume": 0.45,
+        "pan": 0.0,
+        "output_bus": 0,
+        "cutoff": 4200.0,
+        "resonance": 1.8,
+        "attack": 0.002,
+        "decay": 0.14,
+        "sustain": 0.05,
+        "release": 0.15
+      }
+    ]
+  }
+}

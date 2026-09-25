@@ -1,0 +1,58 @@
+{
+  "version": "1.0",
+  "name": "Cyberpunk Acid Lead",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Cyberpunk Acid Lead",
+  "state": {
+    "master_volume": 1.0,
+    "glide_time": 0.04,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.25,
+      "feedback": 0.35,
+      "mix": 0.22
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.45,
+      "mix": 0.18
+    },
+    "layers": [
+      {
+        "name": "Acid Saw",
+        "waveform": "saw",
+        "octave": 0,
+        "volume": 0.85,
+        "pan": -0.1,
+        "output_bus": 0,
+        "cutoff": 2600.0,
+        "resonance": 3.2,
+        "drive": 0.8,
+        "filter_env_amount": 0.65,
+        "filter_decay": 0.22,
+        "attack": 0.005,
+        "decay": 0.3,
+        "sustain": 0.6,
+        "release": 0.25
+      },
+      {
+        "name": "Sub Punch",
+        "waveform": "square",
+        "octave": -1,
+        "volume": 0.7,
+        "pan": 0.1,
+        "output_bus": 0,
+        "cutoff": 1200.0,
+        "resonance": 1.0,
+        "pulse_width": 0.45,
+        "attack": 0.005,
+        "decay": 0.2,
+        "sustain": 0.7,
+        "release": 0.25
+      }
+    ]
+  }
+}

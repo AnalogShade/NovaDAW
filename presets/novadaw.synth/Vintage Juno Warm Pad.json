@@ -1,0 +1,56 @@
+{
+  "version": "1.0",
+  "name": "Vintage Juno Warm Pad",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Vintage Juno Warm Pad",
+  "state": {
+    "master_volume": 0.95,
+    "glide_time": 0.0,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.35,
+      "feedback": 0.35,
+      "mix": 0.22
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.7,
+      "mix": 0.28
+    },
+    "layers": [
+      {
+        "name": "Juno Saw",
+        "waveform": "saw",
+        "octave": 0,
+        "volume": 0.75,
+        "pan": -0.15,
+        "output_bus": 0,
+        "cutoff": 2200.0,
+        "resonance": 1.2,
+        "attack": 0.45,
+        "decay": 0.8,
+        "sustain": 0.8,
+        "release": 1.1
+      },
+      {
+        "name": "Juno Sub Pulse",
+        "waveform": "square",
+        "pulse_width": 0.5,
+        "octave": -1,
+        "fine_tune": 6.0,
+        "volume": 0.55,
+        "pan": 0.15,
+        "output_bus": 0,
+        "cutoff": 1600.0,
+        "resonance": 0.9,
+        "attack": 0.4,
+        "decay": 0.7,
+        "sustain": 0.85,
+        "release": 1.0
+      }
+    ]
+  }
+}

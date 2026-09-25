@@ -583,6 +583,7 @@ class MainWindow(QMainWindow):
         self.transport_bar.loop_toggled.connect(self._on_loop_toggled)
         self.transport_bar.bpm_changed.connect(self._on_bpm_changed)
         self.transport_bar.master_volume_changed.connect(self._on_master_vol_changed)
+        self.transport_bar.master_clip_reset.connect(lambda: self.audio_engine.reset_master_clip() if hasattr(self.audio_engine, "reset_master_clip") else None)
         self.transport_bar.goto_start_clicked.connect(self._on_goto_start)
         self.transport_bar.goto_end_clicked.connect(self._on_goto_end)
         self.transport_bar.step_rewind.connect(self._on_step_relative)
@@ -1299,6 +1300,11 @@ class MainWindow(QMainWindow):
             errors = list(self.audio_engine.plugin_errors.values())
             self.audio_engine.plugin_errors.clear()
             self.statusBar().showMessage("Plugin indisponible — " + errors[-1], 10000)
+
+        # Mise à jour du VU-mètre Master et de l'indicateur de distorsion
+        if hasattr(self, "transport_bar") and hasattr(self.audio_engine, "get_master_peaks"):
+            pk_l, pk_r, clipped = self.audio_engine.get_master_peaks()
+            self.transport_bar.update_master_meter(pk_l, pk_r, clipped)
 
         if self.audio_engine.is_playing:
             beat = self.audio_engine.current_beat

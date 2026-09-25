@@ -193,13 +193,29 @@ class TestNovaSynthPlugin(unittest.TestCase):
         """Vérifie le chargement de tous les presets d'usine et la sérialisation bidirectionnelle de l'état"""
         synth = NovaSynthPlugin()
         presets = synth.get_factory_presets()
-        self.assertGreaterEqual(len(presets), 5)
+        self.assertGreaterEqual(len(presets), 30, f"Doit comporter au moins 30 presets, trouvé: {len(presets)}")
+
+        # Vérifier la présence des catégories requises
+        required_names = [
+            "Cyberpunk Acid Lead", "Neon Horizon SuperSaw", "Deep Sub & Punch Bass",
+            "Ethereal Dream Pad", "80s Synthwave Pluck", "Sci-Fi FM Resonator",
+            "Celestial Concert Harp", "Celtic Fairy Harp", "Solo Chamber Violin",
+            "Symphonic String Ensemble", "Lush Nebula Pad", "Cyber Fusion Sync Lead",
+            "Sub-Drop Cyber Impact", "Electro Snare & Clang Hit", "Industrial Thunder Kick",
+            "Electric Dream Rhodes", "Cathedral Gothic Organ"
+        ]
+        for req in required_names:
+            self.assertIn(req, presets, f"Le preset essentiel '{req}' doit être présent.")
 
         for pname in presets.keys():
             ok = synth.apply_preset(pname)
             self.assertTrue(ok, f"Le preset {pname} doit s'appliquer sans erreur.")
             self.assertEqual(synth.preset_name, pname)
             self.assertGreater(len(synth.layers), 0)
+            # Rendu audio de test rapide
+            audio = synth.render_note(60, duration_sec=0.05, sample_rate=44100)
+            self.assertFalse(np.isnan(audio).any(), f"NaN détecté dans l'audio pour {pname}")
+            self.assertFalse(np.isinf(audio).any(), f"Inf détecté dans l'audio pour {pname}")
 
         # Test sérialisation get_state / set_state
         state = synth.get_state()

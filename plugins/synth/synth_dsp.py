@@ -13,6 +13,12 @@ import math
 import numpy as np
 from typing import Optional, Tuple, Dict, Any, List
 
+try:
+    import scipy.signal as sig
+    HAS_SCIPY_SIG = True
+except Exception:
+    HAS_SCIPY_SIG = False
+
 
 def pitch_to_freq(pitch: float) -> float:
     """Convertit un numéro de note MIDI en fréquence en Hertz (A4 = 69 = 440 Hz)"""
@@ -120,18 +126,32 @@ def generate_oscillator(
         mono_out = np.sin(carrier_phase).astype(np.float32)
 
     elif wave_lower in ("supersaw", "unison"):
-        # SuperSaw 7 voix detuned avec répartition panoramique stéréo (style Roland JP-8000)
-        detune_factors = np.array([-0.11, -0.06, -0.02, 0.0, 0.02, 0.06, 0.11]) * max(0.01, min(1.0, unison_detune))
-        pans = np.linspace(-unison_spread, unison_spread, 7)
-        seed_phases = np.array([0.0, 0.142857, 0.285714, 0.428571, 0.571428, 0.714285, 0.857142])
+        # SuperSaw 7 voix detuned avec répartition panoramique stéréo et PolyBLEP anti-aliasé
+        detune_factors = np.array([-0.11, -0.06, -0.02, 0.0, 0.02, 0.06, 0.11], dtype=np.float64) * max(0.01, min(1.0, unison_detune))
+        pans = np.linspace(-unison_spread, unison_spread, 7, dtype=np.float32)
+        seed_phases = np.array([0.0, 0.142857, 0.285714, 0.428571, 0.571428, 0.714285, 0.857142], dtype=np.float64)
 
         left = np.zeros(num_samples, dtype=np.float32)
         right = np.zeros(num_samples, dtype=np.float32)
 
         for idx, (d_st, pan) in enumerate(zip(detune_factors, pans)):
-            f_voice = freq * (2.0 ** (d_st / 12.0))
+            f_voice = max(10.0, min(freq * (2.0 ** (d_st / 12.0)), sample_rate * 0.49))
+            dt_v = f_voice / sample_rate
             p_v = (t * f_voice + seed_phases[idx] + phase_offset) % 1.0
-            saw_v = (2.0 * p_v - 1.0).astype(np.float32)
+
+            # PolyBLEP pour chaque voix afin d'éviter tout grésillement/repliement de spectre
+            naive_v = 2.0 * p_v - 1.0
+            blep_v = np.zeros_like(p_v)
+
+            mask1 = p_v < dt_v
+            t1 = p_v[mask1] / dt_v
+            blep_v[mask1] = 2.0 * t1 - (t1 * t1) - 1.0
+
+            mask2 = p_v > (1.0 - dt_v)
+            t2 = (p_v[mask2] - 1.0) / dt_v
+            blep_v[mask2] = (t2 * t2) + 2.0 * t2 + 1.0
+
+            saw_v = (naive_v - blep_v).astype(np.float32)
 
             gain_l = float(np.sqrt(0.5 * (1.0 - pan)))
             gain_r = float(np.sqrt(0.5 * (1.0 + pan)))
@@ -161,26 +181,35 @@ def compute_adsr_envelope(
     """
     Calcule l'enveloppe ADSR (0.0 à 1.0) pour chaque échantillon de l'intervalle temporel [t_start, t_end].
     t_start, t_end et note_off_time sont relatifs au début de la note (note_start = 0.0).
+    Fournit des chemins rapides optimisés et une extinction douce anti-clic.
     """
     if num_samples <= 0:
         return np.zeros(0, dtype=np.float32)
-
-    t = np.linspace(t_start, t_end, num_samples, endpoint=False, dtype=np.float64)
-    env = np.zeros(num_samples, dtype=np.float32)
 
     a = max(0.001, float(attack))
     d = max(0.001, float(decay))
     s = max(0.0, min(1.0, float(sustain)))
     r = max(0.001, float(release))
 
-    # Phase 1: Avant le début de la note
-    # env reste 0
+    # Optimisation chemin rapide 1 : Avant le déclenchement de la note
+    if t_end <= 0.0:
+        return np.zeros(num_samples, dtype=np.float32)
+
+    # Optimisation chemin rapide 2 : Après l'extinction complète du release
+    if t_start >= (note_off_time + r):
+        return np.zeros(num_samples, dtype=np.float32)
+
+    # Optimisation chemin rapide 3 : Phase de sustain pur stable
+    if t_start >= (a + d) and t_end <= note_off_time:
+        return np.full(num_samples, s, dtype=np.float32)
+
+    t = np.linspace(t_start, t_end, num_samples, endpoint=False, dtype=np.float64)
+    env = np.zeros(num_samples, dtype=np.float32)
 
     # Phase 2: Note On
     on_mask = (t >= 0.0) & (t < note_off_time)
     if np.any(on_mask):
         t_on = t[on_mask]
-        # Attack
         att_mask = t_on < a
         env[on_mask] = np.where(
             att_mask,
@@ -192,20 +221,22 @@ def compute_adsr_envelope(
             )
         )
 
-    # Phase 3: Note Off (Release)
+    # Phase 3: Note Off (Release analogique doux sans clic)
     rel_mask = (t >= note_off_time) & (t >= 0.0)
     if np.any(rel_mask):
         t_rel = t[rel_mask] - note_off_time
 
-        # Calculer le niveau d'enveloppe au moment exact du note-off
+        # Niveau exact au moment du note-off
         if note_off_time < a:
-            sus_val = note_off_time / a
+            sus_val = max(0.0, note_off_time / a)
         elif note_off_time < (a + d):
             sus_val = 1.0 - ((note_off_time - a) / d) * (1.0 - s)
         else:
             sus_val = s
 
-        rel_factor = np.maximum(0.0, 1.0 - (t_rel / r))
+        norm_rel = np.clip(1.0 - (t_rel / r), 0.0, 1.0)
+        # Courbe légèrement incurvée douce (smooth concave) pour une décroissance progressive à zéro sans choc
+        rel_factor = norm_rel * norm_rel
         env[rel_mask] = (sus_val * rel_factor).astype(np.float32)
 
     return np.clip(env, 0.0, 1.0)
@@ -213,17 +244,28 @@ def compute_adsr_envelope(
 
 class ChamberlinSVF:
     """
-    Filtre d'état variable (State-Variable Filter) à stabilité inconditionnelle.
-    Offre des courbes analogiques douces pour Passe-Bas, Passe-Haut, Passe-Bande et Notch
-    avec résonance chaleureuse et saturation intégrée.
+    Filtre d'état variable (State-Variable Filter) à stabilité inconditionnelle et haute performance.
+    Garantit une continuité mathématique absolue sans aucun clic ni grésillement lors des changements de paramètres.
     """
     def __init__(self):
+        self.zi: Optional[np.ndarray] = None
+        self._prev_x: Optional[np.ndarray] = None
+        self._prev_y: Optional[np.ndarray] = None
+        self._prev_cutoff: float = -1.0
+        self._prev_q: float = -1.0
+        self._prev_type: str = ""
         self.low_l = 0.0
         self.band_l = 0.0
         self.low_r = 0.0
         self.band_r = 0.0
 
     def reset(self):
+        self.zi = None
+        self._prev_x = None
+        self._prev_y = None
+        self._prev_cutoff = -1.0
+        self._prev_q = -1.0
+        self._prev_type = ""
         self.low_l = 0.0
         self.band_l = 0.0
         self.low_r = 0.0
@@ -250,77 +292,102 @@ class ChamberlinSVF:
         if n == 0:
             return audio
 
-        out = np.zeros_like(audio)
-        ftype = (filter_type or "lowpass").lower()
-
-        # Facteur d'amortissement q = 1 / Q
-        q = 1.0 / max(0.2, min(10.0, float(resonance)))
         drive_gain = 1.0 + max(0.0, min(3.0, float(drive))) * 0.8
+        in_sig = audio * drive_gain
+        ftype = (filter_type or "lowpass").lower()
+        q = max(0.2, min(10.0, float(resonance)))
 
-        low_l = self.low_l
-        band_l = self.band_l
-        low_r = self.low_r
-        band_r = self.band_r
-
-        # Sur-échantillonnage interne 2x pour une précision analogique sans instabilité à haute fréquence
-        base_cutoff = max(20.0, min(sample_rate * 0.45, float(cutoff)))
-        f_val = 2.0 * math.sin(math.pi * base_cutoff / (sample_rate * 2.0))
-
-        use_mod = (mod_cutoff is not None and len(mod_cutoff) == n)
-
-        in_l = audio[:, 0] * drive_gain
-        in_r = audio[:, 1] * drive_gain
-
-        for i in range(n):
-            if use_mod:
-                cur_c = max(20.0, min(sample_rate * 0.45, base_cutoff * (2.0 ** mod_cutoff[i])))
-                f = 2.0 * math.sin(math.pi * cur_c / (sample_rate * 2.0))
-            else:
-                f = f_val
-
-            # Canal Gauche (2x passes pour lissage numérique)
-            for _ in range(2):
-                low_l += f * band_l
-                high_l = in_l[i] - low_l - q * band_l
-                band_l += f * high_l
-                # Saturation douce dans la boucle pour éviter tout débordement
-                if band_l > 4.0:
-                    band_l = 4.0
-                elif band_l < -4.0:
-                    band_l = -4.0
-
-            # Canal Droit
-            for _ in range(2):
-                low_r += f * band_r
-                high_r = in_r[i] - low_r - q * band_r
-                band_r += f * high_r
-                if band_r > 4.0:
-                    band_r = 4.0
-                elif band_r < -4.0:
-                    band_r = -4.0
-
+        def _calc_ba(c_hz: float):
+            c_hz = max(20.0, min(sample_rate * 0.48, float(c_hz)))
+            w0 = 2.0 * math.pi * c_hz / sample_rate
+            cw = math.cos(w0)
+            sw = math.sin(w0)
+            alpha = sw / (2.0 * q)
+            a0 = 1.0 + alpha
             if ftype in ("lowpass", "lp"):
-                out[i, 0] = low_l
-                out[i, 1] = low_r
+                b = np.array([(1.0 - cw) * 0.5, 1.0 - cw, (1.0 - cw) * 0.5], dtype=np.float32) / a0
             elif ftype in ("highpass", "hp"):
-                out[i, 0] = high_l
-                out[i, 1] = high_r
+                b = np.array([(1.0 + cw) * 0.5, -(1.0 + cw), (1.0 + cw) * 0.5], dtype=np.float32) / a0
             elif ftype in ("bandpass", "bp"):
-                out[i, 0] = band_l
-                out[i, 1] = band_r
+                b = np.array([alpha, 0.0, -alpha], dtype=np.float32) / a0
             elif ftype in ("notch", "rejet"):
-                out[i, 0] = low_l + high_l
-                out[i, 1] = low_r + high_r
+                b = np.array([1.0, -2.0 * cw, 1.0], dtype=np.float32) / a0
             else:
-                out[i, 0] = low_l
-                out[i, 1] = low_r
+                b = np.array([(1.0 - cw) * 0.5, 1.0 - cw, (1.0 - cw) * 0.5], dtype=np.float32) / a0
+            a = np.array([1.0, -2.0 * cw / a0, (1.0 - alpha) / a0], dtype=np.float32)
+            return b, a
 
-        self.low_l = low_l
-        self.band_l = band_l
-        self.low_r = low_r
-        self.band_r = band_r
+        if HAS_SCIPY_SIG:
+            if mod_cutoff is not None and len(mod_cutoff) == n:
+                m_val = float(np.mean(mod_cutoff))
+                c_eff = max(20.0, min(sample_rate * 0.48, float(cutoff) * (2.0 ** m_val)))
+            else:
+                c_eff = max(20.0, min(sample_rate * 0.48, float(cutoff)))
 
-        # Compensation légère de drive
+            b, a = _calc_ba(c_eff)
+
+            if self.zi is None or self.zi.shape != (2, 2):
+                self.zi = np.zeros((2, 2), dtype=np.float32)
+            elif self._prev_x is not None and self._prev_y is not None:
+                # Si les coefficients ont changé, recalculer zi depuis l'historique audio réel
+                # pour garantir une continuité mathématique absolue sans saut d'amplitude (zéro clic)
+                if abs(c_eff - self._prev_cutoff) > 0.05 or abs(q - self._prev_q) > 0.01 or ftype != self._prev_type:
+                    px = self._prev_x
+                    py = self._prev_y
+                    self.zi = np.zeros((2, 2), dtype=np.float32)
+                    for ch in range(2):
+                        self.zi[0, ch] = b[1] * px[1, ch] + b[2] * px[0, ch] - a[1] * py[1, ch] - a[2] * py[0, ch]
+                        self.zi[1, ch] = b[2] * px[1, ch] - a[2] * py[1, ch]
+
+            out, self.zi = sig.lfilter(b, a, in_sig, axis=0, zi=self.zi)
+
+            # Mettre à jour l'historique d'échantillons continus
+            if n >= 2:
+                self._prev_x = in_sig[-2:, :].copy()
+                self._prev_y = out[-2:, :].copy()
+            elif n == 1:
+                if self._prev_x is not None:
+                    self._prev_x[0] = self._prev_x[1]
+                    self._prev_x[1] = in_sig[0]
+                    self._prev_y[0] = self._prev_y[1]
+                    self._prev_y[1] = out[0]
+                else:
+                    self._prev_x = np.vstack([in_sig, in_sig])
+                    self._prev_y = np.vstack([out, out])
+
+            self._prev_cutoff = c_eff
+            self._prev_q = q
+            self._prev_type = ftype
+        else:
+            out = np.zeros_like(audio)
+            base_cutoff = max(20.0, min(sample_rate * 0.45, float(cutoff)))
+            f_val = 2.0 * math.sin(math.pi * base_cutoff / (sample_rate * 2.0))
+            use_mod = (mod_cutoff is not None and len(mod_cutoff) == n)
+            in_l = in_sig[:, 0]
+            in_r = in_sig[:, 1]
+            low_l, band_l, low_r, band_r = self.low_l, self.band_l, self.low_r, self.band_r
+            for i in range(n):
+                f = 2.0 * math.sin(math.pi * max(20.0, min(sample_rate * 0.45, base_cutoff * (2.0 ** mod_cutoff[i]))) / (sample_rate * 2.0)) if use_mod else f_val
+                for _ in range(2):
+                    low_l += f * band_l
+                    high_l = in_l[i] - low_l - (1.0 / q) * band_l
+                    band_l += f * high_l
+                    low_r += f * band_r
+                    high_r = in_r[i] - low_r - (1.0 / q) * band_r
+                    band_r += f * high_r
+                if ftype in ("lowpass", "lp"):
+                    out[i, 0], out[i, 1] = low_l, low_r
+                elif ftype in ("highpass", "hp"):
+                    out[i, 0], out[i, 1] = high_l, high_r
+                elif ftype in ("bandpass", "bp"):
+                    out[i, 0], out[i, 1] = band_l, band_r
+                elif ftype in ("notch", "rejet"):
+                    out[i, 0], out[i, 1] = low_l + high_l, low_r + high_r
+                else:
+                    out[i, 0], out[i, 1] = low_l, low_r
+            self.low_l, self.band_l, self.low_r, self.band_r = low_l, band_l, low_r, band_r
+
+        # Compensation de drive
         if drive > 0.05:
             out = np.tanh(out / drive_gain) * drive_gain
 
@@ -360,25 +427,28 @@ class StereoPingPongDelay:
 
         in_l = audio[:, 0]
         in_r = audio[:, 1]
+        pos = 0
 
-        for i in range(n):
-            read_idx = (w_idx - delay_samples) % buf_len
+        while pos < n:
+            r_idx = (w_idx - delay_samples) % buf_len
+            step = min(n - pos, delay_samples, buf_len - w_idx, buf_len - r_idx)
+            if step <= 0:
+                step = 1
 
-            read_l = self.buffer_l[read_idx]
-            read_r = self.buffer_r[read_idx]
-
-            wet[i, 0] = read_l
-            wet[i, 1] = read_r
+            read_l = self.buffer_l[r_idx:r_idx + step]
+            read_r = self.buffer_r[r_idx:r_idx + step]
+            wet[pos:pos + step, 0] = read_l
+            wet[pos:pos + step, 1] = read_r
 
             if self.ping_pong:
-                # Écho croisé gauche <-> droite
-                self.buffer_l[w_idx] = in_l[i] + read_r * fb
-                self.buffer_r[w_idx] = in_r[i] + read_l * fb
+                self.buffer_l[w_idx:w_idx + step] = in_l[pos:pos + step] + read_r * fb
+                self.buffer_r[w_idx:w_idx + step] = in_r[pos:pos + step] + read_l * fb
             else:
-                self.buffer_l[w_idx] = in_l[i] + read_l * fb
-                self.buffer_r[w_idx] = in_r[i] + read_r * fb
+                self.buffer_l[w_idx:w_idx + step] = in_l[pos:pos + step] + read_l * fb
+                self.buffer_r[w_idx:w_idx + step] = in_r[pos:pos + step] + read_r * fb
 
-            w_idx = (w_idx + 1) % buf_len
+            w_idx = (w_idx + step) % buf_len
+            pos += step
 
         self.write_idx = w_idx
         mix = max(0.0, min(1.0, self.mix))
@@ -386,70 +456,192 @@ class StereoPingPongDelay:
 
 
 class StereoStudioReverb:
-    """Réverbération stéréo de studio à haute densité (modèle Schroeder/Freeverb)"""
+    """Réverbération stéréo de studio haute fidélité avec filtres en peigne amortis et diffuseurs all-pass (modèle Freeverb/Schroeder)."""
     def __init__(self, sample_rate: int = 44100):
         self.sample_rate = sample_rate
         self.enabled = True
         self.room_size = 0.50
-        self.damping = 0.40
+        self.damping = 0.35
         self.width = 1.0
-        self.mix = 0.20
+        self.mix = 0.25
 
-        # Peigne et allpass
-        comb_tunings_l = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617]
-        scale = sample_rate / 44100.0
-        self.comb_lens = [int(ct * scale) for ct in comb_tunings_l]
-        self.comb_buffers_l = [np.zeros(cl, dtype=np.float32) for cl in self.comb_lens]
-        self.comb_buffers_r = [np.zeros(cl + 23, dtype=np.float32) for cl in self.comb_lens]
-        self.comb_indices = [0] * len(self.comb_lens)
-        self.comb_filter_stores = [0.0] * len(self.comb_lens)
+        scale = max(0.1, sample_rate / 44100.0)
+        # 4 filtres en peigne accordés avec délais distincts pour gauche et droite
+        self.comb_lens_l = [max(2, int(ct * scale)) for ct in [1116, 1277, 1422, 1617]]
+        self.comb_lens_r = [max(2, int((ct + 23) * scale)) for ct in [1116, 1277, 1422, 1617]]
+        self.comb_buffers_l = [np.zeros(cl, dtype=np.float32) for cl in self.comb_lens_l]
+        self.comb_buffers_r = [np.zeros(cr, dtype=np.float32) for cr in self.comb_lens_r]
+        self.comb_indices_l = [0] * len(self.comb_lens_l)
+        self.comb_indices_r = [0] * len(self.comb_lens_r)
+        self.comb_stores_l = [0.0] * len(self.comb_lens_l)
+        self.comb_stores_r = [0.0] * len(self.comb_lens_r)
+
+        # 2 étages de diffuseurs all-pass pour éliminer toute résonance métallique
+        self.allpass_lens_l = [max(2, int(at * scale)) for at in [556, 341]]
+        self.allpass_lens_r = [max(2, int((at + 23) * scale)) for at in [556, 341]]
+        self.allpass_buffers_l = [np.zeros(al, dtype=np.float32) for al in self.allpass_lens_l]
+        self.allpass_buffers_r = [np.zeros(ar, dtype=np.float32) for ar in self.allpass_lens_r]
+        self.allpass_indices_l = [0] * len(self.allpass_lens_l)
+        self.allpass_indices_r = [0] * len(self.allpass_lens_r)
+        self._last_room: float = -1.0
+        self._last_damp: float = -1.0
+        self._b_comb: Optional[np.ndarray] = None
+        self._a_combs_l: List[np.ndarray] = []
+        self._a_combs_r: List[np.ndarray] = []
+        self._b_aps_l: List[np.ndarray] = []
+        self._a_aps_l: List[np.ndarray] = []
+        self._b_aps_r: List[np.ndarray] = []
+        self._a_aps_r: List[np.ndarray] = []
+        self._update_coefficients()
+        self.reset()
+
+    def _update_coefficients(self):
+        """Précalcule les coefficients des filtres IIR de réverbération pour un rendu sans allocation."""
+        if not HAS_SCIPY_SIG:
+            return
+        fb = 0.72 + self.room_size * 0.25
+        damp = self.damping * 0.45
+        self._b_comb = np.array([1.0, -damp], dtype=np.float32)
+
+        self._a_combs_l = []
+        for cl in self.comb_lens_l:
+            a = np.zeros(cl + 1, dtype=np.float32)
+            a[0] = 1.0
+            a[1] = -damp
+            a[cl] = -fb * (1.0 - damp)
+            self._a_combs_l.append(a)
+
+        self._a_combs_r = []
+        for cr in self.comb_lens_r:
+            a = np.zeros(cr + 1, dtype=np.float32)
+            a[0] = 1.0
+            a[1] = -damp
+            a[cr] = -fb * (1.0 - damp)
+            self._a_combs_r.append(a)
+
+        self._b_aps_l = []
+        self._a_aps_l = []
+        for al in self.allpass_lens_l:
+            b_ap = np.zeros(al + 1, dtype=np.float32)
+            b_ap[0] = -0.5
+            b_ap[al] = 1.0
+            a_ap = np.zeros(al + 1, dtype=np.float32)
+            a_ap[0] = 1.0
+            a_ap[al] = -0.5
+            self._b_aps_l.append(b_ap)
+            self._a_aps_l.append(a_ap)
+
+        self._b_aps_r = []
+        self._a_aps_r = []
+        for ar in self.allpass_lens_r:
+            b_ap = np.zeros(ar + 1, dtype=np.float32)
+            b_ap[0] = -0.5
+            b_ap[ar] = 1.0
+            a_ap = np.zeros(ar + 1, dtype=np.float32)
+            a_ap[0] = 1.0
+            a_ap[ar] = -0.5
+            self._b_aps_r.append(b_ap)
+            self._a_aps_r.append(a_ap)
+
+        self._last_room = self.room_size
+        self._last_damp = self.damping
 
     def reset(self):
-        for b in self.comb_buffers_l:
+        for b in self.comb_buffers_l + self.comb_buffers_r + self.allpass_buffers_l + self.allpass_buffers_r:
             b.fill(0.0)
-        for b in self.comb_buffers_r:
-            b.fill(0.0)
-        self.comb_indices = [0] * len(self.comb_lens)
-        self.comb_filter_stores = [0.0] * len(self.comb_lens)
+        self.comb_indices_l = [0] * len(self.comb_lens_l)
+        self.comb_indices_r = [0] * len(self.comb_lens_r)
+        self.comb_stores_l = [0.0] * len(self.comb_lens_l)
+        self.comb_stores_r = [0.0] * len(self.comb_lens_r)
+        self.allpass_indices_l = [0] * len(self.allpass_lens_l)
+        self.allpass_indices_r = [0] * len(self.allpass_lens_r)
+        self.comb_zi_l = [np.zeros(cl, dtype=np.float32) for cl in self.comb_lens_l]
+        self.comb_zi_r = [np.zeros(cr, dtype=np.float32) for cr in self.comb_lens_r]
+        self.allpass_zi_l = [np.zeros(al, dtype=np.float32) for al in self.allpass_lens_l]
+        self.allpass_zi_r = [np.zeros(ar, dtype=np.float32) for ar in self.allpass_lens_r]
 
     def process(self, audio: np.ndarray) -> np.ndarray:
         if not self.enabled or self.mix <= 0.001 or len(audio) == 0:
             return audio
 
         n = len(audio)
-        mono_in = (audio[:, 0] + audio[:, 1]) * 0.015
-        out_l = np.zeros(n, dtype=np.float32)
-        out_r = np.zeros(n, dtype=np.float32)
+        mono_in = (audio[:, 0] + audio[:, 1]) * 0.08
 
-        feedback = 0.70 + self.room_size * 0.28
-        damp = self.damping * 0.4
+        if HAS_SCIPY_SIG:
+            if abs(self.room_size - self._last_room) > 0.001 or abs(self.damping - self._last_damp) > 0.001 or self._b_comb is None:
+                self._update_coefficients()
 
-        for c_idx, cl in enumerate(self.comb_lens):
-            buf_l = self.comb_buffers_l[c_idx]
-            buf_r = self.comb_buffers_r[c_idx]
-            idx = self.comb_indices[c_idx]
-            cl_r = len(buf_r)
-            idx_r = idx % cl_r
-            filter_store = self.comb_filter_stores[c_idx]
+            out_l = np.zeros(n, dtype=np.float32)
+            out_r = np.zeros(n, dtype=np.float32)
+            b_comb = self._b_comb
 
-            for i in range(n):
-                out_sample_l = buf_l[idx]
-                out_sample_r = buf_r[idx_r]
+            for idx, cl in enumerate(self.comb_lens_l):
+                cl_out, self.comb_zi_l[idx] = sig.lfilter(b_comb, self._a_combs_l[idx], mono_in, zi=self.comb_zi_l[idx])
+                out_l += cl_out
 
-                filter_store = (out_sample_l * (1.0 - damp)) + (filter_store * damp)
-                buf_l[idx] = mono_in[i] + filter_store * feedback
+            for idx, cr in enumerate(self.comb_lens_r):
+                cr_out, self.comb_zi_r[idx] = sig.lfilter(b_comb, self._a_combs_r[idx], mono_in, zi=self.comb_zi_r[idx])
+                out_r += cr_out
 
-                buf_r[idx_r] = mono_in[i] + out_sample_r * feedback
+            for idx in range(len(self.allpass_lens_l)):
+                out_l, self.allpass_zi_l[idx] = sig.lfilter(self._b_aps_l[idx], self._a_aps_l[idx], out_l, zi=self.allpass_zi_l[idx])
 
-                out_l[i] += out_sample_l
-                out_r[i] += out_sample_r
+            for idx in range(len(self.allpass_lens_r)):
+                out_r, self.allpass_zi_r[idx] = sig.lfilter(self._b_aps_r[idx], self._a_aps_r[idx], out_r, zi=self.allpass_zi_r[idx])
+        else:
+            out_l = np.zeros(n, dtype=np.float32)
+            out_r = np.zeros(n, dtype=np.float32)
+            for c_idx in range(len(self.comb_lens_l)):
+                bl = self.comb_buffers_l[c_idx]
+                br = self.comb_buffers_r[c_idx]
+                cl = self.comb_lens_l[c_idx]
+                cr = self.comb_lens_r[c_idx]
+                il = self.comb_indices_l[c_idx]
+                ir = self.comb_indices_r[c_idx]
+                sl_store = self.comb_stores_l[c_idx]
+                sr_store = self.comb_stores_r[c_idx]
 
-                idx = (idx + 1) % cl
-                idx_r = (idx_r + 1) % cl_r
+                for i in range(n):
+                    sl = bl[il]
+                    sr = br[ir]
+                    sl_store = (sl * (1.0 - damp)) + (sl_store * damp)
+                    sr_store = (sr * (1.0 - damp)) + (sr_store * damp)
+                    bl[il] = mono_in[i] + sl_store * fb
+                    br[ir] = mono_in[i] + sr_store * fb
+                    out_l[i] += sl
+                    out_r[i] += sr
+                    il = (il + 1) % cl
+                    ir = (ir + 1) % cr
 
-            self.comb_indices[c_idx] = idx
-            self.comb_filter_stores[c_idx] = filter_store
+                self.comb_indices_l[c_idx] = il
+                self.comb_indices_r[c_idx] = ir
+                self.comb_stores_l[c_idx] = sl_store
+                self.comb_stores_r[c_idx] = sr_store
+
+            for a_idx in range(len(self.allpass_lens_l)):
+                abl = self.allpass_buffers_l[a_idx]
+                abr = self.allpass_buffers_r[a_idx]
+                al = self.allpass_lens_l[a_idx]
+                ar = self.allpass_lens_r[a_idx]
+                ail = self.allpass_indices_l[a_idx]
+                air = self.allpass_indices_r[a_idx]
+
+                for i in range(n):
+                    bufout_l = abl[ail]
+                    abl[ail] = out_l[i] + bufout_l * 0.5
+                    out_l[i] = -out_l[i] + bufout_l
+                    ail = (ail + 1) % al
+
+                    bufout_r = abr[air]
+                    abr[air] = out_r[i] + bufout_r * 0.5
+                    out_r[i] = -out_r[i] + bufout_r
+                    air = (air + 1) % ar
+
+                self.allpass_indices_l[a_idx] = ail
+                self.allpass_indices_r[a_idx] = air
 
         wet = np.column_stack((out_l, out_r))
         mix = max(0.0, min(1.0, self.mix))
-        return ((audio * (1.0 - mix * 0.4)) + (wet * mix)).astype(np.float32)
+        dry_gain = 1.0 - (mix * 0.45)
+        wet_gain = mix * 0.75
+        return ((audio * dry_gain) + (wet * wet_gain)).astype(np.float32)

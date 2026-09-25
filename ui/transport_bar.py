@@ -1,13 +1,130 @@
 """
 ui/transport_bar.py - Barre de transport inférieure et centrée avec navigation complète
 """
+import math
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QPushButton, QLabel, QDoubleSpinBox,
     QSlider, QFrame, QSpacerItem, QSizePolicy
 )
-from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtCore import Qt, Signal, QTimer, QRectF
+from PySide6.QtGui import QPainter, QColor, QLinearGradient, QPen, QBrush, QFont
 from ui.track_header import ResetableSlider
 from ui.glow_effects import set_button_glow
+
+
+class MasterMeterWidget(QWidget):
+    """
+    VU-mètre Master stéréo avec barres L/R et indicateur d'écrêtage / distorsion (> 0 dB).
+    """
+    clip_reset = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(92, 30)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.level_l = 0.0
+        self.level_r = 0.0
+        self.peak_hold_l = 0.0
+        self.peak_hold_r = 0.0
+        self.is_clipped = False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("VU-mètre Master stéréo. Indicateur CLIP : distorsion > 0 dB (Cliquer pour réinitialiser).")
+
+    def set_levels(self, lvl_l: float, lvl_r: float, clipped: bool):
+        self.level_l = float(lvl_l)
+        self.level_r = float(lvl_r)
+        self.peak_hold_l = max(self.level_l, self.peak_hold_l * 0.94)
+        self.peak_hold_r = max(self.level_r, self.peak_hold_r * 0.94)
+        if clipped or lvl_l > 1.0 or lvl_r > 1.0:
+            self.is_clipped = True
+        elif not clipped:
+            self.is_clipped = False
+
+        # Tooltip dynamique en dB
+        db_l = 20.0 * math.log10(max(1e-4, self.level_l))
+        db_r = 20.0 * math.log10(max(1e-4, self.level_r))
+        if self.is_clipped or self.level_l > 1.0 or self.level_r > 1.0:
+            max_db = max(db_l, db_r)
+            self.setToolTip(f"⚠️ DISTORSION / ÉCRÊTAGE DÉTECTÉ (+{max_db:.1f} dB > 0 dB) !\nCliquer pour réinitialiser.")
+        else:
+            self.setToolTip(f"Niveau Master : L {db_l:.1f} dB | R {db_r:.1f} dB (OK)")
+        self.update()
+
+    def mousePressEvent(self, event):
+        self.is_clipped = False
+        self.clip_reset.emit()
+        self.update()
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        w = self.width()
+        h = self.height()
+
+        # Fond vitré sombre
+        painter.fillRect(0, 0, w, h, QColor("#11131a"))
+        painter.setPen(QPen(QColor("#242838"), 1.0))
+        painter.drawRoundedRect(0.5, 0.5, w - 1, h - 1, 3, 3)
+
+        # Dimensions des barres L et R
+        meter_x = 16
+        clip_w = 30
+        meter_w = max(10, w - meter_x - clip_w - 5)
+        bar_h = 7
+        y_l = 5
+        y_r = 16
+
+        # Labels "L" et "R"
+        painter.setFont(QFont("Consolas", 7, QFont.Bold))
+        painter.setPen(QColor("#64748b"))
+        painter.drawText(3, y_l + bar_h - 1, "L")
+        painter.drawText(3, y_r + bar_h - 1, "R")
+
+        def draw_channel_bar(y_pos: int, lvl: float, pk_hold: float):
+            painter.fillRect(meter_x, y_pos, meter_w, bar_h, QColor("#1e2230"))
+            norm = min(1.2, lvl) / 1.2
+            fill_w = int(meter_w * norm)
+            if fill_w > 0:
+                grad = QLinearGradient(meter_x, 0, meter_x + meter_w, 0)
+                grad.setColorAt(0.0, QColor("#10b981"))
+                grad.setColorAt(0.70, QColor("#10b981"))
+                grad.setColorAt(0.83, QColor("#f59e0b"))
+                grad.setColorAt(1.0, QColor("#ef4444"))
+                painter.fillRect(meter_x, y_pos, fill_w, bar_h, grad)
+
+            # Ligne de crête maintenue (Peak hold)
+            if pk_hold > 0.01:
+                pk_norm = min(1.2, pk_hold) / 1.2
+                pk_x = int(meter_x + meter_w * pk_norm)
+                pk_col = QColor("#ef4444") if pk_hold > 1.0 else QColor("#ffffff")
+                painter.setPen(QPen(pk_col, 1.2))
+                painter.drawLine(pk_x, y_pos, pk_x, y_pos + bar_h)
+
+            # Repère 0 dB
+            zero_x = int(meter_x + meter_w * (1.0 / 1.2))
+            painter.setPen(QPen(QColor(255, 255, 255, 70), 0.8, Qt.DotLine))
+            painter.drawLine(zero_x, y_pos, zero_x, y_pos + bar_h)
+
+        draw_channel_bar(y_l, self.level_l, self.peak_hold_l)
+        draw_channel_bar(y_r, self.level_r, self.peak_hold_r)
+
+        # Indicateur LED de distorsion / clipping
+        clip_rect = QRectF(w - clip_w - 3, 4, clip_w, 20)
+        if self.is_clipped:
+            painter.setBrush(QBrush(QColor("#dc2626")))
+            painter.setPen(QPen(QColor("#fca5a5"), 1.2))
+            painter.drawRoundedRect(clip_rect, 3, 3)
+            painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(clip_rect, Qt.AlignCenter, "CLIP")
+        else:
+            painter.setBrush(QBrush(QColor("#181b24")))
+            painter.setPen(QPen(QColor("#2d3345"), 1.0))
+            painter.drawRoundedRect(clip_rect, 3, 3)
+            painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+            painter.setPen(QColor("#475569"))
+            painter.drawText(clip_rect, Qt.AlignCenter, "0dB")
 
 
 class TransportBar(QWidget):
@@ -17,6 +134,7 @@ class TransportBar(QWidget):
     loop_toggled = Signal(bool)
     bpm_changed = Signal(float)
     master_volume_changed = Signal(float)
+    master_clip_reset = Signal()
     goto_start_clicked = Signal()
     goto_end_clicked = Signal()
     step_rewind = Signal(float)    # Déplacement en beats (négatif)
@@ -200,10 +318,15 @@ class TransportBar(QWidget):
         self.slider_master = ResetableSlider(Qt.Horizontal, default_value=90)
         self.slider_master.setRange(0, 120)
         self.slider_master.setValue(90)
-        self.slider_master.setFixedWidth(90)
+        self.slider_master.setFixedWidth(80)
         self.slider_master.setToolTip("Volume Master : 90% (Double-cliquer pour réinitialiser à 90%)")
         self.slider_master.valueChanged.connect(self._on_master_slider_changed)
         vol_layout.addWidget(self.slider_master)
+
+        # VU-mètre Master Stéréo avec indicateur de distorsion / clipping (> 0 dB)
+        self.master_meter = MasterMeterWidget(self)
+        self.master_meter.clip_reset.connect(self.master_clip_reset.emit)
+        vol_layout.addWidget(self.master_meter)
 
         main_layout.addWidget(vol_container)
 
@@ -287,10 +410,16 @@ class TransportBar(QWidget):
         self.btn_record.blockSignals(False)
         set_button_glow(self.btn_record, is_recording, "#ff2244", blur_radius=20, alpha=240)
 
+    def update_master_meter(self, peak_l: float, peak_r: float, clipped: bool):
+        if hasattr(self, "master_meter"):
+            self.master_meter.set_levels(peak_l, peak_r, clipped)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, "main_layout") and hasattr(self, "slider_master"):
             is_compact = self.width() < 1120
             self.main_layout.setContentsMargins(8 if is_compact else 16, 4, 8 if is_compact else 16, 4)
             self.main_layout.setSpacing(6 if is_compact else 12)
-            self.slider_master.setFixedWidth(65 if is_compact else 90)
+            self.slider_master.setFixedWidth(60 if is_compact else 80)
+            if hasattr(self, "master_meter"):
+                self.master_meter.setFixedSize(76 if is_compact else 92, 30)

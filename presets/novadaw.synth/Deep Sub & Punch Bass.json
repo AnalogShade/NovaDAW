@@ -1,0 +1,54 @@
+{
+  "version": "1.0",
+  "name": "Deep Sub & Punch Bass",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Deep Sub & Punch Bass",
+  "state": {
+    "master_volume": 1.05,
+    "glide_time": 0.02,
+    "delay": {
+      "enabled": false,
+      "mix": 0.0
+    },
+    "reverb": {
+      "enabled": false,
+      "mix": 0.0
+    },
+    "layers": [
+      {
+        "name": "Pure Sine Sub",
+        "waveform": "sine",
+        "octave": -2,
+        "volume": 1.0,
+        "pan": 0.0,
+        "output_bus": 1,
+        "cutoff": 350.0,
+        "resonance": 0.5,
+        "attack": 0.005,
+        "decay": 0.2,
+        "sustain": 0.9,
+        "release": 0.2
+      },
+      {
+        "name": "Grit Transient",
+        "waveform": "fm",
+        "octave": -1,
+        "volume": 0.75,
+        "pan": 0.0,
+        "output_bus": 0,
+        "fm_ratio": 3.0,
+        "fm_depth": 2.5,
+        "cutoff": 1800.0,
+        "resonance": 1.8,
+        "drive": 0.6,
+        "attack": 0.002,
+        "decay": 0.15,
+        "sustain": 0.3,
+        "release": 0.15
+      }
+    ]
+  }
+}

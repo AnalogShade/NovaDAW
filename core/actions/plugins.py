@@ -206,6 +206,8 @@ def configure_equalizer(
             if len(eq_plugin.bands) > 1:
                 eq_plugin.bands[1].gain_db = 2.5
                 eq_plugin.bands[1].invalidate_cache()
+        elif p_name in ("bass_cut", "low_cut", "high_pass", "hpf"):
+            eq_plugin.apply_bass_cut(cutoff_freq=120.0, enabled=True)
         elif p_name in ("vocal_clarity", "vocal"):
             if len(eq_plugin.bands) > 2:
                 eq_plugin.bands[1].gain_db = -2.0  # Nettoyage bas-médiums

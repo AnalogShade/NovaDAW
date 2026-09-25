@@ -1,0 +1,56 @@
+{
+  "version": "1.0",
+  "name": "Glass Celesta & Music Box",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Glass Celesta & Music Box",
+  "state": {
+    "master_volume": 0.9,
+    "glide_time": 0.0,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.25,
+      "feedback": 0.3,
+      "mix": 0.25
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.7,
+      "mix": 0.35
+    },
+    "layers": [
+      {
+        "name": "Glass Chime Tine",
+        "waveform": "fm",
+        "octave": 1,
+        "fm_ratio": 3.0,
+        "fm_depth": 1.8,
+        "volume": 0.8,
+        "pan": 0.1,
+        "output_bus": 0,
+        "cutoff": 6000.0,
+        "resonance": 1.2,
+        "attack": 0.001,
+        "decay": 0.65,
+        "sustain": 0.0,
+        "release": 0.5
+      },
+      {
+        "name": "Pure Sine Core",
+        "waveform": "sine",
+        "octave": 1,
+        "volume": 0.75,
+        "pan": -0.1,
+        "output_bus": 0,
+        "cutoff": 8000.0,
+        "resonance": 0.5,
+        "attack": 0.001,
+        "decay": 0.8,
+        "sustain": 0.0,
+        "release": 0.6
+      }
+    ]
+  }
+}

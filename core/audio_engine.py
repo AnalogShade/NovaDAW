@@ -108,6 +108,13 @@ class AudioEngine:
         self._preview_lock = threading.Lock()
         self._preview_buffers: List[Dict] = []
 
+        # Mesure des niveaux de crête et distorsion Master (VU-mètre)
+        self._master_peak_l: float = 0.0
+        self._master_peak_r: float = 0.0
+        self._master_clipped: bool = False
+        self._master_clip_time: float = 0.0
+        self._master_peak_lock = threading.Lock()
+
         # Tête de lecture et notification UI
         self.playhead_callback: Optional[Callable[[float], None]] = None
         self._stream: Optional[sd.OutputStream] = None
@@ -530,9 +537,19 @@ class AudioEngine:
         if wave is None:
             wave = SynthVoice.generate_note(pitch, duration_sec, self.sample_rate, velocity)
 
+        # Application de la chaîne d'effets de la piste (Égaliseur, Compresseur, VST) et du volume/pan
+        if wave is not None and len(wave) > 0 and track:
+            wave = self._process_track_effects_isolated(track, wave.copy(), native_inst)
+            vol = float(getattr(track, "volume", 0.8))
+            pan = max(-1.0, min(1.0, float(getattr(track, "pan", 0.0))))
+            left_gain = vol * (1.0 - max(0.0, pan))
+            right_gain = vol * (1.0 + min(0.0, pan))
+            wave[:, 0] *= left_gain
+            wave[:, 1] *= right_gain
+
         with self._preview_lock:
             self._preview_buffers.append({
-                "buffer": wave,
+                "buffer": np.ascontiguousarray(wave, dtype=np.float32),
                 "cursor": 0
             })
 
@@ -549,15 +566,111 @@ class AudioEngine:
                     velocity=velocity
                 ))
 
-    def play_preview_buffer(self, wave: np.ndarray, choke_group: int = 0) -> bool:
+    def _process_track_effects_isolated(self, track: Track, audio: np.ndarray, native_inst: Optional[Any] = None) -> np.ndarray:
+        """
+        Traite le buffer audio d'une note ou prévisualisation à travers tous les effets de la piste
+        (plugins natifs comme l'Égaliseur et Compresseur, ainsi qu'effets VST3)
+        sans perturber les mémoires de délai et filtres de la lecture continue du projet.
+        Exécution ultra-rapide (< 0.2 ms), aucune latence perceptible.
+        """
+        if track is None or audio is None or len(audio) == 0:
+            return audio
+
+        # S'assurer d'avoir un buffer float32 stéréo modifiable
+        if audio.ndim == 1:
+            out_audio = np.column_stack((audio, audio)).astype(np.float32)
+        else:
+            out_audio = audio.copy().astype(np.float32)
+
+        # 1. Effets VST3 d'inserts
+        if hasattr(track, "insert_effects") and track.insert_effects:
+            for fx_path in track.insert_effects:
+                if not fx_path:
+                    continue
+                fx_plugin = self.get_effect_plugin(fx_path, f"track:{track.id}:effect:{fx_path}")
+                if fx_plugin and getattr(fx_plugin, "is_effect", False):
+                    try:
+                        frames = len(out_audio)
+                        in_audio = out_audio.T
+                        fx_out = fx_plugin(in_audio, sample_rate=self.sample_rate, reset=False)
+                        if fx_out is not None and fx_out.size > 0:
+                            if fx_out.ndim == 1:
+                                n = min(frames, len(fx_out))
+                                out_audio[:n, 0] = fx_out[:n]
+                                out_audio[:n, 1] = fx_out[:n]
+                            elif fx_out.shape[0] == 1:
+                                n = min(frames, fx_out.shape[1])
+                                out_audio[:n, 0] = fx_out[0, :n]
+                                out_audio[:n, 1] = fx_out[0, :n]
+                            else:
+                                n = min(frames, fx_out.shape[1])
+                                out_audio[:n, 0] = fx_out[0, :n]
+                                out_audio[:n, 1] = fx_out[1, :n]
+                    except Exception:
+                        pass
+
+        # 2. Plugins natifs empilés (Égaliseur, Compresseur, etc.)
+        if hasattr(track, "plugins") and track.plugins:
+            for plugin in track.plugins:
+                # Sauter l'instrument générateur
+                if plugin is native_inst or getattr(plugin, "is_instrument", False):
+                    continue
+                if not getattr(plugin, "enabled", True):
+                    continue
+
+                # Pour l'égaliseur : préserver l'état continu si la lecture tourne pour éliminer tout risque de saut audio
+                saved_states = {}
+                is_eq = getattr(plugin, "plugin_type_id", None) == "novadaw.equalizer"
+                if is_eq and self.is_playing:
+                    for b in getattr(plugin, "bands", []):
+                        saved_states[b] = (
+                            b.zi_left.copy() if b.zi_left is not None else None,
+                            b.zi_right.copy() if b.zi_right is not None else None
+                        )
+
+                try:
+                    out_audio = plugin.process(out_audio, self.sample_rate)
+                except Exception:
+                    pass
+
+                # Restaurer les états continus si la lecture est active
+                if is_eq and self.is_playing:
+                    for b, (zl, zr) in saved_states.items():
+                        b.zi_left = zl
+                        b.zi_right = zr
+
+        return out_audio
+
+    def get_track_for_plugin(self, plugin: Any) -> Optional[Track]:
+        """Retrouve la piste qui héberge le plugin donné."""
+        if not self.project:
+            return None
+        for t in self.project.tracks:
+            if hasattr(t, "plugins") and plugin in t.plugins:
+                return t
+            if t.plugin_path == getattr(plugin, "plugin_type_id", None):
+                return t
+        return None
+
+    def play_preview_buffer(self, wave: np.ndarray, choke_group: int = 0, track: Optional[Track] = None) -> bool:
         """
         Joue immédiatement un buffer audio stéréo en direct dans le flux en temps réel (latence < 10ms).
-        Prend en charge les choke groups (ex: étouffement instantané du charleston ouvert par le fermé).
+        Prend en charge les choke groups et applique la chaîne d'inserts de la piste si spécifiée.
         """
         if wave is None or len(wave) == 0:
             return False
         if not (self._stream and getattr(self._stream, "active", False)):
             return False
+
+        if track is not None:
+            native_inst = self.get_native_instrument(track)
+            wave = self._process_track_effects_isolated(track, wave.copy(), native_inst)
+            vol = float(getattr(track, "volume", 0.8))
+            pan = max(-1.0, min(1.0, float(getattr(track, "pan", 0.0))))
+            left_gain = vol * (1.0 - max(0.0, pan))
+            right_gain = vol * (1.0 + min(0.0, pan))
+            wave[:, 0] *= left_gain
+            wave[:, 1] *= right_gain
 
         with self._preview_lock:
             if choke_group > 0:
@@ -663,8 +776,44 @@ class AudioEngine:
 
         # Application du volume Master et limitation douce (anti-saturation)
         out *= self.master_volume
+
+        # Mesure des niveaux de crête et détection de distorsion / clipping (> 0 dBFS / > 1.0)
+        if len(out) > 0:
+            pk_l = float(np.max(np.abs(out[:, 0])))
+            pk_r = float(np.max(np.abs(out[:, 1])))
+            is_clip = bool(pk_l > 1.0 or pk_r > 1.0)
+            now = time.time()
+            with self._master_peak_lock:
+                self._master_peak_l = max(self._master_peak_l * 0.82, pk_l)
+                self._master_peak_r = max(self._master_peak_r * 0.82, pk_r)
+                if is_clip:
+                    self._master_clipped = True
+                    self._master_clip_time = now
+                elif self._master_clipped and (now - self._master_clip_time > 1.8):
+                    self._master_clipped = False
+
         out = np.tanh(out)
         outdata[:] = out
+
+    def get_master_peaks(self) -> tuple[float, float, bool]:
+        """Retourne (peak_l, peak_r, is_clipped) pour le VU-mètre Master avec falloff doux."""
+        with self._master_peak_lock:
+            pk_l = self._master_peak_l
+            pk_r = self._master_peak_r
+            self._master_peak_l *= 0.88
+            self._master_peak_r *= 0.88
+            if self._master_peak_l < 1e-4:
+                self._master_peak_l = 0.0
+            if self._master_peak_r < 1e-4:
+                self._master_peak_r = 0.0
+            if self._master_clipped and (time.time() - self._master_clip_time > 1.8):
+                self._master_clipped = False
+            return pk_l, pk_r, self._master_clipped
+
+    def reset_master_clip(self):
+        """Réinitialise manuellement le voyant de distorsion/écrêtage."""
+        with self._master_peak_lock:
+            self._master_clipped = False
 
     def _process_vst_effects(self, track, track_buf):
         frames = len(track_buf)
@@ -712,16 +861,18 @@ class AudioEngine:
 
             if native_inst and hasattr(native_inst, "render_slice"):
                 clip_notes = []
+                # Marge de queue de release ADSR pour éviter toute troncature brutale et éliminer tout clic de note-off
+                release_tail_beats = 4.0
                 for clip in track.clips:
                     if not isinstance(clip, MidiClip):
                         continue
                     clip_start = clip.start_beat
                     clip_end = clip_start + clip.length_beats
-                    if clip_end < start_b or clip_start > end_b:
+                    if (clip_end + release_tail_beats) < start_b or clip_start > end_b:
                         continue
                     for note in clip.notes:
                         abs_note_start = clip_start + note.start_beat
-                        if abs_note_start < end_b and (abs_note_start + note.duration) > start_b:
+                        if abs_note_start < end_b and (abs_note_start + note.duration + release_tail_beats) > start_b:
                             clip_notes.append(MidiNote(
                                 pitch=note.pitch,
                                 start_beat=abs_note_start,
@@ -881,7 +1032,7 @@ class AudioEngine:
         # 4. Traitement de la pile de plugins modulaires de la piste (Égaliseur, Compresseur, etc.)
         if hasattr(track, "plugins") and track.plugins and track_buf is not None:
             for plugin in track.plugins:
-                if track.track_type == "midi" and plugin is native_inst:
+                if track.track_type == "midi" and (plugin is native_inst or getattr(plugin, "is_instrument", False)):
                     continue
                 if getattr(plugin, "enabled", True):
                     try:

@@ -1,0 +1,60 @@
+{
+  "version": "1.0",
+  "name": "80s Synthwave Pluck",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : 80s Synthwave Pluck",
+  "state": {
+    "master_volume": 1.0,
+    "glide_time": 0.0,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.25,
+      "feedback": 0.3,
+      "mix": 0.25
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.5,
+      "mix": 0.2
+    },
+    "layers": [
+      {
+        "name": "Pluck Saw",
+        "waveform": "saw",
+        "octave": 0,
+        "volume": 0.85,
+        "pan": -0.1,
+        "output_bus": 0,
+        "cutoff": 4500.0,
+        "resonance": 2.0,
+        "filter_env_amount": 0.7,
+        "filter_decay": 0.18,
+        "attack": 0.002,
+        "decay": 0.22,
+        "sustain": 0.15,
+        "release": 0.25
+      },
+      {
+        "name": "Pluck Square Detune",
+        "waveform": "square",
+        "octave": 0,
+        "fine_tune": -10.0,
+        "volume": 0.65,
+        "pan": 0.1,
+        "output_bus": 0,
+        "pulse_width": 0.35,
+        "cutoff": 3800.0,
+        "resonance": 1.5,
+        "filter_env_amount": 0.5,
+        "filter_decay": 0.16,
+        "attack": 0.002,
+        "decay": 0.2,
+        "sustain": 0.1,
+        "release": 0.2
+      }
+    ]
+  }
+}

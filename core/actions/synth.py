@@ -246,7 +246,7 @@ def remove_synth_layer(
 
 @action_registry.register(
     name="novadaw_set_synth_preset",
-    description="Applique un preset d'usine sur NovaSynth ('Cyberpunk Acid Lead', 'Neon Horizon SuperSaw', 'Deep Sub & Punch Bass', 'Ethereal Dream Pad', '80s Synthwave Pluck', 'Sci-Fi FM Resonator').",
+    description="Applique un preset d'usine sur NovaSynth parmi 34 presets disponibles couvrant Leads (Cyberpunk Acid Lead, Eurodance 90s Anthem...), Pads (Ethereal Dream Pad, Lush Nebula Pad, Blade Runner...), Harpes & Plucks (Celestial Concert Harp, Celtic Fairy Harp...), Violons & Cordes (Solo Chamber Violin, Symphonic String Ensemble, Dark Cello...), Percussions & Impacts (Sub-Drop Cyber Impact, Electro Snare, Industrial Kick...), Basses & Reeses (Deep Sub, Dark Reese DnB...) et Claviers (Electric Dream Rhodes, Cathedral Gothic Organ...).",
     tags=["plugins", "synth", "preset"]
 )
 def set_synth_preset(

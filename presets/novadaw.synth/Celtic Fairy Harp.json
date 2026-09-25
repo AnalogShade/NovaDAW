@@ -1,0 +1,73 @@
+{
+  "version": "1.0",
+  "name": "Celtic Fairy Harp",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Celtic Fairy Harp",
+  "state": {
+    "master_volume": 0.95,
+    "glide_time": 0.0,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.5,
+      "feedback": 0.45,
+      "mix": 0.28
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.85,
+      "mix": 0.4
+    },
+    "layers": [
+      {
+        "name": "Celtic String",
+        "waveform": "triangle",
+        "octave": 0,
+        "volume": 0.8,
+        "pan": -0.2,
+        "output_bus": 0,
+        "cutoff": 3800.0,
+        "resonance": 1.1,
+        "filter_env_amount": 0.35,
+        "filter_decay": 0.3,
+        "attack": 0.003,
+        "decay": 0.85,
+        "sustain": 0.02,
+        "release": 0.75
+      },
+      {
+        "name": "Fairy Shimmer",
+        "waveform": "saw",
+        "octave": 1,
+        "fine_tune": 7.0,
+        "volume": 0.25,
+        "pan": 0.2,
+        "output_bus": 0,
+        "filter_type": "highpass",
+        "cutoff": 2500.0,
+        "resonance": 1.4,
+        "attack": 0.01,
+        "decay": 1.1,
+        "sustain": 0.05,
+        "release": 1.0
+      },
+      {
+        "name": "Silk Air",
+        "waveform": "sine",
+        "octave": 2,
+        "fine_tune": -5.0,
+        "volume": 0.2,
+        "pan": 0.0,
+        "output_bus": 0,
+        "cutoff": 7000.0,
+        "resonance": 0.5,
+        "attack": 0.002,
+        "decay": 0.6,
+        "sustain": 0.0,
+        "release": 0.5
+      }
+    ]
+  }
+}

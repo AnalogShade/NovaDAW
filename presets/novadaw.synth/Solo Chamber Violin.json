@@ -1,0 +1,62 @@
+{
+  "version": "1.0",
+  "name": "Solo Chamber Violin",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Solo Chamber Violin",
+  "state": {
+    "master_volume": 0.95,
+    "glide_time": 0.06,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.3,
+      "feedback": 0.25,
+      "mix": 0.18
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.68,
+      "mix": 0.3
+    },
+    "layers": [
+      {
+        "name": "Violin Bow & Body",
+        "waveform": "saw",
+        "octave": 0,
+        "volume": 0.85,
+        "pan": -0.1,
+        "output_bus": 0,
+        "cutoff": 2400.0,
+        "resonance": 1.4,
+        "drive": 0.2,
+        "attack": 0.12,
+        "decay": 0.4,
+        "sustain": 0.85,
+        "release": 0.45,
+        "lfo_enabled": true,
+        "lfo_waveform": "sine",
+        "lfo_rate": 5.2,
+        "lfo_depth": 0.08,
+        "lfo_target": "pitch"
+      },
+      {
+        "name": "Wood Resonance",
+        "waveform": "square",
+        "pulse_width": 0.42,
+        "octave": 0,
+        "fine_tune": 4.0,
+        "volume": 0.45,
+        "pan": 0.1,
+        "output_bus": 0,
+        "cutoff": 1800.0,
+        "resonance": 1.2,
+        "attack": 0.15,
+        "decay": 0.35,
+        "sustain": 0.8,
+        "release": 0.4
+      }
+    ]
+  }
+}

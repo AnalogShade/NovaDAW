@@ -1,0 +1,59 @@
+{
+  "version": "1.0",
+  "name": "Koto & Asian Zither",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Koto & Asian Zither",
+  "state": {
+    "master_volume": 1.0,
+    "glide_time": 0.02,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.28,
+      "feedback": 0.25,
+      "mix": 0.18
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.55,
+      "mix": 0.22
+    },
+    "layers": [
+      {
+        "name": "Koto Silk Pluck",
+        "waveform": "square",
+        "pulse_width": 0.22,
+        "octave": 0,
+        "volume": 0.85,
+        "pan": -0.1,
+        "output_bus": 0,
+        "cutoff": 3400.0,
+        "resonance": 2.2,
+        "filter_env_amount": 0.65,
+        "filter_decay": 0.18,
+        "attack": 0.002,
+        "decay": 0.45,
+        "sustain": 0.0,
+        "release": 0.35
+      },
+      {
+        "name": "Resonant Zither Body",
+        "waveform": "fm",
+        "octave": 0,
+        "fm_ratio": 2.5,
+        "fm_depth": 1.4,
+        "volume": 0.6,
+        "pan": 0.1,
+        "output_bus": 0,
+        "cutoff": 2200.0,
+        "resonance": 1.8,
+        "attack": 0.001,
+        "decay": 0.35,
+        "sustain": 0.0,
+        "release": 0.25
+      }
+    ]
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "version": "1.0",
+  "name": "Sci-Fi FM Resonator",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Sci-Fi FM Resonator",
+  "state": {
+    "master_volume": 0.9,
+    "glide_time": 0.05,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.33,
+      "feedback": 0.45,
+      "mix": 0.3
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.65,
+      "mix": 0.25
+    },
+    "layers": [
+      {
+        "name": "FM Carrier/Mod",
+        "waveform": "fm",
+        "octave": 0,
+        "volume": 0.85,
+        "pan": 0.0,
+        "output_bus": 0,
+        "fm_ratio": 3.5,
+        "fm_depth": 3.0,
+        "cutoff": 5000.0,
+        "resonance": 2.5,
+        "filter_type": "bandpass",
+        "attack": 0.02,
+        "decay": 0.4,
+        "sustain": 0.5,
+        "release": 0.4,
+        "lfo_enabled": true,
+        "lfo_rate": 4.5,
+        "lfo_depth": 0.4,
+        "lfo_target": "cutoff"
+      }
+    ]
+  }
+}

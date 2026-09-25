@@ -1,0 +1,73 @@
+{
+  "version": "1.0",
+  "name": "Sub-Drop Cyber Impact",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Sub-Drop Cyber Impact",
+  "state": {
+    "master_volume": 1.05,
+    "glide_time": 0.0,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.18,
+      "feedback": 0.25,
+      "mix": 0.15
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.75,
+      "mix": 0.3
+    },
+    "layers": [
+      {
+        "name": "Sub Drop Boom",
+        "waveform": "sine",
+        "octave": -2,
+        "volume": 1.3,
+        "pan": 0.0,
+        "output_bus": 0,
+        "cutoff": 280.0,
+        "resonance": 0.8,
+        "drive": 0.5,
+        "filter_env_amount": -0.4,
+        "attack": 0.001,
+        "decay": 1.1,
+        "sustain": 0.0,
+        "release": 1.0
+      },
+      {
+        "name": "Metal Impact Transient",
+        "waveform": "noise",
+        "octave": 1,
+        "volume": 0.45,
+        "pan": 0.0,
+        "output_bus": 0,
+        "filter_type": "highpass",
+        "cutoff": 3200.0,
+        "resonance": 2.0,
+        "attack": 0.001,
+        "decay": 0.045,
+        "sustain": 0.0,
+        "release": 0.045
+      },
+      {
+        "name": "FM Clang Hit",
+        "waveform": "fm",
+        "octave": 0,
+        "fm_ratio": 5.5,
+        "fm_depth": 4.0,
+        "volume": 0.5,
+        "pan": 0.0,
+        "output_bus": 0,
+        "cutoff": 4500.0,
+        "resonance": 2.2,
+        "attack": 0.001,
+        "decay": 0.08,
+        "sustain": 0.0,
+        "release": 0.08
+      }
+    ]
+  }
+}

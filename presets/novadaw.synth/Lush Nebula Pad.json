@@ -1,0 +1,61 @@
+{
+  "version": "1.0",
+  "name": "Lush Nebula Pad",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Lush Nebula Pad",
+  "state": {
+    "master_volume": 0.9,
+    "glide_time": 0.06,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.5,
+      "feedback": 0.55,
+      "mix": 0.35
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.9,
+      "mix": 0.45
+    },
+    "layers": [
+      {
+        "name": "Cosmic Swell",
+        "waveform": "supersaw",
+        "octave": 0,
+        "volume": 0.75,
+        "pan": 0.0,
+        "output_bus": 0,
+        "unison_voices": 7,
+        "unison_detune": 0.4,
+        "unison_spread": 0.9,
+        "cutoff": 2800.0,
+        "resonance": 1.1,
+        "attack": 0.75,
+        "decay": 1.0,
+        "sustain": 0.9,
+        "release": 1.8,
+        "lfo_enabled": true,
+        "lfo_rate": 0.4,
+        "lfo_depth": 0.35,
+        "lfo_target": "cutoff"
+      },
+      {
+        "name": "Sub Gravity",
+        "waveform": "triangle",
+        "octave": -1,
+        "volume": 0.6,
+        "pan": 0.0,
+        "output_bus": 0,
+        "cutoff": 1200.0,
+        "resonance": 0.8,
+        "attack": 0.9,
+        "decay": 1.2,
+        "sustain": 0.85,
+        "release": 1.6
+      }
+    ]
+  }
+}

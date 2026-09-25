@@ -1,0 +1,72 @@
+{
+  "version": "1.0",
+  "name": "Blade Runner Vangelis Brass Pad",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Blade Runner Vangelis Brass Pad",
+  "state": {
+    "master_volume": 0.95,
+    "glide_time": 0.05,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.38,
+      "feedback": 0.4,
+      "mix": 0.25
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.8,
+      "mix": 0.35
+    },
+    "layers": [
+      {
+        "name": "CS-80 Upper Brass",
+        "waveform": "saw",
+        "octave": 0,
+        "volume": 0.8,
+        "pan": -0.1,
+        "output_bus": 0,
+        "cutoff": 2600.0,
+        "resonance": 1.5,
+        "drive": 0.35,
+        "filter_env_amount": 0.4,
+        "filter_attack": 0.16,
+        "attack": 0.14,
+        "decay": 0.6,
+        "sustain": 0.85,
+        "release": 0.8
+      },
+      {
+        "name": "CS-80 Lower Detune",
+        "waveform": "saw",
+        "octave": 0,
+        "fine_tune": 12.0,
+        "volume": 0.7,
+        "pan": 0.1,
+        "output_bus": 0,
+        "cutoff": 2400.0,
+        "resonance": 1.2,
+        "attack": 0.15,
+        "decay": 0.55,
+        "sustain": 0.85,
+        "release": 0.8
+      },
+      {
+        "name": "Sub Horn",
+        "waveform": "saw",
+        "octave": -1,
+        "volume": 0.5,
+        "pan": 0.0,
+        "output_bus": 0,
+        "cutoff": 1400.0,
+        "resonance": 1.0,
+        "attack": 0.18,
+        "decay": 0.5,
+        "sustain": 0.8,
+        "release": 0.75
+      }
+    ]
+  }
+}

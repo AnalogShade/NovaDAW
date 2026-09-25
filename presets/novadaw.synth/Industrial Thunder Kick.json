@@ -1,0 +1,59 @@
+{
+  "version": "1.0",
+  "name": "Industrial Thunder Kick",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Industrial Thunder Kick",
+  "state": {
+    "master_volume": 1.1,
+    "glide_time": 0.0,
+    "delay": {
+      "enabled": false,
+      "mix": 0.0
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.3,
+      "mix": 0.12
+    },
+    "layers": [
+      {
+        "name": "Kick Sub Punch",
+        "waveform": "sine",
+        "octave": -2,
+        "volume": 1.25,
+        "pan": 0.0,
+        "output_bus": 0,
+        "cutoff": 350.0,
+        "resonance": 1.2,
+        "drive": 1.8,
+        "filter_env_amount": 0.75,
+        "filter_decay": 0.035,
+        "attack": 0.001,
+        "decay": 0.35,
+        "sustain": 0.0,
+        "release": 0.3
+      },
+      {
+        "name": "Punch Click Distortion",
+        "waveform": "square",
+        "pulse_width": 0.4,
+        "octave": -1,
+        "volume": 0.75,
+        "pan": 0.0,
+        "output_bus": 0,
+        "cutoff": 2800.0,
+        "resonance": 1.5,
+        "drive": 2.2,
+        "filter_env_amount": 0.6,
+        "filter_decay": 0.025,
+        "attack": 0.001,
+        "decay": 0.055,
+        "sustain": 0.0,
+        "release": 0.05
+      }
+    ]
+  }
+}

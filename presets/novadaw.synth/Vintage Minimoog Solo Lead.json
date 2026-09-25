@@ -1,0 +1,71 @@
+{
+  "version": "1.0",
+  "name": "Vintage Minimoog Solo Lead",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Vintage Minimoog Solo Lead",
+  "state": {
+    "master_volume": 1.0,
+    "glide_time": 0.045,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.25,
+      "feedback": 0.25,
+      "mix": 0.18
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.4,
+      "mix": 0.15
+    },
+    "layers": [
+      {
+        "name": "Moog Saw 1",
+        "waveform": "saw",
+        "octave": 0,
+        "volume": 0.8,
+        "pan": -0.05,
+        "output_bus": 0,
+        "cutoff": 2600.0,
+        "resonance": 1.8,
+        "drive": 0.35,
+        "attack": 0.008,
+        "decay": 0.35,
+        "sustain": 0.8,
+        "release": 0.25
+      },
+      {
+        "name": "Moog Saw 2 Detune",
+        "waveform": "saw",
+        "octave": 0,
+        "fine_tune": -8.0,
+        "volume": 0.75,
+        "pan": 0.05,
+        "output_bus": 0,
+        "cutoff": 2600.0,
+        "resonance": 1.8,
+        "attack": 0.008,
+        "decay": 0.35,
+        "sustain": 0.8,
+        "release": 0.25
+      },
+      {
+        "name": "Square Sub",
+        "waveform": "square",
+        "pulse_width": 0.5,
+        "octave": -1,
+        "volume": 0.45,
+        "pan": 0.0,
+        "output_bus": 0,
+        "cutoff": 1400.0,
+        "resonance": 1.0,
+        "attack": 0.008,
+        "decay": 0.3,
+        "sustain": 0.75,
+        "release": 0.2
+      }
+    ]
+  }
+}

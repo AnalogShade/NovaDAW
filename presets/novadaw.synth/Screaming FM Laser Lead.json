@@ -1,0 +1,58 @@
+{
+  "version": "1.0",
+  "name": "Screaming FM Laser Lead",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Screaming FM Laser Lead",
+  "state": {
+    "master_volume": 0.95,
+    "glide_time": 0.02,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.22,
+      "feedback": 0.35,
+      "mix": 0.25
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.5,
+      "mix": 0.2
+    },
+    "layers": [
+      {
+        "name": "Laser FM Core",
+        "waveform": "fm",
+        "octave": 0,
+        "fm_ratio": 4.0,
+        "fm_depth": 3.8,
+        "volume": 0.85,
+        "pan": 0.0,
+        "output_bus": 0,
+        "cutoff": 5200.0,
+        "resonance": 2.6,
+        "drive": 0.8,
+        "attack": 0.003,
+        "decay": 0.25,
+        "sustain": 0.7,
+        "release": 0.3
+      },
+      {
+        "name": "Saw Underbelly",
+        "waveform": "saw",
+        "octave": 0,
+        "fine_tune": 6.0,
+        "volume": 0.55,
+        "pan": 0.0,
+        "output_bus": 0,
+        "cutoff": 3800.0,
+        "resonance": 1.2,
+        "attack": 0.005,
+        "decay": 0.25,
+        "sustain": 0.65,
+        "release": 0.25
+      }
+    ]
+  }
+}

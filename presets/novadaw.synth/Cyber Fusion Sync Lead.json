@@ -1,0 +1,59 @@
+{
+  "version": "1.0",
+  "name": "Cyber Fusion Sync Lead",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Cyber Fusion Sync Lead",
+  "state": {
+    "master_volume": 0.95,
+    "glide_time": 0.035,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.28,
+      "feedback": 0.35,
+      "mix": 0.25
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.55,
+      "mix": 0.2
+    },
+    "layers": [
+      {
+        "name": "Screaming Saw",
+        "waveform": "saw",
+        "octave": 0,
+        "volume": 0.85,
+        "pan": -0.1,
+        "output_bus": 0,
+        "cutoff": 4800.0,
+        "resonance": 3.0,
+        "drive": 1.2,
+        "filter_env_amount": 0.5,
+        "filter_decay": 0.2,
+        "attack": 0.005,
+        "decay": 0.3,
+        "sustain": 0.75,
+        "release": 0.3
+      },
+      {
+        "name": "Square Sync Sizzle",
+        "waveform": "square",
+        "pulse_width": 0.28,
+        "octave": 1,
+        "fine_tune": 10.0,
+        "volume": 0.6,
+        "pan": 0.1,
+        "output_bus": 0,
+        "cutoff": 5500.0,
+        "resonance": 1.5,
+        "attack": 0.005,
+        "decay": 0.25,
+        "sustain": 0.7,
+        "release": 0.25
+      }
+    ]
+  }
+}

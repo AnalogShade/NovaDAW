@@ -32,10 +32,10 @@ class EqualizerBand:
         enabled: bool = True
     ):
         self.band_id = band_id
-        self.frequency = float(frequency)  # 20 Hz à 20000 Hz
-        self.gain_db = float(gain_db)      # -24 dB à +24 dB
-        self.q = float(q)                  # 0.1 à 10.0
-        self.filter_type = filter_type      # "peaking", "low_shelf", "high_shelf", "low_pass", "high_pass"
+        self._frequency = float(frequency)  # 20 Hz à 20000 Hz
+        self._gain_db = float(gain_db)      # -24 dB à +24 dB
+        self._q = float(q)                  # 0.1 à 10.0
+        self._filter_type = str(filter_type) # "peaking", "low_shelf", "high_shelf", "low_pass", "high_pass"
         self.enabled = enabled
 
         # Coefficients de biquad mis en cache
@@ -46,6 +46,51 @@ class EqualizerBand:
         # État des mémoires de délai pour le lissage des blocs audio (stéréo)
         self.zi_left: Optional[np.ndarray] = None
         self.zi_right: Optional[np.ndarray] = None
+
+    @property
+    def frequency(self) -> float:
+        return self._frequency
+
+    @frequency.setter
+    def frequency(self, val: float):
+        if self._frequency != float(val):
+            self._frequency = float(val)
+            self.invalidate_cache()
+
+    @property
+    def gain_db(self) -> float:
+        return self._gain_db
+
+    @gain_db.setter
+    def gain_db(self, val: float):
+        if self._gain_db != float(val):
+            self._gain_db = float(val)
+            self.invalidate_cache()
+
+    @property
+    def q(self) -> float:
+        return self._q
+
+    @q.setter
+    def q(self, val: float):
+        if self._q != float(val):
+            self._q = float(val)
+            self.invalidate_cache()
+
+    @property
+    def filter_type(self) -> str:
+        return self._filter_type
+
+    @filter_type.setter
+    def filter_type(self, val: str):
+        if self._filter_type != str(val):
+            self._filter_type = str(val)
+            self.invalidate_cache()
+
+    @property
+    def is_neutral(self) -> bool:
+        """Retourne True si la bande est dans un état neutre (aucun effet sur le signal)."""
+        return abs(self._gain_db) < 0.001 and self._filter_type in ("peaking", "low_shelf", "high_shelf")
 
     def reset_state(self):
         self.zi_left = None
@@ -104,7 +149,7 @@ class EqualizerBand:
             two_sqrt_a_alpha = 2.0 * np.sqrt(a_linear) * alpha
             b0 = a_linear * ((a_linear + 1.0) + (a_linear - 1.0) * cos_w0 + two_sqrt_a_alpha)
             b1 = -2.0 * a_linear * ((a_linear - 1.0) + (a_linear + 1.0) * cos_w0)
-            b2 = a_linear * ((a_linear + 1.0) + (a_linear - 1.0) * cos_w0 - two_sqrt_a_alpha)
+            b2 = a_linear * ((a_linear + 1.0) - (a_linear - 1.0) * cos_w0 - two_sqrt_a_alpha)
             a0 = (a_linear + 1.0) - (a_linear - 1.0) * cos_w0 + two_sqrt_a_alpha
             a1 = 2.0 * ((a_linear - 1.0) - (a_linear + 1.0) * cos_w0)
             a2 = (a_linear + 1.0) - (a_linear - 1.0) * cos_w0 - two_sqrt_a_alpha
@@ -141,10 +186,12 @@ class EqualizerBand:
         self._cached_sr = None
         self._cached_b = None
         self._cached_a = None
+        self.zi_left = None
+        self.zi_right = None
 
     def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
-        """Applique le filtre biquad sur le buffer stéréo (N, 2)"""
-        if not self.enabled:
+        """Applique le filtre biquad sur le buffer stéréo (N, 2) de manière ultra-rapide"""
+        if not self.enabled or self.is_neutral:
             return audio
 
         b, a = self.compute_coefficients(sample_rate)
@@ -154,14 +201,15 @@ class EqualizerBand:
             return audio
 
         if HAS_SCIPY:
-            # Initialisation de l'état zi si absent
-            if self.zi_left is None:
-                self.zi_left = lfilter_zi(b, a) * audio[0, 0]
-                self.zi_right = lfilter_zi(b, a) * audio[0, 1]
+            # Initialisation de l'état zi si absent ou taille incompatible
+            if self.zi_left is None or len(self.zi_left) != 2:
+                self.zi_left = lfilter_zi(b, a) * float(audio[0, 0])
+                self.zi_right = lfilter_zi(b, a) * float(audio[0, 1])
 
-            out_left, self.zi_left = lfilter(b, a, audio[:, 0], zi=self.zi_left)
-            out_right, self.zi_right = lfilter(b, a, audio[:, 1], zi=self.zi_right)
-            return np.column_stack((out_left, out_right)).astype(np.float32)
+            out = np.empty_like(audio, dtype=np.float32)
+            out[:, 0], self.zi_left = lfilter(b, a, audio[:, 0], zi=self.zi_left)
+            out[:, 1], self.zi_right = lfilter(b, a, audio[:, 1], zi=self.zi_right)
+            return out
         else:
             # Fallback pure NumPy si SciPy n'est pas présent
             return self._fallback_biquad(audio, b, a)
@@ -313,9 +361,39 @@ class EqualizerPlugin(BasePlugin):
 
         return freqs, types, qs
 
+    def is_flat(self) -> bool:
+        """Retourne True si toutes les bandes et le gain master sont neutres (aucun calcul nécessaire)."""
+        if abs(self.master_gain_db) >= 0.001:
+            return False
+        return all(b.is_neutral for b in self.bands if b.enabled)
+
+    def apply_bass_cut(self, cutoff_freq: float = 120.0, enabled: bool = True):
+        """Active ou désactive un filtre passe-haut (High-Pass) coupe-bas propre sur la première bande."""
+        if not self.bands:
+            return
+        b1 = self.bands[0]
+        if enabled:
+            b1.filter_type = "high_pass"
+            b1.frequency = float(cutoff_freq)
+            b1.q = 0.707
+            b1.gain_db = 0.0
+            b1.enabled = True
+        else:
+            b1.filter_type = "low_shelf"
+            b1.frequency = 31.25 if len(self.bands) == 10 else (100.0 if len(self.bands) == 3 else 32.0)
+            b1.q = 1.414 if len(self.bands) == 10 else 0.707
+            b1.gain_db = 0.0
+            b1.enabled = True
+        b1.invalidate_cache()
+        self.reset()
+
     def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
         """Traite le buffer audio au travers de toutes les bandes actives de l'égaliseur"""
         if not self.enabled or audio is None or len(audio) == 0:
+            return audio
+
+        # Optimisation immédiate : si l'égaliseur est neutre (flat), zéro calcul et zéro allocation
+        if self.is_flat():
             return audio
 
         # Assurer format float32 2D stéréo
@@ -324,14 +402,14 @@ class EqualizerPlugin(BasePlugin):
         else:
             out = audio.copy().astype(np.float32)
 
-        # Passer le signal séquentiellement à travers chaque bande
+        # Passer le signal séquentiellement à travers chaque bande active non neutre
         for band in self.bands:
-            if band.enabled:
+            if band.enabled and not band.is_neutral:
                 out = band.process(out, sample_rate)
 
         # Gain global de sortie
         if abs(self.master_gain_db) > 0.01:
-            gain_lin = 10.0 ** (self.master_gain_db / 20.0)
+            gain_lin = float(10.0 ** (self.master_gain_db / 20.0))
             out *= gain_lin
 
         return out

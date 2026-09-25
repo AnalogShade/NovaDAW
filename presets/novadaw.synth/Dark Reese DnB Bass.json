@@ -1,0 +1,75 @@
+{
+  "version": "1.0",
+  "name": "Dark Reese DnB Bass",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Dark Reese DnB Bass",
+  "state": {
+    "master_volume": 1.05,
+    "glide_time": 0.03,
+    "delay": {
+      "enabled": false,
+      "mix": 0.0
+    },
+    "reverb": {
+      "enabled": false,
+      "mix": 0.0
+    },
+    "layers": [
+      {
+        "name": "Reese Saw Left",
+        "waveform": "saw",
+        "octave": -1,
+        "fine_tune": -14.0,
+        "volume": 0.8,
+        "pan": -0.3,
+        "output_bus": 0,
+        "cutoff": 1400.0,
+        "resonance": 1.5,
+        "attack": 0.02,
+        "decay": 0.4,
+        "sustain": 0.85,
+        "release": 0.35,
+        "lfo_enabled": true,
+        "lfo_rate": 1.6,
+        "lfo_depth": 0.3,
+        "lfo_target": "cutoff"
+      },
+      {
+        "name": "Reese Saw Right",
+        "waveform": "saw",
+        "octave": -1,
+        "fine_tune": 14.0,
+        "volume": 0.8,
+        "pan": 0.3,
+        "output_bus": 0,
+        "cutoff": 1400.0,
+        "resonance": 1.5,
+        "attack": 0.02,
+        "decay": 0.4,
+        "sustain": 0.85,
+        "release": 0.35,
+        "lfo_enabled": true,
+        "lfo_rate": 1.6,
+        "lfo_depth": 0.3,
+        "lfo_target": "cutoff"
+      },
+      {
+        "name": "Solid Sub Bass",
+        "waveform": "sine",
+        "octave": -2,
+        "volume": 1.1,
+        "pan": 0.0,
+        "output_bus": 1,
+        "cutoff": 250.0,
+        "resonance": 0.5,
+        "attack": 0.01,
+        "decay": 0.3,
+        "sustain": 0.9,
+        "release": 0.25
+      }
+    ]
+  }
+}

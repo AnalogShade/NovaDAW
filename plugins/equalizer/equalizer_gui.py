@@ -343,6 +343,15 @@ class EqualizerPluginWidget(QWidget):
         sep.setStyleSheet("color: #2d3748;")
         top_bar.addWidget(sep)
 
+        # Bouton Coupe-Bas (HPF)
+        self.btn_bass_cut = QPushButton("Coupe-Bas (HPF)")
+        self.btn_bass_cut.setCheckable(True)
+        is_hpf = (len(self.eq.bands) > 0 and self.eq.bands[0].filter_type == "high_pass")
+        self.btn_bass_cut.setChecked(is_hpf)
+        self.btn_bass_cut.setToolTip("Active un filtre Passe-Haut (High-Pass) pour éliminer les basses fréquences indésirables")
+        self.btn_bass_cut.clicked.connect(self._toggle_bass_cut)
+        top_bar.addWidget(self.btn_bass_cut)
+
         # Bouton Reset Flat
         btn_flat = QPushButton("Reset Flat")
         btn_flat.clicked.connect(self._reset_flat)
@@ -379,8 +388,16 @@ class EqualizerPluginWidget(QWidget):
         # Reconstruire les bandes
         self._rebuild_band_controls()
 
+    def _toggle_bass_cut(self, checked: bool):
+        """Active ou désactive la coupure nette des basses fréquences via filtre passe-haut."""
+        self.eq.apply_bass_cut(cutoff_freq=120.0, enabled=checked)
+        self._rebuild_band_controls()
+        self.curve_widget.update()
+
     def _change_band_count(self, count: int):
         self.eq.set_band_count(count)
+        if hasattr(self, "btn_bass_cut"):
+            self.btn_bass_cut.setChecked(len(self.eq.bands) > 0 and self.eq.bands[0].filter_type == "high_pass")
         for c, btn in self.band_buttons.items():
             btn.setChecked(c == count)
         self._rebuild_band_controls()
@@ -392,6 +409,8 @@ class EqualizerPluginWidget(QWidget):
             band.gain_db = 0.0
             band.invalidate_cache()
         self.eq.reset()
+        if hasattr(self, "btn_bass_cut"):
+            self.btn_bass_cut.setChecked(False)
         self._update_controls_from_bands()
         self.curve_widget.update()
 

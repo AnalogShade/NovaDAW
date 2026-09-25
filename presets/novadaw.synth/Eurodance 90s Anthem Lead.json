@@ -1,0 +1,57 @@
+{
+  "version": "1.0",
+  "name": "Eurodance 90s Anthem Lead",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Eurodance 90s Anthem Lead",
+  "state": {
+    "master_volume": 0.95,
+    "glide_time": 0.0,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.375,
+      "feedback": 0.42,
+      "mix": 0.28
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.7,
+      "mix": 0.25
+    },
+    "layers": [
+      {
+        "name": "SuperSaw Anthem",
+        "waveform": "supersaw",
+        "octave": 0,
+        "volume": 0.85,
+        "pan": 0.0,
+        "output_bus": 0,
+        "unison_voices": 7,
+        "unison_detune": 0.45,
+        "unison_spread": 0.9,
+        "cutoff": 7500.0,
+        "resonance": 1.0,
+        "attack": 0.015,
+        "decay": 0.45,
+        "sustain": 0.8,
+        "release": 0.45
+      },
+      {
+        "name": "Punch Octave Down",
+        "waveform": "saw",
+        "octave": -1,
+        "volume": 0.5,
+        "pan": 0.0,
+        "output_bus": 0,
+        "cutoff": 4000.0,
+        "resonance": 1.0,
+        "attack": 0.01,
+        "decay": 0.35,
+        "sustain": 0.75,
+        "release": 0.35
+      }
+    ]
+  }
+}

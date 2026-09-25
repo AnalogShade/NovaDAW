@@ -1,0 +1,61 @@
+{
+  "version": "1.0",
+  "name": "Cinematic Dark Cello",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Cinematic Dark Cello",
+  "state": {
+    "master_volume": 0.95,
+    "glide_time": 0.07,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.35,
+      "feedback": 0.3,
+      "mix": 0.2
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.72,
+      "mix": 0.32
+    },
+    "layers": [
+      {
+        "name": "Dark Cello Core",
+        "waveform": "saw",
+        "octave": -1,
+        "volume": 0.85,
+        "pan": -0.05,
+        "output_bus": 0,
+        "cutoff": 1400.0,
+        "resonance": 1.6,
+        "drive": 0.45,
+        "attack": 0.18,
+        "decay": 0.5,
+        "sustain": 0.85,
+        "release": 0.6,
+        "lfo_enabled": true,
+        "lfo_rate": 4.8,
+        "lfo_depth": 0.06,
+        "lfo_target": "pitch"
+      },
+      {
+        "name": "Cello Sub Growl",
+        "waveform": "square",
+        "pulse_width": 0.35,
+        "octave": -1,
+        "fine_tune": -8.0,
+        "volume": 0.5,
+        "pan": 0.05,
+        "output_bus": 0,
+        "cutoff": 900.0,
+        "resonance": 1.1,
+        "attack": 0.22,
+        "decay": 0.45,
+        "sustain": 0.8,
+        "release": 0.55
+      }
+    ]
+  }
+}

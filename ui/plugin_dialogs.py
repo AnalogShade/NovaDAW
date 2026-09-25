@@ -12,11 +12,13 @@ from typing import Optional
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit,
-    QProgressBar, QMessageBox, QFileDialog, QFrame, QAbstractItemView
+    QProgressBar, QMessageBox, QFileDialog, QFrame, QAbstractItemView,
+    QComboBox, QInputDialog
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QThread
 from PySide6.QtGui import QColor
 
+from core.preset_manager import global_preset_manager
 from core.plugin_manager import (
     global_plugin_manager,
     PluginScanWorker,
@@ -244,7 +246,7 @@ _open_native_editors: dict = {}
 
 
 class NativePluginDialog(QDialog):
-    """Fenêtre autonome pour héberger l'interface graphique d'un plugin natif NovaDAW"""
+    """Fenêtre autonome pour héberger l'interface graphique d'un plugin natif NovaDAW avec gestionnaire de presets intégré."""
     def __init__(self, plugin, parent=None):
         super().__init__(parent)
         self.plugin = plugin
@@ -252,17 +254,18 @@ class NativePluginDialog(QDialog):
         
         # Dimensions par défaut adaptées au type de plugin
         if getattr(plugin, "plugin_type_id", "") == "novadaw.mixer":
-            self.resize(880, 480)
+            self.resize(880, 520)
         elif getattr(plugin, "plugin_type_id", "") == "novadaw.equalizer":
-            self.resize(760, 480)
+            self.resize(760, 520)
         elif getattr(plugin, "plugin_type_id", "") == "novadaw.compressor":
-            self.resize(680, 460)
+            self.resize(680, 500)
         elif getattr(plugin, "plugin_type_id", "") == "novadaw.drum_machine":
-            self.resize(800, 640)
+            self.resize(820, 680)
         elif getattr(plugin, "plugin_type_id", "") == "novadaw.synth":
-            self.resize(920, 680)
+            self.resize(1080, 750)
+            self.setMinimumSize(980, 660)
         else:
-            self.resize(650, 450)
+            self.resize(680, 480)
 
         self.setStyleSheet("""
             QDialog {
@@ -271,10 +274,279 @@ class NativePluginDialog(QDialog):
             }
         """)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        editor = plugin.create_editor(self)
-        if editor:
-            layout.addWidget(editor)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+
+        # -------------------------------------------------------------
+        # Barre d'outils native universelle de Presets pour tous les plugins
+        # -------------------------------------------------------------
+        self.preset_bar = QFrame()
+        self.preset_bar.setObjectName("native_plugin_preset_bar")
+        self.preset_bar.setStyleSheet("""
+            QFrame#native_plugin_preset_bar {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1a1d29, stop:1 #141622);
+                border: 1px solid #2d3348;
+                border-radius: 6px;
+            }
+            QLabel {
+                font-family: 'Segoe UI', sans-serif;
+            }
+            QComboBox {
+                background-color: #1e2230;
+                color: #f1f5f9;
+                border: 1px solid #33394d;
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-size: 11px;
+                font-weight: bold;
+                min-width: 175px;
+            }
+            QComboBox:hover {
+                border-color: #38bdf8;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #161822;
+                color: #e2e8f0;
+                selection-background-color: #0284c7;
+                selection-color: #ffffff;
+                border: 1px solid #2e3447;
+            }
+            QPushButton {
+                background-color: #222636;
+                color: #e2e8f0;
+                border: 1px solid #33394d;
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #2b3145;
+                border-color: #38bdf8;
+                color: #ffffff;
+            }
+            QPushButton#btn_save {
+                background-color: #0369a1;
+                border-color: #0284c7;
+                color: #ffffff;
+                font-weight: bold;
+            }
+            QPushButton#btn_save:hover {
+                background-color: #0284c7;
+                border-color: #38bdf8;
+            }
+            QPushButton#btn_del {
+                color: #f87171;
+            }
+            QPushButton#btn_del:hover {
+                background-color: #7f1d1d;
+                border-color: #ef4444;
+                color: #ffffff;
+            }
+        """)
+
+        bar_layout = QHBoxLayout(self.preset_bar)
+        bar_layout.setContentsMargins(10, 5, 10, 5)
+        bar_layout.setSpacing(8)
+
+        # En-tête Plugin
+        lbl_badge = QLabel(f"{plugin.icon} {plugin.name}")
+        lbl_badge.setStyleSheet("font-size: 12px; font-weight: bold; color: #38bdf8;")
+        bar_layout.addWidget(lbl_badge)
+
+        lbl_cat = QLabel(f"[{getattr(plugin, 'category', 'Plugin').upper()}]")
+        lbl_cat.setStyleSheet("font-size: 9px; color: #64748b; font-weight: bold;")
+        bar_layout.addWidget(lbl_cat)
+
+        bar_layout.addSpacing(10)
+
+        # Sélecteur de Presets
+        lbl_p = QLabel("Preset :")
+        lbl_p.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600;")
+        bar_layout.addWidget(lbl_p)
+
+        self.combo_presets = QComboBox()
+        self.combo_presets.currentIndexChanged.connect(self._on_preset_changed)
+        bar_layout.addWidget(self.combo_presets)
+
+        # Bouton Sauvegarder
+        self.btn_save_preset = QPushButton("💾 Enregistrer")
+        self.btn_save_preset.setObjectName("btn_save")
+        self.btn_save_preset.setToolTip("Enregistrer les réglages actuels en tant que preset")
+        self.btn_save_preset.clicked.connect(self._on_save_preset_clicked)
+        bar_layout.addWidget(self.btn_save_preset)
+
+        # Bouton Importer
+        self.btn_import_preset = QPushButton("📂 Importer...")
+        self.btn_import_preset.setToolTip("Importer un preset depuis un fichier .json ou .ndpreset")
+        self.btn_import_preset.clicked.connect(self._on_import_preset_clicked)
+        bar_layout.addWidget(self.btn_import_preset)
+
+        # Bouton Exporter
+        self.btn_export_preset = QPushButton("📤 Exporter...")
+        self.btn_export_preset.setToolTip("Exporter le preset actuel vers un fichier de votre choix")
+        self.btn_export_preset.clicked.connect(self._on_export_preset_clicked)
+        bar_layout.addWidget(self.btn_export_preset)
+
+        # Bouton Supprimer
+        self.btn_delete_preset = QPushButton("🗑️")
+        self.btn_delete_preset.setObjectName("btn_del")
+        self.btn_delete_preset.setToolTip("Supprimer le preset utilisateur sélectionné")
+        self.btn_delete_preset.clicked.connect(self._on_delete_preset_clicked)
+        bar_layout.addWidget(self.btn_delete_preset)
+
+        # Aliases pour la compatibilité avec les scripts et tests
+        self.btn_save = self.btn_save_preset
+        self.btn_delete = self.btn_delete_preset
+        self.btn_import = self.btn_import_preset
+        self.btn_export = self.btn_export_preset
+
+        bar_layout.addStretch()
+        layout.addWidget(self.preset_bar)
+
+        # Éditeur du plugin
+        self.editor = plugin.create_editor(self)
+        if self.editor:
+            layout.addWidget(self.editor)
+
+        # Remplir la liste des presets
+        self._populate_presets()
+
+    def _populate_presets(self, select_name: Optional[str] = None):
+        """Remplit le menu déroulant avec les presets d'usine et utilisateur."""
+        self.combo_presets.blockSignals(True)
+        self.combo_presets.clear()
+
+        p_id = getattr(self.plugin, "plugin_type_id", "")
+        presets = global_preset_manager.list_presets(p_id, self.plugin)
+
+        for p in presets:
+            p_name = p["name"]
+            is_fact = p.get("is_factory", False)
+            prefix = "⚡ " if is_fact else "💾 "
+            self.combo_presets.addItem(f"{prefix}{p_name}", {
+                "name": p_name,
+                "is_factory": is_fact,
+                "file_path": p.get("file_path")
+            })
+
+        target_name = select_name or getattr(self.plugin, "preset_name", None)
+        matched_idx = -1
+        if target_name:
+            for idx in range(self.combo_presets.count()):
+                d = self.combo_presets.itemData(idx)
+                if d and d.get("name", "").lower() == target_name.lower():
+                    matched_idx = idx
+                    break
+
+        if matched_idx >= 0:
+            self.combo_presets.setCurrentIndex(matched_idx)
+        elif self.combo_presets.count() > 0:
+            self.combo_presets.setCurrentIndex(0)
+
+        # Activer/désactiver suppression
+        cur_data = self.combo_presets.currentData()
+        self.btn_delete_preset.setEnabled(bool(cur_data and not cur_data.get("is_factory", True)))
+
+        self.combo_presets.blockSignals(False)
+
+    def _on_preset_changed(self, idx: int):
+        cur_data = self.combo_presets.itemData(idx)
+        if not cur_data:
+            return
+        p_name = cur_data.get("name")
+        is_fact = cur_data.get("is_factory", False)
+        self.btn_delete_preset.setEnabled(not is_fact)
+
+        if p_name:
+            if global_preset_manager.load_preset(self.plugin, p_name):
+                self._sync_editor_gui()
+
+    def _on_save_preset_clicked(self):
+        default_name = getattr(self.plugin, "preset_name", "Mon Preset")
+        name, ok = QInputDialog.getText(
+            self,
+            "Enregistrer le Preset",
+            f"Nom du preset pour {self.plugin.name} :",
+            text=default_name
+        )
+        if ok and name.strip():
+            clean_name = name.strip()
+            global_preset_manager.save_preset(self.plugin, clean_name)
+            self._populate_presets(select_name=clean_name)
+            self._sync_editor_gui()
+
+    def _on_import_preset_clicked(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            f"Importer un Preset ({self.plugin.name})",
+            "",
+            "Fichiers Preset (*.json *.ndpreset);;Tous les fichiers (*.*)"
+        )
+        if file_path:
+            imported_name = global_preset_manager.import_preset(self.plugin, file_path)
+            if imported_name:
+                self._populate_presets(select_name=imported_name)
+                self._sync_editor_gui()
+                QMessageBox.information(self, "Preset Importé", f"Le preset '{imported_name}' a été importé et appliqué avec succès.")
+            else:
+                QMessageBox.warning(self, "Erreur d'importation", "Impossible d'importer ce fichier de preset.")
+
+    def _on_export_preset_clicked(self):
+        cur_name = getattr(self.plugin, "preset_name", "Preset")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            f"Exporter le Preset ({self.plugin.name})",
+            f"{global_preset_manager.sanitize_filename(cur_name)}.json",
+            "Preset JSON (*.json);;Tous les fichiers (*.*)"
+        )
+        if file_path:
+            if global_preset_manager.export_preset(self.plugin, file_path, cur_name):
+                QMessageBox.information(self, "Preset Exporté", f"Le preset a été exporté vers :\n{file_path}")
+            else:
+                QMessageBox.warning(self, "Erreur d'exportation", "Impossible d'exporter le preset vers ce fichier.")
+
+    def _on_delete_preset_clicked(self):
+        cur_data = self.combo_presets.currentData()
+        if not cur_data or cur_data.get("is_factory", False):
+            return
+        p_name = cur_data.get("name")
+        resp = QMessageBox.question(
+            self,
+            "Supprimer le Preset",
+            f"Êtes-vous sûr de vouloir supprimer définitivement le preset '{p_name}' ?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if resp == QMessageBox.Yes:
+            p_id = getattr(self.plugin, "plugin_type_id", "")
+            global_preset_manager.delete_preset(p_id, p_name)
+            self._populate_presets()
+
+    def _sync_editor_gui(self):
+        """Notifie l'interface graphique de l'éditeur de plugin de se rafraîchir."""
+        if not self.editor:
+            return
+        try:
+            if hasattr(self.editor, "_sync_all"):
+                self.editor._sync_all()
+            if hasattr(self.editor, "_populate_presets_combo"):
+                self.editor._populate_presets_combo()
+            if hasattr(self.editor, "_invalidate_note_cache"):
+                self.editor._invalidate_note_cache()
+            if hasattr(self.editor, "_sync_all_controls"):
+                self.editor._sync_all_controls()
+            if hasattr(self.editor, "_update_controls_from_bands"):
+                if hasattr(self.editor, "_rebuild_band_controls"):
+                    self.editor._rebuild_band_controls()
+                self.editor._update_controls_from_bands()
+                if hasattr(self.editor, "curve_widget"):
+                    self.editor.curve_widget.update()
+            if hasattr(self.editor, "_sync_controls"):
+                self.editor._sync_controls()
+            if hasattr(self.editor, "refresh_tracks"):
+                self.editor.refresh_tracks()
+        except Exception as e:
+            print(f"[NativePluginDialog] Erreur rafraîchissement éditeur : {e}")
 
     def closeEvent(self, event):
         _open_native_editors.pop(self.plugin.instance_id, None)

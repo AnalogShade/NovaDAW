@@ -1,0 +1,75 @@
+{
+  "version": "1.0",
+  "name": "Dark Ambient Drone Pad",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Dark Ambient Drone Pad",
+  "state": {
+    "master_volume": 0.9,
+    "glide_time": 0.08,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.6,
+      "feedback": 0.6,
+      "mix": 0.4
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.95,
+      "mix": 0.5
+    },
+    "layers": [
+      {
+        "name": "Drone Core",
+        "waveform": "triangle",
+        "octave": -1,
+        "volume": 0.8,
+        "pan": 0.0,
+        "output_bus": 0,
+        "cutoff": 800.0,
+        "resonance": 1.8,
+        "drive": 0.5,
+        "attack": 1.0,
+        "decay": 1.5,
+        "sustain": 0.95,
+        "release": 2.0
+      },
+      {
+        "name": "Ominous Modulator",
+        "waveform": "fm",
+        "octave": 0,
+        "fm_ratio": 1.5,
+        "fm_depth": 2.8,
+        "volume": 0.5,
+        "pan": -0.2,
+        "output_bus": 0,
+        "cutoff": 1600.0,
+        "resonance": 2.2,
+        "attack": 1.2,
+        "decay": 1.8,
+        "sustain": 0.85,
+        "release": 2.2,
+        "lfo_enabled": true,
+        "lfo_rate": 0.25,
+        "lfo_depth": 0.4,
+        "lfo_target": "cutoff"
+      },
+      {
+        "name": "Haunted Whistle",
+        "waveform": "sine",
+        "octave": 1,
+        "volume": 0.2,
+        "pan": 0.2,
+        "output_bus": 0,
+        "cutoff": 3200.0,
+        "resonance": 1.0,
+        "attack": 1.5,
+        "decay": 2.0,
+        "sustain": 0.7,
+        "release": 2.5
+      }
+    ]
+  }
+}

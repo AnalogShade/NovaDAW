@@ -1,0 +1,62 @@
+{
+  "version": "1.0",
+  "name": "Cryogenic Ice Glass Pad",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Cryogenic Ice Glass Pad",
+  "state": {
+    "master_volume": 0.9,
+    "glide_time": 0.0,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.42,
+      "feedback": 0.48,
+      "mix": 0.3
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.88,
+      "mix": 0.42
+    },
+    "layers": [
+      {
+        "name": "Ice Chimes",
+        "waveform": "fm",
+        "octave": 1,
+        "fm_ratio": 4.0,
+        "fm_depth": 2.2,
+        "volume": 0.65,
+        "pan": -0.25,
+        "output_bus": 0,
+        "cutoff": 5500.0,
+        "resonance": 2.0,
+        "attack": 0.6,
+        "decay": 1.0,
+        "sustain": 0.75,
+        "release": 1.4,
+        "lfo_enabled": true,
+        "lfo_rate": 0.7,
+        "lfo_depth": 0.25,
+        "lfo_target": "pan"
+      },
+      {
+        "name": "Glass Shimmer",
+        "waveform": "supersaw",
+        "octave": 1,
+        "fine_tune": -8.0,
+        "volume": 0.4,
+        "pan": 0.25,
+        "output_bus": 0,
+        "filter_type": "highpass",
+        "cutoff": 3200.0,
+        "resonance": 1.0,
+        "attack": 0.8,
+        "decay": 1.2,
+        "sustain": 0.7,
+        "release": 1.5
+      }
+    ]
+  }
+}

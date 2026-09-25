@@ -1,0 +1,57 @@
+{
+  "version": "1.0",
+  "name": "Crystal Bell Chimes",
+  "plugin_type_id": "novadaw.synth",
+  "plugin_name": "novadaw.synth",
+  "created_at": "2026-09-25T11:24:13Z",
+  "author": "NovaDAW Factory",
+  "description": "Preset officiel NovaDAW : Crystal Bell Chimes",
+  "state": {
+    "master_volume": 0.9,
+    "glide_time": 0.0,
+    "delay": {
+      "enabled": true,
+      "time_sec": 0.375,
+      "feedback": 0.5,
+      "mix": 0.32
+    },
+    "reverb": {
+      "enabled": true,
+      "room_size": 0.85,
+      "mix": 0.38
+    },
+    "layers": [
+      {
+        "name": "FM Crystal Bell",
+        "waveform": "fm",
+        "octave": 1,
+        "fm_ratio": 2.76,
+        "fm_depth": 2.4,
+        "volume": 0.8,
+        "pan": -0.15,
+        "output_bus": 0,
+        "cutoff": 6500.0,
+        "resonance": 1.5,
+        "attack": 0.001,
+        "decay": 1.4,
+        "sustain": 0.05,
+        "release": 1.2
+      },
+      {
+        "name": "High Pure Sine",
+        "waveform": "sine",
+        "octave": 2,
+        "fine_tune": 6.0,
+        "volume": 0.6,
+        "pan": 0.15,
+        "output_bus": 0,
+        "cutoff": 8000.0,
+        "resonance": 0.8,
+        "attack": 0.001,
+        "decay": 1.1,
+        "sustain": 0.0,
+        "release": 1.0
+      }
+    ]
+  }
+}
