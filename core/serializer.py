@@ -47,7 +47,7 @@ def load_project(file_path: str) -> Project:
         bpm=float(data.get("bpm", 120.0)),
         time_sig_num=int(data.get("time_sig_num", 4)),
         time_sig_den=int(data.get("time_sig_denom", 4)),
-        loop_enabled=bool(data.get("loop_enabled", True)),
+        loop_enabled=bool(data.get("loop_enabled", False)),
         loop_start_beat=float(data.get("loop_start_beat", 0.0)),
         loop_end_beat=float(data.get("loop_end_beat", 16.0)),
         plugin_rack=data.get("plugin_rack", []),

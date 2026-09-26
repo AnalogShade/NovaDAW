@@ -517,6 +517,7 @@ class MainWindow(QMainWindow):
         self.ruler = TimelineRuler(self)
         self.ruler.seek_requested.connect(self._on_seek)
         self.ruler.loop_changed.connect(self._on_loop_region_changed)
+        self.ruler.status_hint.connect(lambda msg: self.statusBar().showMessage(msg, 3000))
         right_layout.addWidget(self.ruler)
 
         # Zone de défilement de la grille timeline
@@ -553,7 +554,7 @@ class MainWindow(QMainWindow):
             self.headers_scroll.verticalScrollBar().setValue
         )
         self.timeline_scroll.horizontalScrollBar().valueChanged.connect(
-            lambda v: self.ruler.scroll(v, 0)
+            self.ruler.set_scroll_offset
         )
 
         right_layout.addWidget(self.timeline_scroll)
@@ -1262,7 +1263,9 @@ class MainWindow(QMainWindow):
         self.transport_bar.btn_loop.blockSignals(False)
         self.ruler.set_loop(True, start_b, end_b)
         self.timeline_grid.update()
-        self.statusBar().showMessage("Boucle définie et activée", 2000)
+        self.statusBar().showMessage(
+            f"Boucle active : temps {start_b:.1f} → {end_b:.1f} ({end_b - start_b:.1f} temps)", 2500
+        )
 
     def _on_seek(self, beat: float):
         self.audio_engine.seek_beat(beat)

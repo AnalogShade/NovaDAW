@@ -138,6 +138,8 @@ class HelpDialog(QDialog):
             ("Bouton ⏪ (Maintien)", "Rembobiner en continu dans le morceau", "Transport"),
             ("Bouton ⏩ (Maintien)", "Avancer rapidement en continu dans le morceau", "Transport"),
             ("L", "Activer / Désactiver la lecture en boucle (Loop)", "Transport"),
+            ("Glisser poignées L / R", "Ajuster interactivement le début ou la fin de la boucle", "Transport"),
+            ("Maj + Clic-Glisser sur règle", "Définir rapidement une nouvelle région de boucle", "Transport"),
             
             # Catégorie Projet & Fichiers
             ("Ctrl + N", "Créer un Nouveau Projet", "Projet"),

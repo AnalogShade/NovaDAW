@@ -35,19 +35,19 @@ def test_transport_bar_loop_toggle(qapp):
     emitted_values = []
     bar.loop_toggled.connect(lambda val: emitted_values.append(val))
 
+    assert bar.btn_loop.isChecked() is False
+
+    # Clic pour activer
+    bar.btn_loop.click()
+    assert len(emitted_values) == 1
+    assert emitted_values[-1] is True
     assert bar.btn_loop.isChecked() is True
 
     # Clic pour désactiver
     bar.btn_loop.click()
-    assert len(emitted_values) == 1
+    assert len(emitted_values) == 2
     assert emitted_values[-1] is False
     assert bar.btn_loop.isChecked() is False
-
-    # Clic pour réactiver
-    bar.btn_loop.click()
-    assert len(emitted_values) == 2
-    assert emitted_values[-1] is True
-    assert bar.btn_loop.isChecked() is True
 
 
 def test_resetable_slider_double_click(qapp):

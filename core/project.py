@@ -446,7 +446,7 @@ class Project:
     bpm: float = 120.0
     time_sig_num: int = 4
     time_sig_den: int = 4
-    loop_enabled: bool = True
+    loop_enabled: bool = False
     loop_start_beat: float = 0.0
     loop_end_beat: float = 16.0  # 4 mesures par défaut
     tracks: List[Track] = field(default_factory=list)
@@ -547,7 +547,7 @@ class Project:
             bpm=120.0,
             time_sig_num=4,
             time_sig_den=4,
-            loop_enabled=True,
+            loop_enabled=False,
             loop_start_beat=0.0,
             loop_end_beat=16.0,
             tracks=[],

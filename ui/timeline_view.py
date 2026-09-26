@@ -5,19 +5,22 @@ from typing import Optional, Tuple
 import copy
 import uuid
 from PySide6.QtWidgets import (
-    QWidget, QScrollArea, QVBoxLayout, QHBoxLayout, QFrame, QMenu, QInputDialog
+    QWidget, QScrollArea, QVBoxLayout, QHBoxLayout, QFrame, QMenu, QInputDialog, QToolTip
 )
 from PySide6.QtGui import (
-    QPainter, QColor, QPen, QBrush, QFont, QMouseEvent, QWheelEvent, QPolygonF
+    QPainter, QColor, QPen, QBrush, QFont, QFontMetrics, QMouseEvent, QWheelEvent, QPolygonF, QCursor
 )
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF
 from core.project import Project, Track, MidiClip, AudioClip, MidiNote, ClipType
 
 
 class TimelineRuler(QWidget):
-    """Règle temporelle affichant les numéros de mesures et la région de boucle"""
+    """Règle temporelle affichant les numéros de mesures et la région de boucle avec poignées d'ajustement interactives"""
     seek_requested = Signal(float)
     loop_changed = Signal(float, float)
+    status_hint = Signal(str)
+
+    HANDLE_MARGIN = 10  # Zone de détection en pixels pour les poignées gauche et droite
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -27,10 +30,13 @@ class TimelineRuler(QWidget):
         self.playhead_beat = 0.0
         self.loop_start_beat = 0.0
         self.loop_end_beat = 16.0
-        self.loop_enabled = True
+        self.loop_enabled = False  # Désactivé par défaut au démarrage
+        self.scroll_offset = 0.0
 
-        self._dragging_loop = False
+        self._active_drag = None  # None, "start", "end", "new", "seek"
         self._drag_anchor_beat = 0.0
+        self._hovered_handle = None  # None, "start", "end", "region"
+        self.setMouseTracking(True)
 
     def set_zoom(self, ppb: float):
         self.pixels_per_beat = ppb
@@ -46,22 +52,88 @@ class TimelineRuler(QWidget):
         self.loop_end_beat = end_b
         self.update()
 
+    def set_scroll_offset(self, offset: float):
+        if self.scroll_offset != float(offset):
+            self.scroll_offset = float(offset)
+            self.update()
+
+    def _get_handle_at(self, x: float) -> Optional[str]:
+        sx = self.loop_start_beat * self.pixels_per_beat - self.scroll_offset
+        ex = self.loop_end_beat * self.pixels_per_beat - self.scroll_offset
+
+        near_s = abs(x - sx) <= self.HANDLE_MARGIN
+        near_e = abs(x - ex) <= self.HANDLE_MARGIN
+
+        if near_s and near_e:
+            return "start" if x < (sx + ex) / 2.0 else "end"
+        if near_s:
+            return "start"
+        if near_e:
+            return "end"
+        if sx < x < ex:
+            return "region"
+        return None
+
+    def leaveEvent(self, event):
+        self._hovered_handle = None
+        self.unsetCursor()
+        self.update()
+        super().leaveEvent(event)
+
     def mousePressEvent(self, event: QMouseEvent):
-        beat = max(0.0, event.position().x() / self.pixels_per_beat)
         if event.button() == Qt.LeftButton:
-            # Shift ou Clic-droit sur la règle pour définir la boucle
+            x = event.position().x()
+            beat = max(0.0, (x + self.scroll_offset) / self.pixels_per_beat)
+
+            # Shift + Clic pour redéfinir entièrement la zone de boucle
             if event.modifiers() & Qt.ShiftModifier:
-                self._dragging_loop = True
+                self._active_drag = "new"
                 self._drag_anchor_beat = round(beat)
                 self.loop_start_beat = self._drag_anchor_beat
                 self.loop_end_beat = self._drag_anchor_beat + 4.0
+                self.loop_enabled = True
+                self.loop_changed.emit(self.loop_start_beat, self.loop_end_beat)
+                self.update()
+                return
+
+            handle = self._get_handle_at(x)
+            if handle == "start":
+                self._active_drag = "start"
+                self.loop_enabled = True
+                self.update()
+            elif handle == "end":
+                self._active_drag = "end"
+                self.loop_enabled = True
+                self.update()
             else:
+                self._active_drag = "seek"
                 self.seek_requested.emit(beat)
-            self.update()
+                self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent):
-        beat = max(0.0, event.position().x() / self.pixels_per_beat)
-        if self._dragging_loop:
+        x = event.position().x()
+        beat = max(0.0, (x + self.scroll_offset) / self.pixels_per_beat)
+
+        if self._active_drag == "start":
+            step = 0.25 if (event.modifiers() & Qt.ShiftModifier) else 1.0
+            new_start = round(beat / step) * step
+            new_start = max(0.0, new_start)
+            if new_start >= self.loop_end_beat:
+                new_start = max(0.0, self.loop_end_beat - step)
+            if new_start != self.loop_start_beat:
+                self.loop_start_beat = new_start
+                self.loop_changed.emit(self.loop_start_beat, self.loop_end_beat)
+            self.update()
+        elif self._active_drag == "end":
+            step = 0.25 if (event.modifiers() & Qt.ShiftModifier) else 1.0
+            new_end = round(beat / step) * step
+            if new_end <= self.loop_start_beat:
+                new_end = self.loop_start_beat + step
+            if new_end != self.loop_end_beat:
+                self.loop_end_beat = new_end
+                self.loop_changed.emit(self.loop_start_beat, self.loop_end_beat)
+            self.update()
+        elif self._active_drag == "new":
             s = min(self._drag_anchor_beat, round(beat))
             e = max(self._drag_anchor_beat, round(beat))
             if e <= s:
@@ -70,14 +142,56 @@ class TimelineRuler(QWidget):
             self.loop_end_beat = e
             self.loop_changed.emit(s, e)
             self.update()
-        elif event.buttons() & Qt.LeftButton:
+        elif self._active_drag == "seek" or (event.buttons() & Qt.LeftButton):
             self.seek_requested.emit(beat)
+        else:
+            old_handle = self._hovered_handle
+            self._hovered_handle = self._get_handle_at(x)
+
+            if self._hovered_handle in ("start", "end"):
+                self.setCursor(Qt.SizeHorCursor)
+                if self._hovered_handle == "start":
+                    tip = (
+                        f"◀ Début de la boucle (Temps {self.loop_start_beat:.1f})\n"
+                        "↔ Glisser pour ajuster le début\n"
+                        "💡 Maj + Clic-Glisser pour redéfinir la boucle\n"
+                        "Touche 'L' pour activer/désactiver"
+                    )
+                    self.status_hint.emit("Boucle : Glisser pour ajuster le début | Maj + Clic-Glisser pour redéfinir")
+                else:
+                    tip = (
+                        f"Fin de la boucle ▶ (Temps {self.loop_end_beat:.1f})\n"
+                        "↔ Glisser pour ajuster la fin\n"
+                        "💡 Maj + Clic-Glisser pour redéfinir la boucle\n"
+                        "Touche 'L' pour activer/désactiver"
+                    )
+                    self.status_hint.emit("Boucle : Glisser pour ajuster la fin | Maj + Clic-Glisser pour redéfinir")
+                self.setToolTip(tip)
+            else:
+                self.unsetCursor()
+                if self._hovered_handle == "region":
+                    self.setToolTip(
+                        f"Région de boucle : {self.loop_start_beat:.1f} → {self.loop_end_beat:.1f} ({self.loop_end_beat - self.loop_start_beat:.1f} temps)\n"
+                        "💡 Maj + Clic-Glisser pour redéfinir la boucle\n"
+                        "Touche 'L' pour activer/désactiver"
+                    )
+                else:
+                    self.setToolTip("Règle temporelle : Clic pour déplacer la tête de lecture\n• Maj + Clic-Glisser pour définir une boucle")
+
+            if old_handle != self._hovered_handle:
+                self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent):
-        if self._dragging_loop:
-            self._dragging_loop = False
+        if self._active_drag in ("start", "end", "new"):
             self.loop_changed.emit(self.loop_start_beat, self.loop_end_beat)
-            self.update()
+        self._active_drag = None
+        x = event.position().x()
+        self._hovered_handle = self._get_handle_at(x)
+        if self._hovered_handle in ("start", "end"):
+            self.setCursor(Qt.SizeHorCursor)
+        else:
+            self.unsetCursor()
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -89,32 +203,21 @@ class TimelineRuler(QWidget):
         # Fond
         painter.fillRect(0, 0, width, height, QColor("#14151c"))
 
-        # Zone de boucle en surbrillance ambre
-        if self.loop_enabled:
-            x_start = self.loop_start_beat * self.pixels_per_beat
-            x_end = self.loop_end_beat * self.pixels_per_beat
-            loop_rect = QRectF(x_start, 0, x_end - x_start, height)
-            painter.fillRect(loop_rect, QColor(245, 158, 11, 40))
+        # Positions à l'écran de la boucle
+        x_start = self.loop_start_beat * self.pixels_per_beat - self.scroll_offset
+        x_end = self.loop_end_beat * self.pixels_per_beat - self.scroll_offset
 
-            # Barre supérieure de boucle
-            painter.setPen(QPen(QColor("#f59e0b"), 2))
-            painter.drawLine(int(x_start), 2, int(x_end), 2)
-
-            # Marqueurs L et R
-            painter.setPen(QColor("#fbbf24"))
-            font_small = QFont("Segoe UI", 8, QFont.Bold)
-            painter.setFont(font_small)
-            painter.drawText(int(x_start) + 3, 14, "▼ L")
-            painter.drawText(int(x_end) - 18, 14, "R ▼")
-
-        # Graduation des mesures (4 temps par mesure en 4/4)
+        # 1. Graduation des mesures (4 temps par mesure en 4/4)
+        first_bar = max(0, int(self.scroll_offset / (self.pixels_per_beat * 4)))
         num_bars = int(width / (self.pixels_per_beat * 4)) + 4
         font = QFont("Consolas", 9, QFont.Bold)
         painter.setFont(font)
 
-        for bar in range(num_bars):
+        for bar in range(first_bar, first_bar + num_bars):
             bar_beat = bar * 4.0
-            x = bar_beat * self.pixels_per_beat
+            x = bar_beat * self.pixels_per_beat - self.scroll_offset
+            if x < -50 or x > width + 50:
+                continue
 
             # Ligne de mesure principale
             painter.setPen(QPen(QColor("#475069"), 1))
@@ -127,23 +230,107 @@ class TimelineRuler(QWidget):
             # Graduations de temps
             painter.setPen(QPen(QColor("#252834"), 1))
             for beat in range(1, 4):
-                bx = (bar_beat + beat) * self.pixels_per_beat
-                painter.drawLine(int(bx), 16, int(bx), height)
+                bx = (bar_beat + beat) * self.pixels_per_beat - self.scroll_offset
+                if 0 <= bx <= width:
+                    painter.drawLine(int(bx), 16, int(bx), height)
+
+        # 2. Zone de boucle
+        is_loop_on = self.loop_enabled
+        loop_color = QColor(245, 158, 11) if is_loop_on else QColor(148, 163, 184)
+        bg_color = QColor(245, 158, 11, 40) if is_loop_on else QColor(148, 163, 184, 15)
+
+        loop_rect = QRectF(x_start, 0, max(2.0, x_end - x_start), height)
+        painter.fillRect(loop_rect, bg_color)
+
+        # Barre supérieure de boucle
+        top_pen = QPen(loop_color, 2 if is_loop_on else 1.5)
+        if not is_loop_on:
+            top_pen.setStyle(Qt.DashLine)
+        painter.setPen(top_pen)
+        painter.drawLine(int(x_start), 2, int(x_end), 2)
+
+        # 3. Poignées d'ajustement gauche et droite (Loop Handles)
+        # Poignée gauche (Début)
+        is_s_hover = (self._hovered_handle == "start" or self._active_drag == "start")
+        handle_s_color = QColor("#fbbf24") if (is_s_hover or is_loop_on) else QColor("#94a3b8")
+
+        # Trait vertical
+        painter.setPen(QPen(handle_s_color, 2 if is_s_hover else 1.5))
+        painter.drawLine(int(x_start), 0, int(x_start), height)
+
+        # Onglet poignée gauche
+        tab_s_rect = QRectF(x_start, 1, 18, 16)
+        tab_s_bg = QColor(245, 158, 11, 220) if is_s_hover else (QColor(245, 158, 11, 140) if is_loop_on else QColor(51, 65, 85, 160))
+        painter.fillRect(tab_s_rect, tab_s_bg)
+        painter.setPen(QPen(handle_s_color, 1))
+        painter.drawRect(tab_s_rect)
+
+        # Texte / Icône poignée gauche
+        painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+        painter.setPen(QColor("#ffffff") if is_s_hover else handle_s_color)
+        painter.drawText(tab_s_rect, Qt.AlignCenter, "◀L")
+
+        # Poignée droite (Fin)
+        is_e_hover = (self._hovered_handle == "end" or self._active_drag == "end")
+        handle_e_color = QColor("#fbbf24") if (is_e_hover or is_loop_on) else QColor("#94a3b8")
+
+        # Trait vertical
+        painter.setPen(QPen(handle_e_color, 2 if is_e_hover else 1.5))
+        painter.drawLine(int(x_end), 0, int(x_end), height)
+
+        # Onglet poignée droite
+        tab_e_rect = QRectF(x_end - 18, 1, 18, 16)
+        tab_e_bg = QColor(245, 158, 11, 220) if is_e_hover else (QColor(245, 158, 11, 140) if is_loop_on else QColor(51, 65, 85, 160))
+        painter.fillRect(tab_e_rect, tab_e_bg)
+        painter.setPen(QPen(handle_e_color, 1))
+        painter.drawRect(tab_e_rect)
+
+        # Texte / Icône poignée droite
+        painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+        painter.setPen(QColor("#ffffff") if is_e_hover else handle_e_color)
+        painter.drawText(tab_e_rect, Qt.AlignCenter, "R▶")
+
+        # 4. Petit label interactif d'aide survol (HUD hint badge)
+        if (self._hovered_handle in ("start", "end") or self._active_drag in ("start", "end")) and width > 300:
+            if self._hovered_handle == "start" or self._active_drag == "start":
+                hud_text = f"↔ Début ({self.loop_start_beat:.1f}) | Maj+Clic pour redéfinir"
+                ideal_x = x_start + 22
+            else:
+                hud_text = f"↔ Fin ({self.loop_end_beat:.1f}) | Maj+Clic pour redéfinir"
+                ideal_x = x_end - 220
+
+            font_hud = QFont("Segoe UI", 8, QFont.Bold)
+            fm = QFontMetrics(font_hud)
+            tw = fm.horizontalAdvance(hud_text)
+            hud_w = tw + 14
+            hud_h = 19
+            hud_x = max(6.0, min(float(width - hud_w - 6), ideal_x))
+            hud_y = 5.0
+
+            hud_rect = QRectF(hud_x, hud_y, hud_w, hud_h)
+            painter.fillRect(hud_rect, QColor(15, 23, 42, 235))
+            painter.setPen(QPen(QColor("#f59e0b" if is_loop_on else "#94a3b8"), 1))
+            painter.drawRoundedRect(hud_rect, 4, 4)
+
+            painter.setFont(font_hud)
+            painter.setPen(QColor("#fef08a" if is_loop_on else "#e2e8f0"))
+            painter.drawText(hud_rect, Qt.AlignCenter, hud_text)
 
         # Ligne de séparation inférieure
         painter.setPen(QPen(QColor("#282a36"), 1))
         painter.drawLine(0, height - 1, width, height - 1)
 
-        # Tête de lecture (Triangle)
-        px = self.playhead_beat * self.pixels_per_beat
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(QColor("#38bdf8")))
-        tri = QPolygonF([
-            QPointF(px - 6, 0),
-            QPointF(px + 6, 0),
-            QPointF(px, 12)
-        ])
-        painter.drawPolygon(tri)
+        # 5. Tête de lecture (Triangle cyan)
+        px = self.playhead_beat * self.pixels_per_beat - self.scroll_offset
+        if -10 <= px <= width + 10:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor("#38bdf8")))
+            tri = QPolygonF([
+                QPointF(px - 6, 0),
+                QPointF(px + 6, 0),
+                QPointF(px, 12)
+            ])
+            painter.drawPolygon(tri)
 
 
 class TimelineGrid(QWidget):
