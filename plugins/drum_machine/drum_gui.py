@@ -2,16 +2,18 @@
 plugins/drum_machine/drum_gui.py - Interface graphique moderne pour le plugin Nova Drums VSTi.
 Design inspiré de Native Instruments Battery et Cubase Groove Agent.
 """
+import os
 import threading
+from pathlib import Path
 from typing import Optional, Dict, List, Any
 import numpy as np
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QPushButton, QSlider, QComboBox, QFrame, QSizePolicy,
-    QGroupBox, QCheckBox
+    QGroupBox, QCheckBox, QMenu, QFileDialog
 )
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QLinearGradient
+from PySide6.QtCore import Qt, QTimer, Signal, QPoint
+from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QLinearGradient, QAction
 
 from plugins.drum_machine.drum_plugin import DrumMachinePlugin, DrumPad
 
@@ -176,7 +178,9 @@ class WaveformDisplay(QWidget):
 
 
 class PadButton(QPushButton):
-    """Bouton de pad interactif avec LED d'animation lors des frappes"""
+    """Bouton de pad interactif avec LED d'animation lors des frappes et menu déroulant d'échantillons"""
+    menu_requested = Signal(object, object)  # (DrumPad, QWidget)
+
     def __init__(self, pad: DrumPad, parent=None):
         super().__init__(parent)
         self.pad = pad
@@ -190,7 +194,41 @@ class PadButton(QPushButton):
         self.flash_timer.setInterval(120)
         self.flash_timer.timeout.connect(self._stop_flash)
 
+        # Bouton flèche vers le bas discret pour ouvrir le menu des samples
+        self.btn_arrow = QPushButton("▾", self)
+        self.btn_arrow.setFixedSize(18, 18)
+        self.btn_arrow.setCursor(Qt.PointingHandCursor)
+        self.btn_arrow.setToolTip(f"Changer l'échantillon pour '{self.pad.name}'...")
+        self.btn_arrow.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(30, 41, 59, 0.85);
+                color: #94a3b8;
+                border: 1px solid rgba(148, 163, 184, 0.35);
+                border-radius: 3px;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 0px;
+                line-height: 18px;
+            }
+            QPushButton:hover {
+                background-color: #0284c7;
+                color: #ffffff;
+                border-color: #38bdf8;
+            }
+        """)
+        self.btn_arrow.clicked.connect(self._on_arrow_clicked)
+
         self._update_style()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Positionnement dans le coin supérieur droit du pad
+        margin = 4
+        btn_w, btn_h = self.btn_arrow.width(), self.btn_arrow.height()
+        self.btn_arrow.move(self.width() - btn_w - margin, margin)
+
+    def _on_arrow_clicked(self):
+        self.menu_requested.emit(self.pad, self.btn_arrow)
 
     def flash(self):
         self.is_flashing = True
@@ -206,24 +244,21 @@ class PadButton(QPushButton):
             border = "#38bdf8"
             bg = "#0369a1"
             txt = "#ffffff"
-            glow = "0 0 10px #38bdf8"
         elif self.pad.muted:
             border = "#ef4444"
             bg = "#1f1418"
             txt = "#94a3b8"
-            glow = "none"
         elif self.pad.soloed:
             border = "#eab308"
             bg = "#292212"
             txt = "#fef08a"
-            glow = "none"
         else:
             border = "#2b3245"
             bg = "#161924"
             txt = "#f1f5f9"
-            glow = "none"
 
         note_str = f"GM {self.pad.midi_pitches[0]}" if self.pad.midi_pitches else ""
+        sample_name = Path(self.pad.sample_filename).stem if self.pad.sample_filename else ""
 
         self.setStyleSheet(f"""
             QPushButton {{
@@ -240,6 +275,7 @@ class PadButton(QPushButton):
             }}
         """)
         self.setText(f"{self.pad.name}\n({note_str})")
+        self.setToolTip(f"Pad {self.pad.name} ({note_str})\nÉchantillon actif : {self.pad.sample_filename}\nCliquez sur ▾ pour changer d'échantillon")
 
 
 class DrumMachineWidget(QWidget):
@@ -326,6 +362,27 @@ class DrumMachineWidget(QWidget):
             QPushButton#btn_action:hover {
                 background-color: #0284c7;
                 color: #ffffff;
+            }
+            QMenu {
+                background-color: #161924;
+                color: #f1f5f9;
+                border: 1px solid #2d3748;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 24px 6px 20px;
+                border-radius: 4px;
+                font-size: 11px;
+            }
+            QMenu::item:selected {
+                background-color: #0284c7;
+                color: #ffffff;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #2d3748;
+                margin: 4px 8px;
             }
         """)
 
@@ -428,6 +485,7 @@ class DrumMachineWidget(QWidget):
                 pad = pad_lookup[pad_id]
                 btn = PadButton(pad)
                 btn.clicked.connect(lambda _, p=pad, b=btn: self._on_pad_clicked(p, b))
+                btn.menu_requested.connect(self._show_pad_sample_menu)
                 self.pad_buttons[pad_id] = btn
                 grid_layout.addWidget(btn, r, c)
 
@@ -441,6 +499,26 @@ class DrumMachineWidget(QWidget):
         self.lbl_sel_name = QLabel("Pad : Kick (C2)")
         self.lbl_sel_name.setStyleSheet("font-weight: bold; font-size: 13px; color: #38bdf8;")
         detail_layout.addWidget(self.lbl_sel_name)
+
+        # Sélecteur d'échantillon (Sample)
+        row_sample = QHBoxLayout()
+        lbl_s = QLabel("Sample")
+        lbl_s.setFixedWidth(45)
+        row_sample.addWidget(lbl_s)
+
+        self.combo_pad_sample = QComboBox()
+        self.combo_pad_sample.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.combo_pad_sample.currentIndexChanged.connect(self._on_combo_sample_changed)
+        row_sample.addWidget(self.combo_pad_sample)
+
+        self.btn_browse_sample = QPushButton("📂")
+        self.btn_browse_sample.setToolTip("Charger un fichier audio WAV personnalisé...")
+        self.btn_browse_sample.setFixedSize(28, 26)
+        self.btn_browse_sample.setObjectName("btn_action")
+        self.btn_browse_sample.clicked.connect(self._on_browse_selected_pad_sample)
+        row_sample.addWidget(self.btn_browse_sample)
+
+        detail_layout.addLayout(row_sample)
 
         # Waveform
         self.waveform_view = WaveformDisplay()
@@ -574,6 +652,22 @@ class DrumMachineWidget(QWidget):
         p = self.selected_pad
         self.lbl_sel_name.setText(f"Pad : {p.name} (GM {p.midi_pitches[0]})")
         self.waveform_view.set_audio_data(p.get_audio_data())
+
+        # Synchroniser la liste des samples du pad
+        if hasattr(self, "combo_pad_sample"):
+            self.combo_pad_sample.blockSignals(True)
+            self.combo_pad_sample.clear()
+            samples = self.plugin.get_available_samples_for_pad(p.pad_id)
+            active_idx = 0
+            curr_fn = p.sample_filename or ""
+            curr_stem = Path(curr_fn).stem.lower()
+            for idx, s in enumerate(samples):
+                self.combo_pad_sample.addItem(s["label"], s["filename"])
+                s_fn = s["filename"]
+                if curr_fn == s_fn or curr_stem == Path(s_fn).stem.lower():
+                    active_idx = idx
+            self.combo_pad_sample.setCurrentIndex(active_idx)
+            self.combo_pad_sample.blockSignals(False)
 
         self.slider_pad_vol.blockSignals(True)
         self.slider_pad_vol.setValue(int(p.volume * 100))
@@ -761,6 +855,69 @@ class DrumMachineWidget(QWidget):
         self.plugin.reverb.wet_mix = val / 100.0
         self.plugin.invalidate_cache()
         self._update_cache_badge()
+
+    def _show_pad_sample_menu(self, pad: DrumPad, anchor_btn: QWidget):
+        """Affiche le menu contextuel déroulant de sélection d'échantillons sous le bouton flèche"""
+        menu = QMenu(self)
+        samples = self.plugin.get_available_samples_for_pad(pad.pad_id)
+        current_fn = pad.sample_filename or ""
+        current_stem = Path(current_fn).stem.lower()
+
+        title_action = menu.addAction(f"🥁 Samples : {pad.name}")
+        title_action.setEnabled(False)
+        menu.addSeparator()
+
+        for s in samples:
+            action = menu.addAction(s["label"])
+            action.setCheckable(True)
+            s_fn = s["filename"]
+            is_active = (current_fn == s_fn or current_stem == Path(s_fn).stem.lower())
+            action.setChecked(is_active)
+            action.triggered.connect(lambda checked=False, p=pad, f=s_fn: self._apply_pad_sample(p, f))
+
+        menu.addSeparator()
+        browse_action = menu.addAction("📂 Choisir un fichier WAV personnalisé...")
+        browse_action.triggered.connect(lambda: self._browse_and_set_sample(pad))
+
+        pos = anchor_btn.mapToGlobal(anchor_btn.rect().bottomLeft())
+        menu.exec(pos)
+
+    def _apply_pad_sample(self, pad: DrumPad, sample_filename_or_path: str):
+        """Applique un nouvel échantillon au pad, rafraîchit l'UI et déclenche l'écoute immédiate"""
+        success = self.plugin.set_pad_sample(pad.pad_id, sample_filename_or_path)
+        if success:
+            self.selected_pad = pad
+            btn = self.pad_buttons.get(pad.pad_id)
+            if btn:
+                btn._update_style()
+                btn.flash()
+            self._sync_all_controls()
+            self._update_cache_badge()
+            self._play_pad(pad)
+
+    def _browse_and_set_sample(self, pad: DrumPad):
+        """Ouvre un sélecteur de fichier WAV pour charger un sample externe"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            f"Choisir un échantillon audio pour {pad.name}",
+            str(self.plugin.get_sample_dirs()[0]),
+            "Fichiers Audio (*.wav)"
+        )
+        if file_path:
+            self._apply_pad_sample(pad, file_path)
+
+    def _on_combo_sample_changed(self, idx: int):
+        """Appelé lors du changement de sélection dans la combobox de l'échantillon"""
+        if idx < 0 or not self.selected_pad or not hasattr(self, "combo_pad_sample"):
+            return
+        filename = self.combo_pad_sample.itemData(idx)
+        if filename and filename != self.selected_pad.sample_filename:
+            self._apply_pad_sample(self.selected_pad, filename)
+
+    def _on_browse_selected_pad_sample(self):
+        """Ouvre l'explorateur pour le pad actuellement sélectionné"""
+        if self.selected_pad:
+            self._browse_and_set_sample(self.selected_pad)
 
     def keyPressEvent(self, event):
         key = event.key()

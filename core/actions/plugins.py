@@ -549,7 +549,8 @@ def configure_drum_machine(
     pad_volume: Optional[float] = None,
     pad_pan: Optional[float] = None,
     pad_tune: Optional[float] = None,
-    pad_reverb_send: Optional[float] = None
+    pad_reverb_send: Optional[float] = None,
+    pad_sample: Optional[str] = None
 ) -> Dict[str, Any]:
     ensure_plugins_loaded()
     track = app.project.get_track(track_id_or_name)
@@ -602,6 +603,8 @@ def configure_drum_machine(
                 target_pad = p
                 break
         if target_pad:
+            if pad_sample is not None and hasattr(drum_plugin, "set_pad_sample"):
+                drum_plugin.set_pad_sample(target_pad.pad_id, pad_sample)
             if pad_volume is not None:
                 target_pad.volume = max(0.0, min(2.0, float(pad_volume)))
             if pad_pan is not None:
@@ -610,6 +613,8 @@ def configure_drum_machine(
                 target_pad.tune = max(-12.0, min(12.0, float(pad_tune)))
             if pad_reverb_send is not None:
                 target_pad.reverb_send = max(0.0, min(1.0, float(pad_reverb_send)))
+            drum_plugin.invalidate_cache(target_pad.pad_id)
+            drum_plugin.warm_up_cache([target_pad.pad_id], async_bg=True)
 
     if hasattr(app, "refresh_project_ui"):
         app.refresh_project_ui()

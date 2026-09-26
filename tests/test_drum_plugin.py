@@ -334,3 +334,109 @@ def test_10_ram_cache_instant_retrieval_and_choke():
     assert len(engine._preview_buffers[0]["buffer"]) == 100
     engine.close()
 
+
+def test_11_drum_pad_sample_switching_and_persistence():
+    """Vérifie le changement dynamique de sample (kick acoustique vs kick dnb), le catalogue et la persistance"""
+    plugin = DrumMachinePlugin()
+
+    # 1. Vérifier le catalogue des samples disponibles pour le Kick
+    samples_kick = plugin.get_available_samples_for_pad("kick")
+    assert len(samples_kick) >= 2
+    filenames = [s["filename"] for s in samples_kick]
+    assert "kick.wav" in filenames
+    assert "kick_dnb.wav" in filenames
+
+    # Le kick par défaut est kick.wav
+    pad_kick = plugin.find_pad_by_pitch(36)
+    assert pad_kick.sample_filename == "kick.wav"
+    audio_acoustic = pad_kick.get_audio_data().copy()
+    assert audio_acoustic is not None and len(audio_acoustic) > 0
+
+    # 2. Basculer vers l'échantillon dnb
+    success = plugin.set_pad_sample("kick", "kick_dnb.wav")
+    assert success is True
+    assert pad_kick.sample_filename == "kick_dnb.wav"
+    audio_dnb = pad_kick.get_audio_data().copy()
+
+    # Les données audio de kick acoustique et kick dnb sont différentes
+    assert not np.array_equal(audio_acoustic, audio_dnb)
+
+    # 3. Vérifier la persistance dans le state
+    state = plugin.get_state()
+    kick_state = next(p for p in state["pads"] if p["pad_id"] == "kick")
+    assert kick_state["sample_filename"] == "kick_dnb.wav"
+
+    # Restauration dans une nouvelle instance
+    plugin2 = DrumMachinePlugin()
+    assert plugin2.find_pad_by_pitch(36).sample_filename == "kick.wav"
+    plugin2.set_state(state)
+    assert plugin2.find_pad_by_pitch(36).sample_filename == "kick_dnb.wav"
+    audio_restored = plugin2.find_pad_by_pitch(36).get_audio_data()
+    assert np.array_equal(audio_dnb, audio_restored)
+
+
+def test_12_mcp_action_configure_drum_machine_sample():
+    """Vérifie que l'action novadaw_configure_drum_machine permet de changer le sample d'un pad"""
+    from core.actions.plugins import configure_drum_machine
+
+    class MockApp:
+        def __init__(self):
+            self.project = Project(name="MCP Drum Test")
+            t = Track(name="Drums", track_type="midi", plugin_path="novadaw.drum_machine", plugin_name="Nova Drums VSTi")
+            self.project.add_track(t)
+
+        def refresh_project_ui(self):
+            pass
+
+    app = MockApp()
+    res = configure_drum_machine(app, "Drums", pad_id="kick", pad_sample="kick_dnb.wav")
+    assert res["status"] == "success"
+
+    drum_plugin = app.project.tracks[0].plugins[0]
+    pad_kick = drum_plugin.find_pad_by_pitch(36)
+    assert pad_kick.sample_filename == "kick_dnb.wav"
+
+    # Rebasculer vers le kick par défaut
+    res2 = configure_drum_machine(app, "Drums", pad_id="kick", pad_sample="kick.wav")
+    assert res2["status"] == "success"
+    assert pad_kick.sample_filename == "kick.wav"
+
+
+def test_13_drum_gui_sample_selection_and_arrow():
+    """Vérifie l'interface graphique de DrumMachineWidget, le bouton flèche et la synchronisation du sélecteur"""
+    from PySide6.QtWidgets import QApplication
+    _app = QApplication.instance() or QApplication(sys.argv)
+
+    plugin = DrumMachinePlugin()
+    widget = plugin.create_editor()
+    assert widget is not None
+    assert hasattr(widget, "combo_pad_sample")
+    assert hasattr(widget, "pad_buttons")
+
+    # Pad kick
+    btn_kick = widget.pad_buttons["kick"]
+    assert hasattr(btn_kick, "btn_arrow")
+    assert btn_kick.btn_arrow.text() == "▾"
+
+    # Vérifier que le combo affiche le kick par défaut
+    assert "Acoustique" in widget.combo_pad_sample.currentText()
+
+    # Changer via le combo vers kick_dnb.wav
+    dnb_idx = -1
+    for i in range(widget.combo_pad_sample.count()):
+        if widget.combo_pad_sample.itemData(i) == "kick_dnb.wav":
+            dnb_idx = i
+            break
+    assert dnb_idx >= 0
+    widget.combo_pad_sample.setCurrentIndex(dnb_idx)
+
+    pad_kick = plugin.find_pad_by_pitch(36)
+    assert pad_kick.sample_filename == "kick_dnb.wav"
+
+    # Rebasculer vers kick.wav via _apply_pad_sample (comme le ferait le menu flèche)
+    widget._apply_pad_sample(pad_kick, "kick.wav")
+    assert pad_kick.sample_filename == "kick.wav"
+    assert "kick.wav" in btn_kick.toolTip()
+
+
+

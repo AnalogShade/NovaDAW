@@ -59,9 +59,18 @@ class DrumPad:
         self._cached_tune_val: float = 0.0
 
     def load_sample(self, base_dirs: List[Path]) -> bool:
-        """Cherche et charge le fichier audio WAV dans les dossiers spécifiés"""
-        for b_dir in base_dirs:
-            p = b_dir / self.sample_filename
+        """Cherche et charge le fichier audio WAV dans les dossiers spécifiés ou depuis un chemin absolu"""
+        p_raw = Path(self.sample_filename)
+        candidates = []
+        if p_raw.is_absolute() and p_raw.exists():
+            candidates.append(p_raw)
+        else:
+            for b_dir in base_dirs:
+                candidates.append(b_dir / self.sample_filename)
+                if not self.sample_filename.lower().endswith(".wav"):
+                    candidates.append(b_dir / f"{self.sample_filename}.wav")
+
+        for p in candidates:
             if p.exists():
                 try:
                     data, sr = sf.read(str(p), dtype="float32")
@@ -75,6 +84,17 @@ class DrumPad:
                     return True
                 except Exception as e:
                     print(f"[NovaDrums] Erreur lecture sample {p}: {e}")
+        return False
+
+    def set_sample(self, sample_path_or_name: str, base_dirs: List[Path]) -> bool:
+        """Change dynamiquement l'échantillon sonore associé à ce pad"""
+        old_filename = self.sample_filename
+        self.sample_filename = str(sample_path_or_name)
+        if self.load_sample(base_dirs):
+            return True
+        # En cas d'échec, rétablir le sample précédent
+        self.sample_filename = old_filename
+        self.load_sample(base_dirs)
         return False
 
     def get_audio_data(self) -> np.ndarray:
@@ -108,6 +128,7 @@ class DrumPad:
         return {
             "pad_id": self.pad_id,
             "name": self.name,
+            "sample_filename": self.sample_filename,
             "volume": self.volume,
             "pan": self.pan,
             "tune": self.tune,
@@ -117,7 +138,12 @@ class DrumPad:
             "soloed": self.soloed,
         }
 
-    def from_dict(self, d: Dict[str, Any]):
+    def from_dict(self, d: Dict[str, Any], base_dirs: Optional[List[Path]] = None):
+        if "sample_filename" in d and d["sample_filename"] != self.sample_filename:
+            new_fn = str(d["sample_filename"])
+            self.sample_filename = new_fn
+            if base_dirs:
+                self.load_sample(base_dirs)
         self.volume = float(d.get("volume", self.volume))
         self.pan = float(d.get("pan", self.pan))
         self.tune = float(d.get("tune", self.tune))
@@ -188,6 +214,40 @@ class DrumMachinePlugin(BasePlugin):
         # Chargement des samples audio
         self.reload_samples()
 
+    # Catalogue par défaut des échantillons disponibles par pad
+    SAMPLE_CATALOG: Dict[str, List[Dict[str, str]]] = {
+        "kick": [
+            {"filename": "kick.wav", "label": "Kick Acoustique Studio (Défaut)"},
+            {"filename": "kick_acoustic_punch.wav", "label": "Kick Acoustique Punchy"},
+            {"filename": "kick_acoustic_warm.wav", "label": "Kick Acoustique Vintage & Rond"},
+            {"filename": "kick_dnb.wav", "label": "Kick Drum & Bass Sub (Original)"},
+        ],
+        "snare": [
+            {"filename": "snare.wav", "label": "Caisse Claire Acoustique Studio (Défaut)"},
+        ],
+        "hihat_c": [
+            {"filename": "hihat_closed.wav", "label": "Charleston Fermé Studio (Défaut)"},
+        ],
+        "hihat_o": [
+            {"filename": "hihat_open.wav", "label": "Charleston Ouvert Studio (Défaut)"},
+        ],
+        "tom_l": [
+            {"filename": "tom_low.wav", "label": "Tom Basse Floor Tom (Défaut)"},
+        ],
+        "tom_m": [
+            {"filename": "tom_mid.wav", "label": "Tom Médium Studio (Défaut)"},
+        ],
+        "tom_h": [
+            {"filename": "tom_high.wav", "label": "Tom Aigu Studio (Défaut)"},
+        ],
+        "crash": [
+            {"filename": "crash.wav", "label": "Cymbale Crash Studio (Défaut)"},
+        ],
+        "ride": [
+            {"filename": "ride.wav", "label": "Cymbale Ride Studio (Défaut)"},
+        ],
+    }
+
     def get_sample_dirs(self) -> List[Path]:
         """Retourne les chemins candidats où chercher les fichiers audio WAV"""
         here = Path(__file__).resolve().parent
@@ -197,6 +257,80 @@ class DrumMachinePlugin(BasePlugin):
             root / "assets" / "drum_kits" / "default_kit",
             root / "scratch",
         ]
+
+    def get_available_samples_for_pad(self, pad_id: str) -> List[Dict[str, str]]:
+        """
+        Retourne la liste des échantillons sonores disponibles pour un pad donné :
+        - Échantillons prédéfinis du catalogue (acoustique, punchy, vintage, dnb...)
+        - Fichiers WAV scannés sur le disque correspondant à la pièce
+        - Sample actuellement sélectionné si personnalisé
+        """
+        pad = next((p for p in self.pads if p.pad_id.lower() == pad_id.lower()), None)
+        p_id = pad.pad_id if pad else pad_id.lower()
+
+        results: List[Dict[str, str]] = []
+        known_files = set()
+
+        # 1. Échantillons du catalogue prédéfini
+        if p_id in self.SAMPLE_CATALOG:
+            for item in self.SAMPLE_CATALOG[p_id]:
+                results.append(dict(item))
+                known_files.add(item["filename"].lower())
+
+        # 2. Scanner les dossiers de samples pour d'autres variations WAV
+        patterns = {
+            "kick": ["kick", "bd", "bass_drum", "bassdrum"],
+            "snare": ["snare", "sd", "caisse"],
+            "hihat_c": ["hihat_closed", "hihat_c", "hh_c", "charleston_f"],
+            "hihat_o": ["hihat_open", "hihat_o", "hh_o", "charleston_o"],
+            "tom_l": ["tom_low", "tom_l", "floor_tom"],
+            "tom_m": ["tom_mid", "tom_m"],
+            "tom_h": ["tom_high", "tom_h"],
+            "crash": ["crash", "cymbal"],
+            "ride": ["ride"],
+        }
+        pad_patterns = patterns.get(p_id, [p_id])
+
+        for base_dir in self.get_sample_dirs():
+            if not base_dir.exists():
+                continue
+            for f in base_dir.glob("*.wav"):
+                fname_lower = f.name.lower()
+                if fname_lower in known_files:
+                    continue
+                # Vérifier si le nom correspond au pad
+                if any(pat in fname_lower for pat in pad_patterns):
+                    label = f.stem.replace("_", " ").title()
+                    results.append({
+                        "filename": f.name,
+                        "label": label
+                    })
+                    known_files.add(fname_lower)
+
+        # 3. Si le pad utilise un sample personnalisé ou externe qui n'est pas encore dans la liste
+        if pad and pad.sample_filename:
+            fn = pad.sample_filename
+            fn_lower = Path(fn).name.lower()
+            if fn_lower not in known_files:
+                p_custom = Path(fn)
+                results.append({
+                    "filename": fn,
+                    "label": f"Fichier externe ({p_custom.name})"
+                })
+
+        return results
+
+    def set_pad_sample(self, pad_id: str, sample_path_or_name: str) -> bool:
+        """Modifie dynamiquement le sample assigné à un pad et recharge le tampon audio"""
+        pad = next((p for p in self.pads if p.pad_id.lower() == pad_id.lower()), None)
+        if not pad:
+            return False
+        dirs = self.get_sample_dirs()
+        success = pad.set_sample(sample_path_or_name, dirs)
+        if success:
+            self.invalidate_cache(pad.pad_id)
+            self.warm_up_cache([pad.pad_id], async_bg=True)
+        return success
 
     def reload_samples(self):
         """Recharge tous les samples audio des pads et réchauffe le tampon RAM"""
@@ -613,9 +747,10 @@ class DrumMachinePlugin(BasePlugin):
 
         pads_data = state.get("pads", [])
         pads_map = {d.get("pad_id"): d for d in pads_data if "pad_id" in d}
+        dirs = self.get_sample_dirs()
         for pad in self.pads:
             if pad.pad_id in pads_map:
-                pad.from_dict(pads_map[pad.pad_id])
+                pad.from_dict(pads_map[pad.pad_id], base_dirs=dirs)
 
         self.invalidate_cache()
         self.warm_up_cache(async_bg=True)
