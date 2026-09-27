@@ -123,8 +123,19 @@ class NoteGridWidget(QWidget):
         self.update_dimensions()
 
     def set_playhead(self, beat: float):
+        old_px = int(self.playhead_project_beat * self.pixels_per_beat)
+        new_px = int(beat * self.pixels_per_beat)
         self.playhead_project_beat = beat
-        self.update()
+        if old_px == new_px:
+            return
+        h = self.height()
+        min_x = min(old_px, new_px) - 4
+        max_x = max(old_px, new_px) + 4
+        if max_x - min_x < 60:
+            self.update(min_x, 0, max_x - min_x + 1, h)
+        else:
+            self.update(old_px - 4, 0, 9, h)
+            self.update(new_px - 4, 0, 9, h)
 
     def set_clip(self, clip: Optional[MidiClip]):
         self.clip = clip

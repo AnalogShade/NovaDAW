@@ -202,12 +202,14 @@ class EditingToolbar(QWidget):
         layout.addWidget(self._create_sep())
 
         # --- 4. GRILLE & AIMANTAGE (SNAP) ---
+        self._last_non_zero_grid_idx = 2  # 1/4 par défaut (1 temps)
+
         self.btn_snap = QPushButton("🧲 Snap")
         self.btn_snap.setToolTip("Activer / Désactiver l'aimantage à la grille pour le déplacement, découpe et rognage")
         self.btn_snap.setProperty("class", "snap_btn")
         self.btn_snap.setCheckable(True)
         self.btn_snap.setChecked(True)
-        self.btn_snap.toggled.connect(self.snap_toggled.emit)
+        self.btn_snap.toggled.connect(self._on_snap_btn_toggled)
         layout.addWidget(self.btn_snap)
 
         lbl_grid = QLabel("Grille :")
@@ -263,7 +265,41 @@ class EditingToolbar(QWidget):
 
     def _on_grid_combo_changed(self, index: int):
         val = float(self.combo_grid.currentData())
+        if val > 0.0:
+            self._last_non_zero_grid_idx = index
+            if not self.btn_snap.isChecked():
+                self.btn_snap.blockSignals(True)
+                self.btn_snap.setChecked(True)
+                self.btn_snap.blockSignals(False)
+                self.snap_toggled.emit(True)
+        else:
+            if self.btn_snap.isChecked():
+                self.btn_snap.blockSignals(True)
+                self.btn_snap.setChecked(False)
+                self.btn_snap.blockSignals(False)
+                self.snap_toggled.emit(False)
         self.grid_resolution_changed.emit(val)
+
+    def _on_snap_btn_toggled(self, checked: bool):
+        if checked:
+            current_val = float(self.combo_grid.currentData())
+            if current_val <= 0.0:
+                self.combo_grid.blockSignals(True)
+                self.combo_grid.setCurrentIndex(self._last_non_zero_grid_idx)
+                self.combo_grid.blockSignals(False)
+                val = float(self.combo_grid.currentData())
+                self.grid_resolution_changed.emit(val)
+            else:
+                self.grid_resolution_changed.emit(current_val)
+        else:
+            self.combo_grid.blockSignals(True)
+            for i in range(self.combo_grid.count()):
+                if float(self.combo_grid.itemData(i)) == 0.0:
+                    self.combo_grid.setCurrentIndex(i)
+                    break
+            self.combo_grid.blockSignals(False)
+            self.grid_resolution_changed.emit(0.0)
+        self.snap_toggled.emit(checked)
 
     def set_active_tool(self, tool_name: str):
         """Définit l'outil actif programmatiquement ('select', 'split', 'erase')"""
@@ -276,10 +312,13 @@ class EditingToolbar(QWidget):
         self.tool_changed.emit(tool_name)
 
     def set_grid_resolution(self, val_beats: float):
+        target = float(val_beats)
         for i in range(self.combo_grid.count()):
-            if abs(float(self.combo_grid.itemData(i)) - float(val_beats)) < 1e-4:
-                self.combo_grid.setCurrentIndex(i)
+            if abs(float(self.combo_grid.itemData(i)) - target) < 1e-4:
+                if self.combo_grid.currentIndex() != i:
+                    self.combo_grid.setCurrentIndex(i)
                 break
 
     def set_snap_enabled(self, enabled: bool):
-        self.btn_snap.setChecked(bool(enabled))
+        if self.btn_snap.isChecked() != bool(enabled):
+            self.btn_snap.setChecked(bool(enabled))

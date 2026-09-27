@@ -8,9 +8,9 @@ import soundfile as sf
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QScrollArea, QTabWidget, QFileDialog, QMessageBox, QStatusBar,
-    QFrame, QLabel, QPushButton, QSizePolicy
+    QFrame, QLabel, QPushButton, QSizePolicy, QProgressBar
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QIcon, QPixmap
 
 from core.project import Project, Track, MidiClip, AudioClip
@@ -38,6 +38,8 @@ import core.actions
 
 
 class MainWindow(QMainWindow):
+    cache_progress_signal = Signal(int, int, str, float)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("NovaDAW - Digital Audio Workstation")
@@ -63,6 +65,10 @@ class MainWindow(QMainWindow):
         self._init_menus()
         self._init_central_ui()
         self._init_status_bar()
+
+        # Connexion du signal de progression du cache audio (ASIO-Guard)
+        self.cache_progress_signal.connect(self._on_cache_progress)
+        self.audio_engine.caching_progress_callback = self._on_engine_caching_progress
 
         # 3. Timer d'animation de la tête de lecture (60 FPS)
         self.playback_timer = QTimer(self)
@@ -451,6 +457,7 @@ class MainWindow(QMainWindow):
         self.inspector = TrackInspector(self.project, self)
         self.inspector.track_modified.connect(self._on_project_modified)
         self.inspector.track_modified.connect(self.refresh_project_ui)
+        self.inspector.track_mixer_changed.connect(self._on_track_mixer_changed)
         self.arranger_splitter.addWidget(self.inspector)
 
         # Panneau central-gauche : En-têtes de pistes (redimensionnable)
@@ -518,6 +525,8 @@ class MainWindow(QMainWindow):
         self.ruler.seek_requested.connect(self._on_seek)
         self.ruler.loop_changed.connect(self._on_loop_region_changed)
         self.ruler.status_hint.connect(lambda msg: self.statusBar().showMessage(msg, 3000))
+        self.ruler.set_snap_enabled(True)
+        self.ruler.set_grid_resolution(1.0)
         right_layout.addWidget(self.ruler)
 
         # Zone de défilement de la grille timeline
@@ -605,12 +614,12 @@ class MainWindow(QMainWindow):
         self.lower_zone.tabBarClicked.connect(self._on_tab_clicked)
 
         self.piano_roll = PianoRoll(self.audio_engine, self)
-        self.piano_roll.notes_updated.connect(self.timeline_grid.update)
+        self.piano_roll.notes_updated.connect(self._on_notes_updated)
         self.piano_roll.seek_requested.connect(self._on_seek)
         self.lower_zone.addTab(self.piano_roll, "🎹 Séquenceur MIDI (Piano Roll)")
 
         self.audio_editor = AudioEditor(self.audio_engine, self)
-        self.audio_editor.clip_modified.connect(self.timeline_grid.update)
+        self.audio_editor.clip_modified.connect(self._on_project_modified)
         self.lower_zone.addTab(self.audio_editor, "🔊 Éditeur Audio")
 
         # Console de Mixage (Mixeur)
@@ -643,6 +652,42 @@ class MainWindow(QMainWindow):
         status = QStatusBar()
         status.setStyleSheet("background-color: #121316; color: #64748b; font-size: 11px; border-top: 1px solid #252834;")
         self.setStatusBar(status)
+
+        # Indicateur de pré-chargement ASIO-Guard / Cache audio
+        self.cache_container = QWidget()
+        cache_layout = QHBoxLayout(self.cache_container)
+        cache_layout.setContentsMargins(6, 0, 10, 0)
+        cache_layout.setSpacing(6)
+
+        self.lbl_cache_icon = QLabel("⚡")
+        self.lbl_cache_icon.setStyleSheet("font-size: 11px;")
+        cache_layout.addWidget(self.lbl_cache_icon)
+
+        self.lbl_cache_text = QLabel("ASIO-Guard : Prêt")
+        self.lbl_cache_text.setStyleSheet("color: #34d399; font-weight: 600; font-size: 11px;")
+        cache_layout.addWidget(self.lbl_cache_text)
+
+        self.cache_progress_bar = QProgressBar()
+        self.cache_progress_bar.setFixedSize(130, 10)
+        self.cache_progress_bar.setRange(0, 100)
+        self.cache_progress_bar.setValue(100)
+        self.cache_progress_bar.setTextVisible(False)
+        self.cache_progress_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #1a1e2b;
+                border: 1px solid #2e3748;
+                border-radius: 3px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0284c7, stop:1 #38bdf8);
+                border-radius: 2px;
+            }
+        """)
+        self.cache_progress_bar.setVisible(False)
+        cache_layout.addWidget(self.cache_progress_bar)
+
+        status.addPermanentWidget(self.cache_container)
+
         lat_ms = hardware_manager.calculate_latency_ms(self.audio_engine.block_size, self.audio_engine.sample_rate)
         self.lbl_engine_info = QLabel(f"⚙️ Moteur Audio : {self.audio_engine.sample_rate} Hz Stéréo | Tampon: {self.audio_engine.block_size} ({lat_ms} ms)")
         self.lbl_engine_info.setCursor(Qt.PointingHandCursor)
@@ -716,6 +761,7 @@ class MainWindow(QMainWindow):
         for track in self.project.tracks:
             header = TrackHeaderWidget(track, parent=self.headers_container, project=self.project)
             header.track_modified.connect(self._on_project_modified)
+            header.track_mixer_changed.connect(self._on_track_mixer_changed)
             header.track_deleted.connect(self._on_track_deleted)
             header.track_selected.connect(self._on_track_selected)
             header.track_height_changed.connect(self._on_track_height_changed)
@@ -970,15 +1016,17 @@ class MainWindow(QMainWindow):
 
     def _on_snap_toggled(self, enabled: bool):
         self.timeline_grid.set_snap_enabled(enabled)
+        self.ruler.set_snap_enabled(enabled)
         state_str = "activé" if enabled else "désactivé"
         self.statusBar().showMessage(f"Aimantage à la grille (Snap) {state_str}", 2000)
 
     def _toggle_snap(self):
-        new_val = not self.timeline_grid.snap_enabled
+        new_val = not self.editing_toolbar.btn_snap.isChecked()
         self.editing_toolbar.set_snap_enabled(new_val)
 
     def _on_grid_resolution_changed(self, res_beats: float):
         self.timeline_grid.set_grid_resolution(res_beats)
+        self.ruler.set_grid_resolution(res_beats)
         if res_beats <= 0:
             self.statusBar().showMessage("Grille : Désactivée / Libre", 2000)
         else:
@@ -1280,8 +1328,16 @@ class MainWindow(QMainWindow):
     def _on_master_vol_changed(self, vol: float):
         self.audio_engine.master_volume = vol
 
+    def _on_notes_updated(self):
+        """Appelé lors de l'édition d'une note dans le Piano Roll."""
+        self.timeline_grid.update()
+        if hasattr(self, "audio_engine") and hasattr(self.audio_engine, "invalidate_track_cache"):
+            self.audio_engine.invalidate_track_cache(self.selected_track_id, trigger_async=True)
+
     def _on_project_modified(self):
         self.timeline_grid.update()
+        if hasattr(self, "audio_engine") and hasattr(self.audio_engine, "invalidate_track_cache"):
+            self.audio_engine.invalidate_track_cache(None, trigger_async=True)
         if hasattr(self, "piano_roll") and getattr(self, "selected_track_id", None):
             track = self.project.get_track(self.selected_track_id)
             if track:
@@ -1297,6 +1353,42 @@ class MainWindow(QMainWindow):
                 item = self.headers_layout.itemAt(i)
                 if item and item.widget() and isinstance(item.widget(), TrackHeaderWidget):
                     item.widget().sync_controls_from_track()
+
+    def _on_track_mixer_changed(self):
+        """Mise à jour ultra-rapide des contrôles de mixage (Mute, Solo, Vol, Pan) sans invalider le cache audio."""
+        self.timeline_grid.update()
+        if hasattr(self, "inspector") and self.inspector.current_track:
+            self.inspector.sync_controls_from_track()
+        if hasattr(self, "headers_layout"):
+            for i in range(self.headers_layout.count() - 1):
+                item = self.headers_layout.itemAt(i)
+                if item and item.widget() and isinstance(item.widget(), TrackHeaderWidget):
+                    item.widget().sync_controls_from_track()
+
+    def _on_engine_caching_progress(self, current: int, total: int, track_name: str, progress: float = 0.0):
+        self.cache_progress_signal.emit(current, total, track_name, progress)
+
+    def _on_cache_progress(self, current: int, total: int, name: str, progress: float):
+        if not hasattr(self, "cache_progress_bar") or not hasattr(self, "lbl_cache_text"):
+            return
+        if progress < 1.0 and name != "Prêt":
+            self.cache_progress_bar.setVisible(True)
+            pct = max(0, min(100, int(progress * 100)))
+            self.cache_progress_bar.setValue(pct)
+            self.lbl_cache_text.setStyleSheet("color: #38bdf8; font-weight: 600; font-size: 11px;")
+            self.lbl_cache_text.setText(f"Pré-rendu : {name} ({pct}%)")
+        else:
+            self.cache_progress_bar.setValue(100)
+            self.lbl_cache_text.setStyleSheet("color: #34d399; font-weight: 600; font-size: 11px;")
+            self.lbl_cache_text.setText("ASIO-Guard : Cache prêt (100%)")
+            QTimer.singleShot(2500, self._hide_cache_progress_bar)
+
+    def _hide_cache_progress_bar(self):
+        if hasattr(self, "cache_progress_bar"):
+            self.cache_progress_bar.setVisible(False)
+        if hasattr(self, "lbl_cache_text"):
+            self.lbl_cache_text.setText("ASIO-Guard : Prêt")
+            self.lbl_cache_text.setStyleSheet("color: #34d399; font-weight: 600; font-size: 11px;")
 
     def _update_playback_ui(self):
         if self.audio_engine.plugin_errors:
@@ -1364,6 +1456,12 @@ class MainWindow(QMainWindow):
         if file_path:
             try:
                 self.audio_engine.stop()
+                if hasattr(self, "cache_progress_bar"):
+                    self.cache_progress_bar.setValue(0)
+                    self.cache_progress_bar.setVisible(True)
+                if hasattr(self, "lbl_cache_text"):
+                    self.lbl_cache_text.setStyleSheet("color: #38bdf8; font-weight: 600; font-size: 11px;")
+                    self.lbl_cache_text.setText("Chargement du cache audio...")
                 self.project = load_project(file_path)
                 self.audio_engine.set_project(self.project)
                 self.refresh_project_ui()

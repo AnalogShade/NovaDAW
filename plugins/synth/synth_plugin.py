@@ -1162,30 +1162,56 @@ class NovaSynthPlugin(BasePlugin):
             return np.zeros((frames, 2), dtype=np.float32)
 
         active_keys = set()
+        max_rel = max((l.release for l in active_layers), default=0.5)
 
-        # Rendu note par note
+        # Collecter les notes actives qui intersectent la tranche ou leur queue de release
+        active_candidates = []
         for note in notes:
-            pitch = getattr(note, "pitch", 60)
             note_start_b = getattr(note, "start_beat", 0.0)
             note_dur_b = getattr(note, "duration", 1.0)
-            vel = getattr(note, "velocity", 100) / 127.0
-
             note_start_sec = note_start_b / beats_per_sec
             note_off_sec = (note_start_b + note_dur_b) / beats_per_sec
-
-            # Vérifier si la note ou son release chevauche la tranche
-            max_rel = max(l.release for l in active_layers)
             note_end_with_rel = note_off_sec + max_rel
+            if note_end_with_rel >= slice_start_sec and note_start_sec < slice_end_sec:
+                active_candidates.append((note, note_start_sec, note_off_sec, note_start_b, note_dur_b))
 
-            if note_end_with_rel < slice_start_sec or note_start_sec >= slice_end_sec:
-                continue
+        # Gestion de polyphonie intelligente (Voice Stealing) : max 6 notes actives simultanées
+        if len(active_candidates) > 6:
+            active_candidates.sort(key=lambda item: item[1], reverse=True)
+            active_candidates = active_candidates[:6]
+
+        # Vecteur de base normalisé précalculé une seule fois pour tout le bloc
+        t_base = np.arange(frames, dtype=np.float64) / sample_rate
+
+        # Rendu note par note
+        for note, note_start_sec, note_off_sec, note_start_b, note_dur_b in active_candidates:
+            pitch = getattr(note, "pitch", 60)
+            vel = getattr(note, "velocity", 100) / 127.0
 
             t_start_rel = slice_start_sec - note_start_sec
             t_end_rel = slice_end_sec - note_start_sec
             note_off_rel = note_off_sec - note_start_sec
+            t_note = t_base + t_start_rel
 
             # Rendu pour chaque couche sonore
             for layer in active_layers:
+                # Sauter immédiatement si le volume est négligeable
+                if layer.volume <= 0.005:
+                    continue
+
+                # Sauter immédiatement si le temps dépasse le release de cette couche
+                if t_start_rel >= (note_off_rel + layer.release):
+                    continue
+
+                # 1. Enveloppe d'amplitude
+                amp_env = compute_adsr_envelope(
+                    t_start_rel, t_end_rel, frames, note_off_rel,
+                    layer.attack, layer.decay, layer.sustain, layer.release
+                )
+                max_env = float(np.max(amp_env))
+                if max_env <= 0.003 or (max_env * layer.volume * vel) <= 0.002:
+                    continue
+
                 bus_dest = max(0, min(9, layer.output_bus))
                 voice_key = (pitch, round(note_start_b, 4), layer.layer_id)
                 active_keys.add(voice_key)
@@ -1193,14 +1219,6 @@ class NovaSynthPlugin(BasePlugin):
                 # Pitch final avec octave, demitons et fine tuning
                 effective_pitch = pitch + (layer.octave * 12) + layer.semitone + (layer.fine_tune / 100.0)
                 freq = pitch_to_freq(effective_pitch)
-
-                # 1. Enveloppe d'amplitude
-                amp_env = compute_adsr_envelope(
-                    t_start_rel, t_end_rel, frames, note_off_rel,
-                    layer.attack, layer.decay, layer.sustain, layer.release
-                )
-                if np.max(amp_env) <= 1e-5:
-                    continue
 
                 # 2. Enveloppe de filtre et modulation LFO
                 mod_cutoff = None
@@ -1250,7 +1268,8 @@ class NovaSynthPlugin(BasePlugin):
                     fm_depth=layer.fm_depth,
                     unison_detune=layer.unison_detune,
                     unison_spread=layer.unison_spread,
-                    time_offset=t_start_rel
+                    time_offset=t_start_rel,
+                    t_vec=t_note
                 )
 
                 # 4. Traitement par le filtre State-Variable continu (sans clics inter-blocs)

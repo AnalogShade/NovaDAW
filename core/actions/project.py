@@ -435,6 +435,10 @@ def set_grid_action(app, resolution_beats: float = 1.0, snap_enabled: bool = Tru
         app.editing_toolbar.set_grid_resolution(res)
         app.editing_toolbar.set_snap_enabled(snap)
 
+    if hasattr(app, "ruler"):
+        app.ruler.set_grid_resolution(res)
+        app.ruler.set_snap_enabled(snap)
+
     return {
         "status": "success",
         "grid_resolution_beats": res,

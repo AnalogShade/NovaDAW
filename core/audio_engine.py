@@ -6,7 +6,12 @@ import threading
 import time
 from typing import Optional, List, Dict, Callable, Any
 import numpy as np
-import sounddevice as sd
+try:
+    import sounddevice as sd
+    HAS_SOUNDDEVICE = True
+except (ImportError, OSError):
+    sd = None
+    HAS_SOUNDDEVICE = False
 import soundfile as sf
 from core.project import Project, Track, MidiClip, AudioClip, MidiNote
 
@@ -68,21 +73,35 @@ class AudioEngine:
         global _global_audio_engine
         return _global_audio_engine
 
-    def __init__(self, sample_rate: int = 44100, block_size: int = 512, output_device: Optional[int] = None, input_device: Optional[int] = None):
+    def __init__(self, sample_rate: Optional[int] = None, block_size: Optional[int] = None, output_device: Optional[int] = None, input_device: Optional[int] = None):
         global _global_audio_engine
         _global_audio_engine = self
 
-        # Récupération des préférences matérielles si disponibles
+        # Configuration automatique universelle du matériel audio
         try:
             from core.hardware_manager import hardware_manager
             audio_cfg = hardware_manager.settings.get("audio", {})
-            self.sample_rate = int(audio_cfg.get("sample_rate", sample_rate))
-            self.block_size = int(audio_cfg.get("buffer_size", block_size))
-            self.output_device = audio_cfg.get("output_device_index") if output_device is None else output_device
+            out_idx = audio_cfg.get("output_device_index") if output_device is None else output_device
+
+            # Valider si le périphérique sauvegardé existe encore ou lancer l'auto-configuration
+            if out_idx is None or (HAS_SOUNDDEVICE and sd and out_idx >= len(sd.query_devices())):
+                audio_cfg = hardware_manager.auto_configure_audio()
+                out_idx = audio_cfg.get("output_device_index")
+
+            self.output_device = out_idx
             self.input_device = audio_cfg.get("input_device_index") if input_device is None else input_device
+            if self.output_device is None:
+                self.output_device = hardware_manager.get_default_output_device_index()
+            if self.input_device is None:
+                self.input_device = hardware_manager.get_default_input_device_index()
+
+            optimal_sr = hardware_manager.get_optimal_sample_rate(self.output_device)
+            self.sample_rate = int(audio_cfg.get("sample_rate", optimal_sr)) if sample_rate is None else sample_rate
+            optimal_buf = hardware_manager.get_optimal_buffer_size(self.output_device, self.sample_rate)
+            self.block_size = int(audio_cfg.get("buffer_size", optimal_buf)) if block_size is None else block_size
         except Exception:
-            self.sample_rate = sample_rate
-            self.block_size = block_size
+            self.sample_rate = sample_rate if sample_rate is not None else 44100
+            self.block_size = block_size if block_size is not None else 512
             self.output_device = output_device
             self.input_device = input_device
 
@@ -92,6 +111,11 @@ class AudioEngine:
         self.current_beat = 0.0
         self.master_volume = 0.9
 
+        # Système de Pré-rendu Audio et Cache ASIO-Guard en RAM (Hybrid Audio Engine)
+        self._track_audio_caches: Dict[str, Dict[str, Any]] = {}
+        self._track_cache_lock = threading.Lock()
+        self._asio_guard_enabled: bool = True
+
         # Enregistrement audio et MIDI
         self.is_recording = False
         self.recording_start_beat = 0.0
@@ -99,6 +123,7 @@ class AudioEngine:
         self._recorded_audio_blocks: List[np.ndarray] = []
         self._recorded_midi_notes: List[MidiNote] = []
         self._record_lock = threading.Lock()
+        self.record_latency_compensation_samples: int = 0
 
         # Instances VST3 chargées par piste (track_id -> plugin instance)
         self.plugin_errors = {}
@@ -117,11 +142,12 @@ class AudioEngine:
 
         # Tête de lecture et notification UI
         self.playhead_callback: Optional[Callable[[float], None]] = None
+        self.caching_progress_callback: Optional[Callable[[int, int, str], None]] = None
         self._stream: Optional[sd.OutputStream] = None
 
         self._start_stream()
 
-    def configure_device(self, output_device: Optional[int] = None, input_device: Optional[int] = None, sample_rate: Optional[int] = None, block_size: Optional[int] = None, buffer_size: Optional[int] = None) -> bool:
+    def configure_device(self, output_device: Optional[int] = None, input_device: Optional[int] = None, sample_rate: Optional[int] = None, block_size: Optional[int] = None, buffer_size: Optional[int] = None, record_offset_samples: Optional[int] = None, asio_guard: Optional[bool] = None) -> bool:
         """Modifie le périphérique audio, la fréquence d'échantillonnage ou la taille du buffer et redémarre le flux."""
         self.close()
         effective_buffer = buffer_size if buffer_size is not None else block_size
@@ -133,8 +159,12 @@ class AudioEngine:
             self.sample_rate = int(sample_rate)
         if effective_buffer is not None:
             self.block_size = int(effective_buffer)
+        if record_offset_samples is not None:
+            self.record_latency_compensation_samples = int(record_offset_samples)
+        if asio_guard is not None:
+            self._asio_guard_enabled = bool(asio_guard)
         self._start_stream()
-        return self._stream is not None
+        return self._stream is not None or os.environ.get("NOVADAW_SILENT_TESTS") == "1"
 
     def play_test_tone(self, freq: float = 440.0, duration_sec: float = 0.6):
         """Joue un accord harmonique doux (Fondamentale, Tierce, Quinte) pour tester la sortie audio."""
@@ -202,23 +232,86 @@ class AudioEngine:
         self.track_plugins.clear()
         with self._preview_lock:
             self._preview_buffers.clear()
+        self.invalidate_all_track_caches()
+        self._ensure_tracks_cached_async()
 
     def _start_stream(self):
-        try:
-            kwargs = {
-                "samplerate": self.sample_rate,
-                "blocksize": self.block_size,
-                "channels": 2,
-                "dtype": "float32",
-                "callback": self._audio_callback
-            }
-            if self.output_device is not None and self.output_device >= 0:
-                kwargs["device"] = self.output_device
+        if os.environ.get("NOVADAW_SILENT_TESTS") == "1":
+            self._stream = None
+            return
 
-            self._stream = sd.OutputStream(**kwargs)
-            self._stream.start()
-        except Exception as e:
-            print(f"[AudioEngine] Erreur initialisation flux audio: {e}")
+        from core.hardware_manager import hardware_manager
+
+        target_device = self.output_device
+        if target_device is not None and target_device < 0:
+            target_device = None
+
+        # Valider dynamiquement la fréquence optimale acceptée par le périphérique cible
+        valid_sr = hardware_manager.get_optimal_sample_rate(target_device)
+        candidate_srs = [valid_sr, self.sample_rate, 44100, 48000]
+        seen = set()
+        candidate_srs = [x for x in candidate_srs if not (x in seen or seen.add(x))]
+
+        opened = False
+        for sr in candidate_srs:
+            try:
+                # Tester d'abord la validité matérielle sans émettre d'erreur
+                if target_device is not None:
+                    sd.check_output_settings(device=target_device, samplerate=sr)
+                else:
+                    sd.check_output_settings(samplerate=sr)
+
+                kwargs = {
+                    "samplerate": sr,
+                    "blocksize": self.block_size,
+                    "channels": 2,
+                    "dtype": "float32",
+                    "callback": self._audio_callback
+                }
+                if target_device is not None:
+                    kwargs["device"] = target_device
+
+                self._stream = sd.OutputStream(**kwargs)
+                self._stream.start()
+                self.sample_rate = sr
+                opened = True
+                print(f"[AudioEngine] Flux audio démarré avec succès (device={target_device}, sr={sr}, block={self.block_size})")
+                break
+            except Exception:
+                continue
+
+        # Si le périphérique a échoué (ex: débranché ou invalide), déclencher l'auto-détection universelle
+        if not opened:
+            print("[AudioEngine] Repli vers auto-détection universelle du matériel...")
+            try:
+                new_cfg = hardware_manager.auto_configure_audio(force=True)
+                new_dev = new_cfg.get("output_device_index")
+                new_sr = new_cfg.get("sample_rate", 44100)
+                new_buf = new_cfg.get("buffer_size", 512)
+
+                kwargs = {
+                    "samplerate": new_sr,
+                    "blocksize": new_buf,
+                    "channels": 2,
+                    "dtype": "float32",
+                    "callback": self._audio_callback
+                }
+                if new_dev is not None and new_dev >= 0:
+                    kwargs["device"] = new_dev
+
+                self._stream = sd.OutputStream(**kwargs)
+                self._stream.start()
+                self.output_device = new_dev
+                self.sample_rate = new_sr
+                self.block_size = new_buf
+                opened = True
+                print(f"[AudioEngine] Flux audio rétabli avec succès via auto-détection ({new_sr} Hz) !")
+            except Exception as e_fallback:
+                print(f"[AudioEngine] Erreur critique d'initialisation du périphérique de secours: {e_fallback}")
+                self._stream = None
+
+        if not opened:
+            print("[AudioEngine] Avertissement : Impossible d'ouvrir un flux audio physique.")
             self._stream = None
 
     def close(self):
@@ -406,6 +499,15 @@ class AudioEngine:
             except Exception as e:
                 print(f"[AudioEngine] Erreur assemblage des blocs audio enregistrés : {e}")
 
+        # Compensation de latence d'enregistrement matérielle (Record Offset style Cubase 6)
+        offset = getattr(self, "record_latency_compensation_samples", 0)
+        if offset != 0 and audio_data is not None and len(audio_data) > abs(offset):
+            if offset > 0:
+                audio_data = audio_data[offset:]
+            else:
+                pad = np.zeros((-offset, audio_data.shape[1]), dtype=np.float32)
+                audio_data = np.vstack((pad, audio_data))
+
         return {
             "start_beat": self.recording_start_beat,
             "audio": audio_data,
@@ -414,7 +516,24 @@ class AudioEngine:
 
 
     def play(self):
+        """Démarre la lecture IMMÉDIATEMENT (0 ms de latence UI)."""
         self.is_playing = True
+
+        # S'assurer que le flux audio physique est actif
+        if (self._stream is None or not getattr(self._stream, "active", False)) and os.environ.get("NOVADAW_SILENT_TESTS") != "1":
+            self._start_stream()
+
+        # Pré-chauffage et pré-calcul des caches ASIO-Guard en arrière-plan (zéro blocage UI)
+        if self.project:
+            for track in self.project.tracks:
+                inst = self.get_native_instrument(track)
+                if inst and hasattr(inst, "warm_up_cache"):
+                    try:
+                        inst.warm_up_cache(async_bg=True)
+                    except Exception:
+                        pass
+            if self._asio_guard_enabled:
+                self._ensure_tracks_cached_async()
 
     def pause(self):
         self.is_playing = False
@@ -730,10 +849,11 @@ class AudioEngine:
             has_solo = any(t.soloed for t in self.project.tracks)
 
             # Rendu piste par piste
+            mixer_plugin = self._get_active_mixer_plugin()
             for track in self.project.tracks:
-                if track.muted:
-                    continue
-                if has_solo and not track.soloed:
+                if track.muted or (has_solo and not track.soloed):
+                    if mixer_plugin:
+                        mixer_plugin.update_track_peak(track.id, 0.0, 0.0)
                     continue
 
                 track_signal = self._render_track_slice(track, start_beat, end_beat, frames, bpm)
@@ -749,7 +869,12 @@ class AudioEngine:
 
             # Avancement de la tête de lecture
             if wrapped and self.project.loop_enabled:
-                self.current_beat = self.project.loop_start_beat
+                loop_len = self.project.loop_end_beat - self.project.loop_start_beat
+                if loop_len > 0:
+                    overshoot = end_beat - self.project.loop_end_beat
+                    self.current_beat = self.project.loop_start_beat + (overshoot % loop_len)
+                else:
+                    self.current_beat = self.project.loop_start_beat
             else:
                 self.current_beat = end_beat
 
@@ -845,7 +970,382 @@ class AudioEngine:
 
         return track_buf
 
+    def invalidate_track_cache(self, track_id: Optional[str] = None, trigger_async: bool = True):
+        """Invalide le cache audio d'une piste ou de toutes les pistes lors d'une modification de note ou plugin."""
+        with self._track_cache_lock:
+            if track_id:
+                self._track_audio_caches.pop(track_id, None)
+            else:
+                self._track_audio_caches.clear()
+        if trigger_async:
+            self._schedule_debounce_caching()
+
+    def invalidate_all_track_caches(self, trigger_async: bool = False):
+        """Vide l'intégralité du cache RAM ASIO-Guard."""
+        with self._track_cache_lock:
+            self._track_audio_caches.clear()
+        if trigger_async:
+            self._schedule_debounce_caching()
+
+    def _schedule_debounce_caching(self, delay: float = 0.35):
+        """Planifie un pré-rendu en arrière-plan avec debounce pour ne pas surcharger le processeur."""
+        try:
+            if getattr(self, "_debounce_timer", None) is not None:
+                self._debounce_timer.cancel()
+        except Exception:
+            pass
+        self._debounce_timer = threading.Timer(delay, self._ensure_tracks_cached_async)
+        self._debounce_timer.daemon = True
+        self._debounce_timer.start()
+
+    def _ensure_tracks_cached_async(self, force: bool = False):
+        """Lance le pré-calcul des caches de pistes en arrière-plan sans bloquer l'interface."""
+        if not self._asio_guard_enabled or not self.project:
+            return
+        threading.Thread(
+            target=self._ensure_tracks_cached,
+            args=(force,),
+            daemon=True,
+            name="NovaDAW-AsioGuard-PreRender"
+        ).start()
+
+    def _compute_track_hash(self, track: Track, bpm: float, sample_rate: int) -> str:
+        """Calcule une empreinte rapide des notes, clips et état d'instrument pour valider le cache ASIO-Guard."""
+        parts = [track.id, str(track.plugin_path or ""), f"{bpm:.2f}", str(sample_rate)]
+
+        # 1. État de l'instrument (direct ou routé vers une autre piste)
+        target_track = None
+        if getattr(track, "synth_route_track_id", None) and self.project:
+            target_track = self.project.get_track(track.synth_route_track_id)
+        native_inst = self.get_native_instrument(target_track) if target_track else self.get_native_instrument(track)
+        if native_inst and hasattr(native_inst, "get_state"):
+            try:
+                parts.append(str(native_inst.get_state()))
+            except Exception:
+                pass
+
+        # 2. Inserts natifs
+        for p in getattr(track, "plugins", []):
+            if hasattr(p, "get_state"):
+                try:
+                    parts.append(str(p.get_state()))
+                except Exception:
+                    pass
+            elif hasattr(p, "plugin_type_id"):
+                parts.append(str(getattr(p, "plugin_type_id", "")))
+
+        # 3. Inserts VST externes
+        for fx in getattr(track, "insert_effects", []):
+            parts.append(str(fx))
+
+        # 4. Clips et notes MIDI / audio
+        for c in track.clips:
+            if isinstance(c, MidiClip):
+                parts.append(f"M:{c.id}:{c.start_beat:.3f}:{c.length_beats:.3f}:{len(c.notes)}")
+                for n in c.notes:
+                    parts.append(f"{n.pitch}:{n.start_beat:.3f}:{n.duration:.3f}:{n.velocity}")
+            elif isinstance(c, AudioClip):
+                parts.append(f"A:{c.id}:{c.start_beat:.3f}:{c.length_beats:.3f}:{getattr(c, 'file_path', '')}")
+
+        import hashlib
+        return hashlib.md5("".join(parts).encode("utf-8")).hexdigest()
+
+    def _render_track_offline(self, track: Track, bpm: float, sample_rate: int, end_beat: float, progress_callback: Optional[Callable[[float], None]] = None) -> Optional[np.ndarray]:
+        """
+        Rendu offline haute vitesse d'une piste complète en mémoire RAM (ASIO-Guard).
+        Élimine tout calcul d'oscillateur ou de filtre lors de la lecture continue.
+        """
+        beats_per_sec = bpm / 60.0
+        total_sec = end_beat / beats_per_sec
+        total_frames = max(1024, int(total_sec * sample_rate))
+        buf = np.zeros((total_frames, 2), dtype=np.float32)
+
+        # 1. Rendu des clips MIDI
+        if track.track_type == "midi":
+            target_track = None
+            if getattr(track, "synth_route_track_id", None) and self.project:
+                target_track = self.project.get_track(track.synth_route_track_id)
+            native_inst = self.get_native_instrument(target_track) if target_track else self.get_native_instrument(track)
+
+            if native_inst and hasattr(native_inst, "render_slice"):
+                is_drum = (getattr(native_inst, "plugin_type_id", None) == "novadaw.drum_machine" or
+                           getattr(track, "plugin_path", None) == "novadaw.drum_machine")
+                release_tail_beats = 0.0 if is_drum else 2.0
+                bus_idx = getattr(track, "synth_output_bus", None)
+
+                # Pré-collecter toutes les notes MIDI de la piste une seule fois
+                all_midi_notes = []
+                for clip in track.clips:
+                    if not isinstance(clip, MidiClip):
+                        continue
+                    cs = clip.start_beat
+                    for note in clip.notes:
+                        all_midi_notes.append(MidiNote(
+                            pitch=note.pitch,
+                            start_beat=cs + note.start_beat,
+                            duration=note.duration,
+                            velocity=note.velocity
+                        ))
+                all_midi_notes.sort(key=lambda n: n.start_beat)
+
+                # Créer des instances isolées pour NovaSynth afin de ne jamais perturber les états de lecture temps réel
+                iso_delay = None
+                iso_reverb = None
+                iso_svfs = None
+                if getattr(native_inst, "plugin_type_id", None) == "novadaw.synth" and hasattr(native_inst, "_render_slice_internal"):
+                    try:
+                        from plugins.synth.synth_dsp import StereoPingPongDelay, StereoStudioReverb
+                        iso_delay = StereoPingPongDelay(sample_rate=sample_rate)
+                        if hasattr(native_inst, "delay"):
+                            iso_delay.enabled = native_inst.delay.enabled
+                            iso_delay.time_sec = native_inst.delay.time_sec
+                            iso_delay.feedback = native_inst.delay.feedback
+                            iso_delay.ping_pong = native_inst.delay.ping_pong
+                            iso_delay.mix = native_inst.delay.mix
+                        iso_reverb = StereoStudioReverb(sample_rate=sample_rate)
+                        if hasattr(native_inst, "reverb"):
+                            iso_reverb.enabled = native_inst.reverb.enabled
+                            iso_reverb.room_size = native_inst.reverb.room_size
+                            iso_reverb.damping = native_inst.reverb.damping
+                            iso_reverb.width = native_inst.reverb.width
+                            iso_reverb.mix = native_inst.reverb.mix
+                        iso_svfs = {}
+                    except Exception:
+                        iso_delay = None
+
+                # Traitement par blocs optimisés de 16384 échantillons (continuité fluide et rendu ultra-rapide)
+                chunk_frames = 16384
+                for f_idx in range(0, total_frames, chunk_frames):
+                    n = min(chunk_frames, total_frames - f_idx)
+                    sb = (f_idx / sample_rate) * beats_per_sec
+                    eb = ((f_idx + n) / sample_rate) * beats_per_sec
+
+                    if progress_callback and total_frames > 0:
+                        try:
+                            progress_callback(min(1.0, f_idx / total_frames))
+                        except Exception:
+                            pass
+
+                    chunk_notes = [
+                        note for note in all_midi_notes
+                        if note.start_beat < eb and (note.start_beat + note.duration + release_tail_beats) > sb
+                    ]
+
+                    if chunk_notes:
+                        try:
+                            if iso_delay is not None:
+                                rendered = native_inst._render_slice_internal(
+                                    chunk_notes, sb, eb, beats_per_sec, n, sample_rate,
+                                    bus_index=bus_idx,
+                                    target_delay=iso_delay,
+                                    target_reverb=iso_reverb,
+                                    voice_svf_dict=iso_svfs,
+                                    use_live_state=False
+                                )
+                            elif bus_idx is not None:
+                                try:
+                                    rendered = native_inst.render_slice(chunk_notes, sb, eb, beats_per_sec, n, sample_rate, bus_index=bus_idx)
+                                except TypeError:
+                                    rendered = native_inst.render_slice(chunk_notes, sb, eb, beats_per_sec, n, sample_rate)
+                            else:
+                                rendered = native_inst.render_slice(chunk_notes, sb, eb, beats_per_sec, n, sample_rate)
+
+                            if rendered is not None and len(rendered) > 0:
+                                buf[f_idx:f_idx + n] = rendered[:n]
+                        except Exception as e:
+                            print(f"[AudioEngine] Erreur pré-rendu tranche {track.name}: {e}")
+
+        # 2. Rendu des clips Audio
+        for clip in track.clips:
+            if not isinstance(clip, AudioClip) or clip.audio_data is None:
+                continue
+            cs_b = clip.start_beat
+            dur_sec = clip.length_beats / beats_per_sec
+            clip_frames = int(dur_sec * sample_rate)
+            dest_start = int((cs_b / beats_per_sec) * sample_rate)
+            if dest_start < total_frames:
+                src_samples = clip.audio_data
+                to_copy = min(len(src_samples), clip_frames, total_frames - dest_start)
+                if to_copy > 0:
+                    if src_samples.ndim == 1:
+                        buf[dest_start:dest_start + to_copy, 0] += src_samples[:to_copy] * clip.gain
+                        buf[dest_start:dest_start + to_copy, 1] += src_samples[:to_copy] * clip.gain
+                    else:
+                        buf[dest_start:dest_start + to_copy] += src_samples[:to_copy, :2] * clip.gain
+
+        # 3. Inserts de la piste (Égaliseur, Compresseur) avec état isolé
+        if hasattr(track, "plugins") and track.plugins:
+            for plugin in track.plugins:
+                if getattr(plugin, "is_instrument", False):
+                    continue
+                if getattr(plugin, "enabled", True) and hasattr(plugin, "process"):
+                    try:
+                        if hasattr(plugin, "get_state") and hasattr(plugin, "set_state"):
+                            iso_plugin = plugin.__class__()
+                            iso_plugin.set_state(plugin.get_state())
+                            buf = iso_plugin.process(buf, sample_rate)
+                        elif hasattr(plugin, "clone"):
+                            iso_plugin = plugin.clone()
+                            buf = iso_plugin.process(buf, sample_rate)
+                        else:
+                            buf = plugin.process(buf, sample_rate)
+                    except Exception:
+                        pass
+
+        # 4. Effets VST3 d'inserts (Pedalboard / VST)
+        if hasattr(track, "insert_effects") and track.insert_effects:
+            try:
+                buf = self._process_vst_effects(track, buf)
+            except Exception:
+                pass
+
+        if progress_callback:
+            try:
+                progress_callback(1.0)
+            except Exception:
+                pass
+
+        return buf
+
+    def _report_caching_progress(self, current: int, total: int, track_name: str, progress: float = 0.0):
+        cb = self.caching_progress_callback
+        if not cb:
+            return
+        try:
+            cb(current, total, track_name, progress)
+        except TypeError:
+            try:
+                cb(current, total, track_name)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _ensure_tracks_cached(self, force: bool = False):
+        """Vérifie et pré-calcule le cache audio de toutes les pistes inactives pour la lecture (ASIO-Guard)."""
+        if not self.project:
+            return
+
+        bpm = max(20.0, self.project.bpm)
+        sample_rate = self.sample_rate
+
+        max_beat = 16.0
+        if self.project.loop_enabled and self.project.loop_end_beat > 0:
+            max_beat = max(max_beat, self.project.loop_end_beat)
+        for t in self.project.tracks:
+            for c in t.clips:
+                max_beat = max(max_beat, c.start_beat + c.length_beats)
+        end_beat = max_beat + 4.0
+
+        # Priorité de rendu : pistes en solo d'abord, puis pistes actives non muettes
+        sorted_tracks = sorted(
+            self.project.tracks,
+            key=lambda t: (not t.soloed, t.muted)
+        )
+        total_tracks = max(1, len(sorted_tracks))
+
+        for i, track in enumerate(sorted_tracks):
+            # Ne pas pré-calculer les pistes armées pour l'enregistrement (faible latence temps réel)
+            if getattr(track, "armed", False):
+                continue
+            thash = self._compute_track_hash(track, bpm, sample_rate)
+            with self._track_cache_lock:
+                cache = self._track_audio_caches.get(track.id)
+                if (not force and cache is not None and cache.get("is_valid", False)
+                    and cache.get("fully_rendered", False)
+                    and cache.get("version_hash") == thash and cache.get("audio") is not None):
+                    self._report_caching_progress(i + 1, total_tracks, track.name, (i + 1) / total_tracks)
+                    continue
+
+            self._report_caching_progress(i, total_tracks, track.name, i / total_tracks)
+
+            def _track_subprogress(sub_pct: float, track_idx=i, track_name=track.name):
+                overall = (track_idx + sub_pct) / total_tracks
+                self._report_caching_progress(track_idx, total_tracks, track_name, overall)
+
+            rendered = self._render_track_offline(track, bpm, sample_rate, end_beat, progress_callback=_track_subprogress)
+            if rendered is not None:
+                with self._track_cache_lock:
+                    self._track_audio_caches[track.id] = {
+                        "audio": rendered,
+                        "bpm": bpm,
+                        "sample_rate": sample_rate,
+                        "total_beats": end_beat,
+                        "version_hash": thash,
+                        "is_valid": True,
+                        "fully_rendered": True
+                    }
+
+            self._report_caching_progress(i + 1, total_tracks, track.name, (i + 1) / total_tracks)
+
+        self._report_caching_progress(total_tracks, total_tracks, "Prêt", 1.0)
+
+    def _get_cached_track_slice(self, track: Track, start_b: float, end_b: float, frames: int, bpm: float) -> Optional[np.ndarray]:
+        """
+        Récupère instantanément la tranche audio pré-calculée en RAM (ASIO-Guard).
+        Temps d'exécution < 1 microseconde (0% CPU).
+        """
+        with self._track_cache_lock:
+            cache = self._track_audio_caches.get(track.id)
+            if cache is None or not cache.get("is_valid", False) or not cache.get("fully_rendered", False) or cache.get("audio") is None:
+                return None
+
+            beats_per_sec = bpm / 60.0
+            s_start = int((start_b / beats_per_sec) * self.sample_rate)
+            s_end = s_start + frames
+
+            buf = cache["audio"]
+            cache_sr = cache.get("sample_rate", self.sample_rate)
+
+        if len(buf) == 0 or cache_sr != self.sample_rate:
+            return None
+
+        # Gestion de la boucle si activée
+        if self.project and self.project.loop_enabled and self.project.loop_end_beat > self.project.loop_start_beat:
+            loop_s_start = int((self.project.loop_start_beat / beats_per_sec) * self.sample_rate)
+            loop_s_end = int((self.project.loop_end_beat / beats_per_sec) * self.sample_rate)
+            loop_len = max(1, loop_s_end - loop_s_start)
+
+            # Si start_b dépasse la boucle, replier start_b
+            if s_start >= loop_s_end:
+                s_start = loop_s_start + ((s_start - loop_s_start) % loop_len)
+                s_end = s_start + frames
+
+            if s_end <= loop_s_end and s_end <= len(buf):
+                return buf[s_start:s_end].copy()
+            else:
+                boundary = min(loop_s_end, len(buf))
+                p1 = max(0, boundary - s_start)
+                out = np.zeros((frames, 2), dtype=np.float32)
+                if p1 > 0:
+                    out[:p1] = buf[s_start:boundary]
+                rem = frames - p1
+                if rem > 0 and loop_s_start + rem <= len(buf):
+                    out[p1:] = buf[loop_s_start:loop_s_start + rem]
+                return out
+        else:
+            if s_end <= len(buf):
+                return buf[s_start:s_end].copy()
+            elif s_start < len(buf):
+                out = np.zeros((frames, 2), dtype=np.float32)
+                p1 = len(buf) - s_start
+                out[:p1] = buf[s_start:]
+                return out
+            else:
+                return np.zeros((frames, 2), dtype=np.float32)
+
     def _render_track_slice(self, track: Track, start_b: float, end_b: float, frames: int, bpm: float) -> Optional[np.ndarray]:
+        # 0. ASIO-Guard Cache Hit: Si la piste n'est pas armée pour l'enregistrement et dispose d'un cache valide
+        if self._asio_guard_enabled and not getattr(track, "armed", False):
+            cached_signal = self._get_cached_track_slice(track, start_b, end_b, frames, bpm)
+            if cached_signal is not None:
+                mixer_plugin = self._get_active_mixer_plugin()
+                if mixer_plugin and len(cached_signal) > 0:
+                    pk_l = float(np.max(np.abs(cached_signal[:, 0])))
+                    pk_r = float(np.max(np.abs(cached_signal[:, 1])))
+                    mixer_plugin.update_track_peak(track.id, pk_l, pk_r)
+                return cached_signal
+
         track_buf = np.zeros((frames, 2), dtype=np.float32)
         beats_per_sec = bpm / 60.0
 
@@ -861,8 +1361,10 @@ class AudioEngine:
 
             if native_inst and hasattr(native_inst, "render_slice"):
                 clip_notes = []
-                # Marge de queue de release ADSR pour éviter toute troncature brutale et éliminer tout clic de note-off
-                release_tail_beats = 4.0
+                # Marge de queue de release ADSR adaptée (0 pour batterie one-shot, 1.5 pour synthé)
+                is_drum = (getattr(native_inst, "plugin_type_id", None) == "novadaw.drum_machine" or
+                           getattr(track, "plugin_path", None) == "novadaw.drum_machine")
+                release_tail_beats = 0.0 if is_drum else 1.5
                 for clip in track.clips:
                     if not isinstance(clip, MidiClip):
                         continue

@@ -167,10 +167,17 @@ class DeviceSettingsDialog(QDialog):
         bottom_layout = QHBoxLayout()
         bottom_layout.setSpacing(10)
 
-        self.btn_test_sound = QPushButton("▶ Tester la Sortie Audio")
+        self.btn_test_sound = QPushButton("▶ Tester la Sortie Audio (440 Hz)")
         self.btn_test_sound.setStyleSheet("background-color: #0284c7; color: white; font-weight: bold; padding: 6px 14px;")
+        self.btn_test_sound.setToolTip("Joue un accord harmonique de test doux pour vérifier la sortie audio active")
         self.btn_test_sound.clicked.connect(self._on_test_sound)
         bottom_layout.addWidget(self.btn_test_sound)
+
+        self.btn_reset_engine = QPushButton("⚡ Réinitialiser le Moteur")
+        self.btn_reset_engine.setStyleSheet("background-color: #1e293b; color: #38bdf8; border: 1px solid #334155; font-weight: bold; padding: 6px 14px;")
+        self.btn_reset_engine.setToolTip("Redémarre le flux audio avec les paramètres actifs sans fermer la fenêtre")
+        self.btn_reset_engine.clicked.connect(self._on_reset_engine)
+        bottom_layout.addWidget(self.btn_reset_engine)
 
         bottom_layout.addStretch()
 
@@ -186,59 +193,190 @@ class DeviceSettingsDialog(QDialog):
         main_layout.addLayout(bottom_layout)
 
     def _setup_audio_tab(self):
-        layout = QVBoxLayout(self.tab_audio)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(14)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("background: transparent;")
 
-        grp_driver = QGroupBox("Pilote Audio & Système Hôte")
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(12)
+
+        # --- GROUPE 1 : SYSTÈME AUDIO VST & PILOTE (STYLE CUBASE) ---
+        grp_driver = QGroupBox("Système Audio VST & Pilote Matériel (style Cubase)")
         grp_driver_l = QFormLayout(grp_driver)
         grp_driver_l.setContentsMargins(14, 22, 14, 14)
         grp_driver_l.setVerticalSpacing(12)
 
         self.combo_host_api = QComboBox()
         self.combo_host_api.currentIndexChanged.connect(self._on_host_api_changed)
-        grp_driver_l.addRow("Interface / Système Hôte :", self.combo_host_api)
+        grp_driver_l.addRow("Pilote Audio / Système Hôte :", self.combo_host_api)
+
+        row_cp = QHBoxLayout()
+        row_cp.setSpacing(10)
+        self.btn_open_control_panel = QPushButton("🎛️ Panneau de configuration du pilote...")
+        self.btn_open_control_panel.setToolTip("Ouvre directement le panneau natif du fabricant (Avid Eleven Rack, Focusrite Control, RME TotalMix, ASIO4ALL) ou Windows Sound CPL.")
+        self.btn_open_control_panel.setStyleSheet("""
+            QPushButton {
+                background-color: #162032;
+                color: #38bdf8;
+                border: 1px solid #0284c7;
+                border-radius: 4px;
+                padding: 5px 14px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #0284c7;
+                color: #ffffff;
+            }
+        """)
+        self.btn_open_control_panel.clicked.connect(self._on_open_driver_control_panel)
+        self.btn_control_panel = self.btn_open_control_panel
+        row_cp.addWidget(self.btn_open_control_panel)
+
+        self.lbl_control_panel_status = QLabel("Accès direct au pilote matériel de la carte audio")
+        self.lbl_control_panel_status.setStyleSheet("color: #64748b; font-size: 11px; font-style: italic;")
+        row_cp.addWidget(self.lbl_control_panel_status)
+        row_cp.addStretch()
+        grp_driver_l.addRow("Tableau de Bord Driver :", row_cp)
 
         layout.addWidget(grp_driver)
 
-        grp_devices = QGroupBox("Routage des Périphériques")
+        # --- GROUPE 2 : ROUTAGE DES ENTRÉES / SORTIES ---
+        grp_devices = QGroupBox("Routage des Périphériques Audio")
         grp_devices_l = QFormLayout(grp_devices)
         grp_devices_l.setContentsMargins(14, 22, 14, 14)
         grp_devices_l.setVerticalSpacing(12)
 
         self.combo_output = QComboBox()
         self.combo_output.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        grp_devices_l.addRow("Périphérique de Sortie (Haut-parleurs / Casque) :", self.combo_output)
+        self.combo_output.currentIndexChanged.connect(self._update_latency_label)
+        grp_devices_l.addRow("Périphérique de Sortie (Haut-parleurs / Écouteurs) :", self.combo_output)
 
         self.combo_input = QComboBox()
         self.combo_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        grp_devices_l.addRow("Périphérique d'Entrée (Microphone / Ligne) :", self.combo_input)
+        self.combo_input.currentIndexChanged.connect(self._update_latency_label)
+        grp_devices_l.addRow("Périphérique d'Entrée (Microphone / Guitare / Ligne) :", self.combo_input)
 
         layout.addWidget(grp_devices)
 
-        grp_dsp = QGroupBox("Performance & Latence du Signal")
+        # --- GROUPE 3 : PARAMÈTRES DE BUFFER & FRÉQUENCE D'ÉCHANTILLONNAGE ---
+        grp_dsp = QGroupBox("Paramètres de Buffer & Échantillonnage")
         grp_dsp_l = QFormLayout(grp_dsp)
         grp_dsp_l.setContentsMargins(14, 22, 14, 14)
         grp_dsp_l.setVerticalSpacing(12)
 
         self.combo_sample_rate = QComboBox()
         for sr in hardware_manager.get_supported_sample_rates():
-            self.combo_sample_rate.addItem(f"{sr} Hz" if sr < 100000 else f"{sr // 1000} kHz", sr)
+            label = f"{sr} Hz" if sr < 100000 else f"{sr // 1000} kHz"
+            if sr == 44100: label += " (Standard CD / Audio)"
+            elif sr == 48000: label += " (Standard Studio & Vidéo)"
+            elif sr == 96000: label += " (Haute Résolution Studio)"
+            self.combo_sample_rate.addItem(label, sr)
         self.combo_sample_rate.currentIndexChanged.connect(self._update_latency_label)
         grp_dsp_l.addRow("Fréquence d'Échantillonnage :", self.combo_sample_rate)
 
         self.combo_buffer_size = QComboBox()
         for buf in hardware_manager.get_supported_buffer_sizes():
-            self.combo_buffer_size.addItem(f"{buf} échantillons", buf)
+            approx_ms = (buf / 44100.0) * 1000.0
+            desc = ""
+            if buf <= 64: desc = " - Latence Ultra-Faible / Direct Monitoring"
+            elif buf <= 128: desc = " - Performance Studio / Guitare & Voix"
+            elif buf <= 256: desc = " - Recommandé (Mixage & Enregistrement)"
+            elif buf <= 512: desc = " - Standard Équilibré"
+            elif buf <= 1024: desc = " - Projets Lourds / Mixage Haute Capacité"
+            else: desc = " - Stabilité Maximale / Rendu"
+            self.combo_buffer_size.addItem(f"{buf} échantillons ({approx_ms:.1f} ms){desc}", buf)
         self.combo_buffer_size.currentIndexChanged.connect(self._update_latency_label)
         grp_dsp_l.addRow("Taille du Tampon (Buffer Size) :", self.combo_buffer_size)
 
-        self.lbl_latency = QLabel("Latence calculée : -- ms")
-        self.lbl_latency.setStyleSheet("color: #38bdf8; font-weight: bold; font-family: Consolas;")
-        grp_dsp_l.addRow("Latence Estimée :", self.lbl_latency)
-
         layout.addWidget(grp_dsp)
+
+        # --- GROUPE 4 : TABLEAU DE BORD DE LATENCE & COMPENSATION (STYLE CUBASE 6) ---
+        grp_latency = QGroupBox("Tableau de Bord de Latence & Décalage (style Cubase 6)")
+        grp_lat_l = QVBoxLayout(grp_latency)
+        grp_lat_l.setContentsMargins(14, 20, 14, 14)
+        grp_lat_l.setSpacing(10)
+
+        frame_metrics = QFrame()
+        frame_metrics.setStyleSheet("background-color: #0f121c; border: 1px solid #232838; border-radius: 6px; padding: 6px;")
+        f_met_l = QHBoxLayout(frame_metrics)
+        f_met_l.setContentsMargins(10, 8, 10, 8)
+        f_met_l.setSpacing(16)
+
+        def _make_metric_box(title, default_val, color="#38bdf8"):
+            box = QVBoxLayout()
+            box.setSpacing(2)
+            lbl_t = QLabel(title)
+            lbl_t.setStyleSheet("color: #94a3b8; font-size: 10px; font-weight: bold;")
+            lbl_v = QLabel(default_val)
+            lbl_v.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: bold; font-family: Consolas;")
+            box.addWidget(lbl_t)
+            box.addWidget(lbl_v)
+            return box, lbl_v
+
+        b_in, self.lbl_in_latency = _make_metric_box("📥 Latence Entrée", "-- ms", "#38bdf8")
+        b_out, self.lbl_out_latency = _make_metric_box("📤 Latence Sortie", "-- ms", "#38bdf8")
+        b_rtl, self.lbl_rtl_latency = _make_metric_box("🔄 Aller-Retour (RTL)", "-- ms", "#34d399")
+        b_buf, self.lbl_buf_duration = _make_metric_box("⏱️ Durée Tampon", "-- ms", "#facc15")
+
+        f_met_l.addLayout(b_in)
+        f_met_l.addLayout(b_out)
+        f_met_l.addLayout(b_rtl)
+        f_met_l.addLayout(b_buf)
+        grp_lat_l.addWidget(frame_metrics)
+
+        row_offset = QHBoxLayout()
+        row_offset.setSpacing(10)
+        lbl_off_title = QLabel("Compensation de Latence d'Enregistrement (Record Placement Offset) :")
+        lbl_off_title.setStyleSheet("font-size: 11px; font-weight: bold;")
+        row_offset.addWidget(lbl_off_title)
+
+        self.spin_record_offset = QSpinBox()
+        self.spin_record_offset.setRange(-4096, 4096)
+        self.spin_record_offset.setSingleStep(16)
+        self.spin_record_offset.setValue(0)
+        self.spin_record_offset.setSuffix(" éch.")
+        self.spin_record_offset.setFixedWidth(115)
+        self.spin_record_offset.setStyleSheet("background-color: #1a1d29; border: 1px solid #31374a; padding: 3px 6px; font-family: Consolas;")
+        self.spin_record_offset.setToolTip("Compense le décalage matériel des convertisseurs (Record Placement Offset de Cubase 6)")
+        self.spin_record_offset.valueChanged.connect(self._on_record_offset_changed)
+        row_offset.addWidget(self.spin_record_offset)
+
+        self.lbl_offset_ms = QLabel("(0.00 ms)")
+        self.lbl_offset_ms.setStyleSheet("color: #94a3b8; font-size: 11px; font-family: Consolas;")
+        row_offset.addWidget(self.lbl_offset_ms)
+        row_offset.addStretch()
+        grp_lat_l.addLayout(row_offset)
+
+        layout.addWidget(grp_latency)
+
+        # --- GROUPE 5 : OPTIONS PERFORMANCE & ASIO-GUARD ---
+        grp_perf = QGroupBox("Moteur Audio & Optimisations ASIO-Guard")
+        grp_perf_l = QVBoxLayout(grp_perf)
+        grp_perf_l.setContentsMargins(14, 20, 14, 14)
+        grp_perf_l.setSpacing(8)
+
+        self.chk_asio_guard = QCheckBox("Activer le moteur ASIO-Guard (Pré-calcul RAM multi-pistes zéro-craquement)")
+        self.chk_asio_guard.setChecked(True)
+        self.chk_asio_guard.setToolTip("Garantit une lecture fluide même avec des dizaines de pistes et instruments virtuels")
+        grp_perf_l.addWidget(self.chk_asio_guard)
+
+        self.chk_release_background = QCheckBox("Libérer le pilote audio lorsque NovaDAW est en arrière-plan")
+        self.chk_release_background.setChecked(False)
+        self.chk_release_background.setToolTip("Permet à d'autres applications (lecteur média, navigateur) d'accéder au périphérique audio quand NovaDAW est minimisé")
+        grp_perf_l.addWidget(self.chk_release_background)
+
+        layout.addWidget(grp_perf)
+
         layout.addStretch()
+
+        scroll.setWidget(container)
+        tab_audio_l = QVBoxLayout(self.tab_audio)
+        tab_audio_l.setContentsMargins(0, 0, 0, 0)
+        tab_audio_l.addWidget(scroll)
 
     def _setup_gpu_tab(self):
         layout = QVBoxLayout(self.tab_gpu)
@@ -412,10 +550,23 @@ class DeviceSettingsDialog(QDialog):
         if idx_sr >= 0:
             self.combo_sample_rate.setCurrentIndex(idx_sr)
 
-        cur_buf = getattr(self.audio_engine, "block_size", 512)
+        cur_buf = getattr(self.audio_engine, "block_size", 256)
         idx_buf = self.combo_buffer_size.findData(cur_buf)
         if idx_buf >= 0:
             self.combo_buffer_size.setCurrentIndex(idx_buf)
+
+        # 2b. Compensation de latence d'enregistrement & Options Moteur (style Cubase 6)
+        rec_offset = hardware_manager.settings.get("audio", {}).get("record_offset_samples", 0)
+        if hasattr(self, "spin_record_offset"):
+            self.spin_record_offset.setValue(rec_offset)
+
+        asio_guard = hardware_manager.settings.get("audio", {}).get("asio_guard_enabled", True)
+        if hasattr(self, "chk_asio_guard"):
+            self.chk_asio_guard.setChecked(asio_guard)
+
+        rel_bg = hardware_manager.settings.get("audio", {}).get("release_driver_background", False)
+        if hasattr(self, "chk_release_background"):
+            self.chk_release_background.setChecked(rel_bg)
 
         self._update_latency_label()
 
@@ -472,12 +623,80 @@ class DeviceSettingsDialog(QDialog):
                 sel_in_idx = idx + 1
 
         self.combo_input.setCurrentIndex(sel_in_idx)
+        self._update_latency_label()
 
     def _update_latency_label(self):
         sr = self.combo_sample_rate.currentData() or 44100
-        buf = self.combo_buffer_size.currentData() or 512
-        lat = hardware_manager.calculate_latency_ms(buf, sr)
-        self.lbl_latency.setText(f"Latence théorique du buffer : {lat:.2f} ms @ {sr} Hz")
+        buf = self.combo_buffer_size.currentData() or 256
+        out_idx = self.combo_output.currentData()
+        in_idx = self.combo_input.currentData()
+
+        out_dev = out_idx if out_idx is not None and out_idx >= 0 else None
+        in_dev = in_idx if in_idx is not None and in_idx >= 0 else None
+
+        latencies = hardware_manager.get_device_latencies(
+            input_device_index=in_dev,
+            output_device_index=out_dev,
+            buffer_size=buf,
+            sample_rate=sr
+        )
+
+        in_ms = latencies.get("input_ms", latencies.get("input_latency_ms", 0.0))
+        out_ms = latencies.get("output_ms", latencies.get("output_latency_ms", 0.0))
+        rtl_ms = latencies.get("roundtrip_ms", latencies.get("roundtrip_latency_ms", 0.0))
+        buf_ms = latencies.get("buffer_ms", latencies.get("buffer_duration_ms", 0.0))
+
+        if hasattr(self, "lbl_in_latency"):
+            self.lbl_in_latency.setText(f"{in_ms:.1f} ms")
+        if hasattr(self, "lbl_out_latency"):
+            self.lbl_out_latency.setText(f"{out_ms:.1f} ms")
+        if hasattr(self, "lbl_rtl_latency"):
+            self.lbl_rtl_latency.setText(f"{rtl_ms:.1f} ms")
+        if hasattr(self, "lbl_buf_duration"):
+            self.lbl_buf_duration.setText(f"{buf_ms:.1f} ms")
+        if hasattr(self, "lbl_latency"):
+            self.lbl_latency.setText(f"Latence théorique du buffer : {buf_ms:.2f} ms @ {sr} Hz (RTL estimé : {rtl_ms:.1f} ms)")
+        if hasattr(self, "spin_record_offset"):
+            self._on_record_offset_changed(self.spin_record_offset.value())
+
+    def _on_record_offset_changed(self, val: int):
+        sr = self.combo_sample_rate.currentData() or 44100
+        offset_ms = (val / sr) * 1000.0 if sr > 0 else 0.0
+        sign = "+" if offset_ms > 0 else ""
+        if hasattr(self, "lbl_offset_ms"):
+            self.lbl_offset_ms.setText(f"({sign}{offset_ms:.2f} ms)")
+
+    def _on_open_driver_control_panel(self):
+        success, msg = hardware_manager.open_audio_driver_control_panel()
+        if hasattr(self, "lbl_control_panel_status"):
+            color = "#00E5FF" if success else "#FF5252"
+            self.lbl_control_panel_status.setStyleSheet(f"color: {color}; font-size: 11px;")
+            self.lbl_control_panel_status.setText(msg)
+
+    def _on_reset_engine(self):
+        out_dev_idx = self.combo_output.currentData()
+        in_dev_idx = self.combo_input.currentData()
+        sr = self.combo_sample_rate.currentData()
+        buf = self.combo_buffer_size.currentData()
+        rec_offset = self.spin_record_offset.value() if hasattr(self, "spin_record_offset") else 0
+        asio_guard = self.chk_asio_guard.isChecked() if hasattr(self, "chk_asio_guard") else True
+
+        success = self.audio_engine.configure_device(
+            output_device=out_dev_idx if out_dev_idx >= 0 else None,
+            input_device=in_dev_idx if in_dev_idx >= 0 else None,
+            sample_rate=sr,
+            block_size=buf,
+            record_offset_samples=rec_offset,
+            asio_guard=asio_guard
+        )
+        if hasattr(self, "lbl_control_panel_status"):
+            if success:
+                self.lbl_control_panel_status.setStyleSheet("color: #00E676; font-size: 11px;")
+                self.lbl_control_panel_status.setText("Moteur audio réinitialisé avec succès.")
+            else:
+                self.lbl_control_panel_status.setStyleSheet("color: #FF5252; font-size: 11px;")
+                self.lbl_control_panel_status.setText("Erreur lors de la réinitialisation du moteur.")
+        self._update_latency_label()
 
     def _on_gpu_selected(self, index: int):
         if not hasattr(self, "gpus_data") or index < 0 or index >= len(self.gpus_data):
@@ -504,13 +723,18 @@ class DeviceSettingsDialog(QDialog):
         in_dev_idx = self.combo_input.currentData()
         sr = self.combo_sample_rate.currentData()
         buf = self.combo_buffer_size.currentData()
+        rec_offset = self.spin_record_offset.value() if hasattr(self, "spin_record_offset") else 0
+        asio_guard = self.chk_asio_guard.isChecked() if hasattr(self, "chk_asio_guard") else True
+        rel_bg = self.chk_release_background.isChecked() if hasattr(self, "chk_release_background") else False
 
         # Application au moteur audio
         self.audio_engine.configure_device(
             output_device=out_dev_idx if out_dev_idx >= 0 else None,
             input_device=in_dev_idx if in_dev_idx >= 0 else None,
             sample_rate=sr,
-            block_size=buf
+            block_size=buf,
+            record_offset_samples=rec_offset,
+            asio_guard=asio_guard
         )
 
         # 2. Sauvegarde dans HardwareManager
@@ -521,6 +745,9 @@ class DeviceSettingsDialog(QDialog):
         hardware_manager.settings["audio"]["input_device_name"] = self.combo_input.currentText()
         hardware_manager.settings["audio"]["sample_rate"] = sr
         hardware_manager.settings["audio"]["buffer_size"] = buf
+        hardware_manager.settings["audio"]["record_offset_samples"] = rec_offset
+        hardware_manager.settings["audio"]["asio_guard_enabled"] = asio_guard
+        hardware_manager.settings["audio"]["release_driver_background"] = rel_bg
 
         # 3. Réglages graphiques
         gpu_data = self.combo_gpu.currentData()

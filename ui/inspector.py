@@ -29,6 +29,7 @@ class TrackInspector(QFrame):
     Se met à jour dès qu'une piste est sélectionnée.
     """
     track_modified = Signal()
+    track_mixer_changed = Signal()
 
     def __init__(self, project: Project, parent=None):
         super().__init__(parent)
@@ -1003,25 +1004,25 @@ class TrackInspector(QFrame):
             name = self.txt_name.text().strip()
             if name:
                 self.current_track.name = name
-                self.track_modified.emit()
+                self.track_mixer_changed.emit()
 
     def _on_mute_toggled(self, checked: bool):
         set_button_glow(self.btn_mute, checked, "#f59e0b", blur_radius=14, alpha=220)
         if self.current_track:
             self.current_track.muted = checked
-            self.track_modified.emit()
+            self.track_mixer_changed.emit()
 
     def _on_solo_toggled(self, checked: bool):
         set_button_glow(self.btn_solo, checked, "#facc15", blur_radius=14, alpha=220)
         if self.current_track:
             self.current_track.soloed = checked
-            self.track_modified.emit()
+            self.track_mixer_changed.emit()
 
     def _on_rec_toggled(self, checked: bool):
         set_button_glow(self.btn_rec, checked, "#ff2244", blur_radius=16, alpha=235)
         if self.current_track:
             self.current_track.armed = checked
-            self.track_modified.emit()
+            self.track_mixer_changed.emit()
 
     def _on_vol_changed(self, val: int):
         if self.current_track:
@@ -1029,7 +1030,7 @@ class TrackInspector(QFrame):
             self.slider_vol.setToolTip(f"Volume : {val}% (Double-cliquer pour réinitialiser à 80%)")
             if hasattr(self, "txt_vol") and not self.txt_vol.hasFocus():
                 self.txt_vol.setText(f"{val}%")
-            self.track_modified.emit()
+            self.track_mixer_changed.emit()
 
     def _on_vol_text_edited(self):
         if self.current_track and hasattr(self, "txt_vol"):
@@ -1047,7 +1048,7 @@ class TrackInspector(QFrame):
             self.slider_pan.setToolTip(f"Pan : {pan_str} (Double-cliquer pour réinitialiser au centre)")
             if hasattr(self, "txt_pan") and not self.txt_pan.hasFocus():
                 self.txt_pan.setText(pan_str)
-            self.track_modified.emit()
+            self.track_mixer_changed.emit()
 
     def _on_pan_text_edited(self):
         if self.current_track and hasattr(self, "txt_pan"):

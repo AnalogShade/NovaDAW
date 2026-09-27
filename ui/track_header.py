@@ -65,6 +65,7 @@ class CompactNumEdit(QLineEdit):
 
 class TrackHeaderWidget(QFrame):
     track_modified = Signal()
+    track_mixer_changed = Signal()
     track_selected = Signal(str)  # track_id
     track_deleted = Signal(str)   # track_id
     track_height_changed = Signal(str, int, bool)  # (track_id, height, apply_all)
@@ -342,7 +343,7 @@ class TrackHeaderWidget(QFrame):
             self.releaseMouse()
             self.unsetCursor()
             self.track.height = self.height()
-            self.track_modified.emit()
+            self.track_height_changed.emit(self.track.id, self.height(), False)
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -367,22 +368,22 @@ class TrackHeaderWidget(QFrame):
         new_name = self.txt_name.text().strip()
         if new_name:
             self.track.name = new_name
-            self.track_modified.emit()
+            self.track_mixer_changed.emit()
 
     def _on_mute_toggled(self, checked: bool):
         self.track.muted = checked
         set_button_glow(self.btn_mute, checked, "#f59e0b", blur_radius=14, alpha=220)
-        self.track_modified.emit()
+        self.track_mixer_changed.emit()
 
     def _on_solo_toggled(self, checked: bool):
         self.track.soloed = checked
         set_button_glow(self.btn_solo, checked, "#facc15", blur_radius=14, alpha=220)
-        self.track_modified.emit()
+        self.track_mixer_changed.emit()
 
     def _on_rec_toggled(self, checked: bool):
         self.track.armed = checked
         set_button_glow(self.btn_rec, checked, "#ff2244", blur_radius=16, alpha=235)
-        self.track_modified.emit()
+        self.track_mixer_changed.emit()
 
     def update_arm_state(self, armed: bool):
         """Met à jour l'état visuel et logique de l'armement R avec son aura rouge."""
@@ -486,7 +487,7 @@ class TrackHeaderWidget(QFrame):
         self.slider_vol.setToolTip(f"Volume : {value}% (Double-cliquer pour réinitialiser à 80%)")
         if hasattr(self, "txt_vol") and not self.txt_vol.hasFocus():
             self.txt_vol.setText(f"{value}%")
-        self.track_modified.emit()
+        self.track_mixer_changed.emit()
 
     def _on_vol_text_edited(self):
         parsed = self._parse_vol_text(self.txt_vol.text())
@@ -502,7 +503,7 @@ class TrackHeaderWidget(QFrame):
         self.slider_pan.setToolTip(f"Pan : {pan_str} (Double-cliquer pour réinitialiser au centre)")
         if hasattr(self, "txt_pan") and not self.txt_pan.hasFocus():
             self.txt_pan.setText(pan_str)
-        self.track_modified.emit()
+        self.track_mixer_changed.emit()
 
     def _on_pan_text_edited(self):
         parsed = self._parse_pan_text(self.txt_pan.text())

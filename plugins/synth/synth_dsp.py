@@ -25,6 +25,11 @@ def pitch_to_freq(pitch: float) -> float:
     return 440.0 * (2.0 ** ((pitch - 69.0) / 12.0))
 
 
+_DETUNE_7 = np.array([-0.11, -0.06, -0.02, 0.0, 0.02, 0.06, 0.11], dtype=np.float64)
+_SEEDS_7 = np.array([0.0, 0.142857, 0.285714, 0.428571, 0.571428, 0.714285, 0.857142], dtype=np.float64)[:, None]
+_NORM_7 = np.float32(1.0 / np.sqrt(7.0))
+
+
 def generate_oscillator(
     wave_type: str,
     freq: float,
@@ -36,17 +41,21 @@ def generate_oscillator(
     fm_depth: float = 1.0,
     unison_detune: float = 0.25,
     unison_spread: float = 0.5,
-    time_offset: float = 0.0
+    time_offset: float = 0.0,
+    t_vec: Optional[np.ndarray] = None
 ) -> np.ndarray:
     """
     Génère un buffer audio stéréo (num_samples, 2) FP32 pour la forme d'onde demandée.
     Applique un anti-aliasing PolyBLEP sur les ondes riches en harmoniques (Saw, Square).
-    Garantit une continuité de phase parfaite d'un bloc à l'autre grâce à time_offset.
+    Garantit une continuité de phase parfaite d'un bloc à l'autre grâce à time_offset ou t_vec.
     """
     if num_samples <= 0:
         return np.zeros((0, 2), dtype=np.float32)
 
-    t = (np.arange(num_samples, dtype=np.float64) / sample_rate) + float(time_offset)
+    if t_vec is not None:
+        t = t_vec
+    else:
+        t = (np.arange(num_samples, dtype=np.float64) / sample_rate) + float(time_offset)
     wave_lower = (wave_type or "sine").lower().strip()
 
     # Fréquence normalisée
@@ -64,19 +73,17 @@ def generate_oscillator(
         mono_out = (2.0 * np.abs(2.0 * (phase - np.floor(phase + 0.5))) - 1.0).astype(np.float32)
 
     elif wave_lower == "saw":
-        # PolyBLEP Sawtooth anti-aliasé
-        naive = (2.0 * phase - 1.0).astype(np.float64)
-        blep = np.zeros_like(phase)
-
-        mask1 = phase < dt
-        t1 = phase[mask1] / dt
-        blep[mask1] = 2.0 * t1 - (t1 * t1) - 1.0
-
-        mask2 = phase > (1.0 - dt)
-        t2 = (phase[mask2] - 1.0) / dt
-        blep[mask2] = (t2 * t2) + 2.0 * t2 + 1.0
-
-        mono_out = (naive - blep).astype(np.float32)
+        # PolyBLEP Sawtooth anti-aliasé haute performance
+        saw_naive = (2.0 * phase - 1.0).astype(np.float32)
+        m1 = phase < dt
+        if np.any(m1):
+            t1 = (phase[m1] / dt).astype(np.float32)
+            saw_naive[m1] -= (2.0 * t1 - (t1 * t1) - 1.0)
+        m2 = phase > (1.0 - dt)
+        if np.any(m2):
+            t2 = ((phase[m2] - 1.0) / dt).astype(np.float32)
+            saw_naive[m2] -= ((t2 * t2) + 2.0 * t2 + 1.0)
+        mono_out = saw_naive
 
     elif wave_lower in ("square", "pulse"):
         # Pulse wave avec PWM et PolyBLEP
@@ -106,15 +113,17 @@ def generate_oscillator(
         mono_out = (naive + blep).astype(np.float32)
 
     elif wave_lower == "noise":
-        # White noise + Pink noise
         white = np.random.uniform(-1.0, 1.0, num_samples).astype(np.float32)
-        # Bruit rose filtré doux
-        b0 = 0.0
-        pink = np.zeros(num_samples, dtype=np.float32)
-        for i in range(num_samples):
-            b0 = 0.95 * b0 + 0.05 * white[i]
-            pink[i] = (white[i] + b0 * 2.0) * 0.5
-        mono_out = pink
+        if HAS_SCIPY_SIG:
+            b0 = sig.lfilter([0.05], [1.0, -0.95], white).astype(np.float32)
+            mono_out = (white + b0 * 2.0) * 0.5
+        else:
+            b0 = 0.0
+            pink = np.zeros(num_samples, dtype=np.float32)
+            for i in range(num_samples):
+                b0 = 0.95 * b0 + 0.05 * white[i]
+                pink[i] = (white[i] + b0 * 2.0) * 0.5
+            mono_out = pink
 
     elif wave_lower == "fm":
         # Synthèse FM 2 Opérateurs
@@ -126,46 +135,42 @@ def generate_oscillator(
         mono_out = np.sin(carrier_phase).astype(np.float32)
 
     elif wave_lower in ("supersaw", "unison"):
-        # SuperSaw 7 voix detuned avec répartition panoramique stéréo et PolyBLEP anti-aliasé
-        detune_factors = np.array([-0.11, -0.06, -0.02, 0.0, 0.02, 0.06, 0.11], dtype=np.float64) * max(0.01, min(1.0, unison_detune))
+        # SuperSaw 7 voix detuned vectorisée en 2D avec répartition stéréo et PolyBLEP ultra-rapide
         pans = np.linspace(-unison_spread, unison_spread, 7, dtype=np.float32)
-        seed_phases = np.array([0.0, 0.142857, 0.285714, 0.428571, 0.571428, 0.714285, 0.857142], dtype=np.float64)
+        detunes = _DETUNE_7 * max(0.01, min(1.0, unison_detune))
+        f_voices = np.clip(freq * (2.0 ** (detunes / 12.0)), 10.0, sample_rate * 0.49)[:, None]
+        dt_voices = f_voices / sample_rate
+        dt_broadcast = np.broadcast_to(dt_voices, (7, len(t)))
+        gains_l = np.sqrt(0.5 * (1.0 - pans)).astype(np.float32)[:, None]
+        gains_r = np.sqrt(0.5 * (1.0 + pans)).astype(np.float32)[:, None]
 
-        left = np.zeros(num_samples, dtype=np.float32)
-        right = np.zeros(num_samples, dtype=np.float32)
+        p_v = (t * f_voices + _SEEDS_7 + phase_offset) % 1.0
+        saw_v = (2.0 * p_v - 1.0).astype(np.float32)
 
-        for idx, (d_st, pan) in enumerate(zip(detune_factors, pans)):
-            f_voice = max(10.0, min(freq * (2.0 ** (d_st / 12.0)), sample_rate * 0.49))
-            dt_v = f_voice / sample_rate
-            p_v = (t * f_voice + seed_phases[idx] + phase_offset) % 1.0
+        m1 = p_v < dt_voices
+        if np.any(m1):
+            t1 = (p_v[m1] / dt_broadcast[m1]).astype(np.float32)
+            saw_v[m1] -= (2.0 * t1 - (t1 * t1) - 1.0)
 
-            # PolyBLEP pour chaque voix afin d'éviter tout grésillement/repliement de spectre
-            naive_v = 2.0 * p_v - 1.0
-            blep_v = np.zeros_like(p_v)
+        m2 = p_v > (1.0 - dt_voices)
+        if np.any(m2):
+            t2 = ((p_v[m2] - 1.0) / dt_broadcast[m2]).astype(np.float32)
+            saw_v[m2] -= ((t2 * t2) + 2.0 * t2 + 1.0)
 
-            mask1 = p_v < dt_v
-            t1 = p_v[mask1] / dt_v
-            blep_v[mask1] = 2.0 * t1 - (t1 * t1) - 1.0
-
-            mask2 = p_v > (1.0 - dt_v)
-            t2 = (p_v[mask2] - 1.0) / dt_v
-            blep_v[mask2] = (t2 * t2) + 2.0 * t2 + 1.0
-
-            saw_v = (naive_v - blep_v).astype(np.float32)
-
-            gain_l = float(np.sqrt(0.5 * (1.0 - pan)))
-            gain_r = float(np.sqrt(0.5 * (1.0 + pan)))
-
-            left += saw_v * gain_l
-            right += saw_v * gain_r
-
-        norm = 1.0 / np.sqrt(7.0)
-        return np.column_stack((left * norm, right * norm)).astype(np.float32)
+        left = np.sum(saw_v * gains_l, axis=0) * _NORM_7
+        right = np.sum(saw_v * gains_r, axis=0) * _NORM_7
+        out = np.empty((len(t), 2), dtype=np.float32)
+        out[:, 0] = left
+        out[:, 1] = right
+        return out
 
     if mono_out is None:
         mono_out = np.sin(2.0 * np.pi * phase).astype(np.float32)
 
-    return np.column_stack((mono_out, mono_out)).astype(np.float32)
+    res = np.empty((num_samples, 2), dtype=np.float32)
+    res[:, 0] = mono_out
+    res[:, 1] = mono_out
+    return res
 
 
 def compute_adsr_envelope(
@@ -254,6 +259,8 @@ class ChamberlinSVF:
         self._prev_cutoff: float = -1.0
         self._prev_q: float = -1.0
         self._prev_type: str = ""
+        self._cached_b: Optional[np.ndarray] = None
+        self._cached_a: Optional[np.ndarray] = None
         self.low_l = 0.0
         self.band_l = 0.0
         self.low_r = 0.0
@@ -266,6 +273,8 @@ class ChamberlinSVF:
         self._prev_cutoff = -1.0
         self._prev_q = -1.0
         self._prev_type = ""
+        self._cached_b = None
+        self._cached_a = None
         self.low_l = 0.0
         self.band_l = 0.0
         self.low_r = 0.0
@@ -293,29 +302,9 @@ class ChamberlinSVF:
             return audio
 
         drive_gain = 1.0 + max(0.0, min(3.0, float(drive))) * 0.8
-        in_sig = audio * drive_gain
+        in_sig = audio if drive <= 0.01 else audio * drive_gain
         ftype = (filter_type or "lowpass").lower()
         q = max(0.2, min(10.0, float(resonance)))
-
-        def _calc_ba(c_hz: float):
-            c_hz = max(20.0, min(sample_rate * 0.48, float(c_hz)))
-            w0 = 2.0 * math.pi * c_hz / sample_rate
-            cw = math.cos(w0)
-            sw = math.sin(w0)
-            alpha = sw / (2.0 * q)
-            a0 = 1.0 + alpha
-            if ftype in ("lowpass", "lp"):
-                b = np.array([(1.0 - cw) * 0.5, 1.0 - cw, (1.0 - cw) * 0.5], dtype=np.float32) / a0
-            elif ftype in ("highpass", "hp"):
-                b = np.array([(1.0 + cw) * 0.5, -(1.0 + cw), (1.0 + cw) * 0.5], dtype=np.float32) / a0
-            elif ftype in ("bandpass", "bp"):
-                b = np.array([alpha, 0.0, -alpha], dtype=np.float32) / a0
-            elif ftype in ("notch", "rejet"):
-                b = np.array([1.0, -2.0 * cw, 1.0], dtype=np.float32) / a0
-            else:
-                b = np.array([(1.0 - cw) * 0.5, 1.0 - cw, (1.0 - cw) * 0.5], dtype=np.float32) / a0
-            a = np.array([1.0, -2.0 * cw / a0, (1.0 - alpha) / a0], dtype=np.float32)
-            return b, a
 
         if HAS_SCIPY_SIG:
             if mod_cutoff is not None and len(mod_cutoff) == n:
@@ -324,14 +313,39 @@ class ChamberlinSVF:
             else:
                 c_eff = max(20.0, min(sample_rate * 0.48, float(cutoff)))
 
-            b, a = _calc_ba(c_eff)
+            # Optimisation contournement transparent : Lowpass grand ouvert sans drive ni modulation
+            if ftype in ("lowpass", "lp") and c_eff >= (sample_rate * 0.44) and drive <= 0.05 and mod_cutoff is None:
+                return in_sig
+
+            if (self._cached_b is not None and 
+                abs(c_eff - self._prev_cutoff) <= 0.05 and 
+                abs(q - self._prev_q) <= 0.01 and 
+                ftype == self._prev_type):
+                b, a = self._cached_b, self._cached_a
+            else:
+                c_hz = max(20.0, min(sample_rate * 0.48, float(c_eff)))
+                w0 = 2.0 * math.pi * c_hz / sample_rate
+                cw = math.cos(w0)
+                sw = math.sin(w0)
+                alpha = sw / (2.0 * q)
+                a0 = 1.0 + alpha
+                if ftype in ("lowpass", "lp"):
+                    b = np.array([(1.0 - cw) * 0.5, 1.0 - cw, (1.0 - cw) * 0.5], dtype=np.float32) / a0
+                elif ftype in ("highpass", "hp"):
+                    b = np.array([(1.0 + cw) * 0.5, -(1.0 + cw), (1.0 + cw) * 0.5], dtype=np.float32) / a0
+                elif ftype in ("bandpass", "bp"):
+                    b = np.array([alpha, 0.0, -alpha], dtype=np.float32) / a0
+                elif ftype in ("notch", "rejet"):
+                    b = np.array([1.0, -2.0 * cw, 1.0], dtype=np.float32) / a0
+                else:
+                    b = np.array([(1.0 - cw) * 0.5, 1.0 - cw, (1.0 - cw) * 0.5], dtype=np.float32) / a0
+                a = np.array([1.0, -2.0 * cw / a0, (1.0 - alpha) / a0], dtype=np.float32)
+                self._cached_b, self._cached_a = b, a
 
             if self.zi is None or self.zi.shape != (2, 2):
                 self.zi = np.zeros((2, 2), dtype=np.float32)
             elif self._prev_x is not None and self._prev_y is not None:
-                # Si les coefficients ont changé, recalculer zi depuis l'historique audio réel
-                # pour garantir une continuité mathématique absolue sans saut d'amplitude (zéro clic)
-                if abs(c_eff - self._prev_cutoff) > 0.05 or abs(q - self._prev_q) > 0.01 or ftype != self._prev_type:
+                if abs(c_eff - self._prev_cutoff) > 100.0 or abs(q - self._prev_q) > 0.5 or ftype != self._prev_type:
                     px = self._prev_x
                     py = self._prev_y
                     self.zi = np.zeros((2, 2), dtype=np.float32)
@@ -341,19 +355,9 @@ class ChamberlinSVF:
 
             out, self.zi = sig.lfilter(b, a, in_sig, axis=0, zi=self.zi)
 
-            # Mettre à jour l'historique d'échantillons continus
             if n >= 2:
                 self._prev_x = in_sig[-2:, :].copy()
                 self._prev_y = out[-2:, :].copy()
-            elif n == 1:
-                if self._prev_x is not None:
-                    self._prev_x[0] = self._prev_x[1]
-                    self._prev_x[1] = in_sig[0]
-                    self._prev_y[0] = self._prev_y[1]
-                    self._prev_y[1] = out[0]
-                else:
-                    self._prev_x = np.vstack([in_sig, in_sig])
-                    self._prev_y = np.vstack([out, out])
 
             self._prev_cutoff = c_eff
             self._prev_q = q
@@ -492,32 +496,18 @@ class StereoStudioReverb:
         self._a_aps_l: List[np.ndarray] = []
         self._b_aps_r: List[np.ndarray] = []
         self._a_aps_r: List[np.ndarray] = []
+        self.comb_pole_zi_l = [np.zeros(1, dtype=np.float32) for _ in self.comb_lens_l]
+        self.comb_pole_zi_r = [np.zeros(1, dtype=np.float32) for _ in self.comb_lens_r]
         self._update_coefficients()
         self.reset()
 
     def _update_coefficients(self):
-        """Précalcule les coefficients des filtres IIR de réverbération pour un rendu sans allocation."""
+        """Précalcule les coefficients des filtres de réverbération pour un rendu sans allocation."""
         if not HAS_SCIPY_SIG:
             return
         fb = 0.72 + self.room_size * 0.25
         damp = self.damping * 0.45
-        self._b_comb = np.array([1.0, -damp], dtype=np.float32)
-
-        self._a_combs_l = []
-        for cl in self.comb_lens_l:
-            a = np.zeros(cl + 1, dtype=np.float32)
-            a[0] = 1.0
-            a[1] = -damp
-            a[cl] = -fb * (1.0 - damp)
-            self._a_combs_l.append(a)
-
-        self._a_combs_r = []
-        for cr in self.comb_lens_r:
-            a = np.zeros(cr + 1, dtype=np.float32)
-            a[0] = 1.0
-            a[1] = -damp
-            a[cr] = -fb * (1.0 - damp)
-            self._a_combs_r.append(a)
+        self._b_comb = np.array([1.0], dtype=np.float32)
 
         self._b_aps_l = []
         self._a_aps_l = []
@@ -555,8 +545,8 @@ class StereoStudioReverb:
         self.comb_stores_r = [0.0] * len(self.comb_lens_r)
         self.allpass_indices_l = [0] * len(self.allpass_lens_l)
         self.allpass_indices_r = [0] * len(self.allpass_lens_r)
-        self.comb_zi_l = [np.zeros(cl, dtype=np.float32) for cl in self.comb_lens_l]
-        self.comb_zi_r = [np.zeros(cr, dtype=np.float32) for cr in self.comb_lens_r]
+        self.comb_pole_zi_l = [np.zeros(1, dtype=np.float32) for _ in self.comb_lens_l]
+        self.comb_pole_zi_r = [np.zeros(1, dtype=np.float32) for _ in self.comb_lens_r]
         self.allpass_zi_l = [np.zeros(al, dtype=np.float32) for al in self.allpass_lens_l]
         self.allpass_zi_r = [np.zeros(ar, dtype=np.float32) for ar in self.allpass_lens_r]
 
@@ -565,23 +555,68 @@ class StereoStudioReverb:
             return audio
 
         n = len(audio)
+        chunk_size = 256
+        if n > chunk_size:
+            out = np.empty_like(audio)
+            for c_start in range(0, n, chunk_size):
+                c_end = min(n, c_start + chunk_size)
+                out[c_start:c_end] = self.process(audio[c_start:c_end])
+            return out
+
         mono_in = (audio[:, 0] + audio[:, 1]) * 0.08
 
         if HAS_SCIPY_SIG:
             if abs(self.room_size - self._last_room) > 0.001 or abs(self.damping - self._last_damp) > 0.001 or self._b_comb is None:
                 self._update_coefficients()
 
+            fb = float(0.72 + self.room_size * 0.25)
+            damp = float(self.damping * 0.45)
+            b_pole = np.array([1.0], dtype=np.float32)
+            a_pole = np.array([1.0, -damp], dtype=np.float32)
+            gain_fb = fb * (1.0 - damp)
+
             out_l = np.zeros(n, dtype=np.float32)
             out_r = np.zeros(n, dtype=np.float32)
-            b_comb = self._b_comb
 
             for idx, cl in enumerate(self.comb_lens_l):
-                cl_out, self.comb_zi_l[idx] = sig.lfilter(b_comb, self._a_combs_l[idx], mono_in, zi=self.comb_zi_l[idx])
-                out_l += cl_out
+                buf = self.comb_buffers_l[idx]
+                w_idx = self.comb_indices_l[idx]
+                zi = self.comb_pole_zi_l[idx]
+                if w_idx + n <= cl:
+                    delayed = buf[w_idx:w_idx + n]
+                else:
+                    p1 = cl - w_idx
+                    delayed = np.concatenate((buf[w_idx:], buf[:n - p1]))
+                out_l += delayed
+                store, self.comb_pole_zi_l[idx] = sig.lfilter(b_pole, a_pole, delayed, zi=zi)
+                to_write = mono_in + store * gain_fb
+                if w_idx + n <= cl:
+                    buf[w_idx:w_idx + n] = to_write
+                else:
+                    p1 = cl - w_idx
+                    buf[w_idx:] = to_write[:p1]
+                    buf[:n - p1] = to_write[p1:]
+                self.comb_indices_l[idx] = (w_idx + n) % cl
 
             for idx, cr in enumerate(self.comb_lens_r):
-                cr_out, self.comb_zi_r[idx] = sig.lfilter(b_comb, self._a_combs_r[idx], mono_in, zi=self.comb_zi_r[idx])
-                out_r += cr_out
+                buf = self.comb_buffers_r[idx]
+                w_idx = self.comb_indices_r[idx]
+                zi = self.comb_pole_zi_r[idx]
+                if w_idx + n <= cr:
+                    delayed = buf[w_idx:w_idx + n]
+                else:
+                    p1 = cr - w_idx
+                    delayed = np.concatenate((buf[w_idx:], buf[:n - p1]))
+                out_r += delayed
+                store, self.comb_pole_zi_r[idx] = sig.lfilter(b_pole, a_pole, delayed, zi=zi)
+                to_write = mono_in + store * gain_fb
+                if w_idx + n <= cr:
+                    buf[w_idx:w_idx + n] = to_write
+                else:
+                    p1 = cr - w_idx
+                    buf[w_idx:] = to_write[:p1]
+                    buf[:n - p1] = to_write[p1:]
+                self.comb_indices_r[idx] = (w_idx + n) % cr
 
             for idx in range(len(self.allpass_lens_l)):
                 out_l, self.allpass_zi_l[idx] = sig.lfilter(self._b_aps_l[idx], self._a_aps_l[idx], out_l, zi=self.allpass_zi_l[idx])

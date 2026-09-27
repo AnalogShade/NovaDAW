@@ -33,6 +33,10 @@ class TimelineRuler(QWidget):
         self.loop_enabled = False  # Désactivé par défaut au démarrage
         self.scroll_offset = 0.0
 
+        # Aimantage & Grille temporelle
+        self.snap_enabled = True
+        self.grid_resolution = 1.0  # en temps (1.0 = noire / quart de mesure)
+
         self._active_drag = None  # None, "start", "end", "new", "seek"
         self._drag_anchor_beat = 0.0
         self._hovered_handle = None  # None, "start", "end", "region"
@@ -43,8 +47,36 @@ class TimelineRuler(QWidget):
         self.update()
 
     def set_playhead(self, beat: float):
+        old_px = int(self.playhead_beat * self.pixels_per_beat)
+        new_px = int(beat * self.pixels_per_beat)
         self.playhead_beat = beat
+        if old_px == new_px:
+            return
+        h = self.height()
+        min_x = min(old_px, new_px) - 8
+        max_x = max(old_px, new_px) + 8
+        if max_x - min_x < 60:
+            self.update(min_x, 0, max_x - min_x + 1, h)
+        else:
+            self.update(old_px - 8, 0, 17, h)
+            self.update(new_px - 8, 0, 17, h)
+
+    def set_grid_resolution(self, res_beats: float):
+        """Définit la résolution de la grille en temps musicaux"""
+        self.grid_resolution = float(res_beats)
         self.update()
+
+    def set_snap_enabled(self, enabled: bool):
+        """Active ou désactive l'aimantage à la grille"""
+        self.snap_enabled = bool(enabled)
+        self.update()
+
+    def snap_beat(self, beat: float) -> float:
+        """Aligne un temps sur la grille active selon la résolution choisie si snap est actif"""
+        if not self.snap_enabled or self.grid_resolution <= 0.0:
+            return max(0.0, float(beat))
+        step = float(self.grid_resolution)
+        return max(0.0, round(beat / step) * step)
 
     def set_loop(self, enabled: bool, start_b: float, end_b: float):
         self.loop_enabled = enabled
@@ -107,7 +139,8 @@ class TimelineRuler(QWidget):
                 self.update()
             else:
                 self._active_drag = "seek"
-                self.seek_requested.emit(beat)
+                snapped_beat = self.snap_beat(beat)
+                self.seek_requested.emit(snapped_beat)
                 self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent):
@@ -115,7 +148,7 @@ class TimelineRuler(QWidget):
         beat = max(0.0, (x + self.scroll_offset) / self.pixels_per_beat)
 
         if self._active_drag == "start":
-            step = 0.25 if (event.modifiers() & Qt.ShiftModifier) else 1.0
+            step = 0.25 if (event.modifiers() & Qt.ShiftModifier) else (self.grid_resolution if (self.snap_enabled and self.grid_resolution > 0.0) else 1.0)
             new_start = round(beat / step) * step
             new_start = max(0.0, new_start)
             if new_start >= self.loop_end_beat:
@@ -125,7 +158,7 @@ class TimelineRuler(QWidget):
                 self.loop_changed.emit(self.loop_start_beat, self.loop_end_beat)
             self.update()
         elif self._active_drag == "end":
-            step = 0.25 if (event.modifiers() & Qt.ShiftModifier) else 1.0
+            step = 0.25 if (event.modifiers() & Qt.ShiftModifier) else (self.grid_resolution if (self.snap_enabled and self.grid_resolution > 0.0) else 1.0)
             new_end = round(beat / step) * step
             if new_end <= self.loop_start_beat:
                 new_end = self.loop_start_beat + step
@@ -134,16 +167,19 @@ class TimelineRuler(QWidget):
                 self.loop_changed.emit(self.loop_start_beat, self.loop_end_beat)
             self.update()
         elif self._active_drag == "new":
-            s = min(self._drag_anchor_beat, round(beat))
-            e = max(self._drag_anchor_beat, round(beat))
+            step = self.grid_resolution if (self.snap_enabled and self.grid_resolution > 0.0) else 1.0
+            snapped = round(beat / step) * step
+            s = min(self._drag_anchor_beat, snapped)
+            e = max(self._drag_anchor_beat, snapped)
             if e <= s:
-                e = s + 1.0
+                e = s + step
             self.loop_start_beat = s
             self.loop_end_beat = e
             self.loop_changed.emit(s, e)
             self.update()
         elif self._active_drag == "seek" or (event.buttons() & Qt.LeftButton):
-            self.seek_requested.emit(beat)
+            snapped_beat = self.snap_beat(beat)
+            self.seek_requested.emit(snapped_beat)
         else:
             old_handle = self._hovered_handle
             self._hovered_handle = self._get_handle_at(x)
@@ -233,6 +269,18 @@ class TimelineRuler(QWidget):
                 bx = (bar_beat + beat) * self.pixels_per_beat - self.scroll_offset
                 if 0 <= bx <= width:
                     painter.drawLine(int(bx), 16, int(bx), height)
+
+            # Subdivisions fines dans la règle si zoom suffisant et snap actif
+            step = self.grid_resolution if (self.snap_enabled and self.grid_resolution > 0.0) else 0.0
+            if 0.0 < step < 1.0 and (step * self.pixels_per_beat) >= 6.0:
+                painter.setPen(QPen(QColor("#1b1e2a"), 1))
+                num_sub = int(round(4.0 / step))
+                for s_idx in range(1, num_sub):
+                    cur_b = bar_beat + s_idx * step
+                    if abs(cur_b - round(cur_b)) > 1e-4:
+                        sub_x = cur_b * self.pixels_per_beat - self.scroll_offset
+                        if 0 <= sub_x <= width:
+                            painter.drawLine(int(sub_x), 22, int(sub_x), height)
 
         # 2. Zone de boucle
         is_loop_on = self.loop_enabled
@@ -561,8 +609,19 @@ class TimelineGrid(QWidget):
         self.update()
 
     def set_playhead(self, beat: float):
+        old_px = int(self.playhead_beat * self.pixels_per_beat)
+        new_px = int(beat * self.pixels_per_beat)
         self.playhead_beat = beat
-        self.update()
+        if old_px == new_px:
+            return
+        h = self.height()
+        min_x = min(old_px, new_px) - 4
+        max_x = max(old_px, new_px) + 4
+        if max_x - min_x < 60:
+            self.update(min_x, 0, max_x - min_x + 1, h)
+        else:
+            self.update(old_px - 4, 0, 9, h)
+            self.update(new_px - 4, 0, 9, h)
 
     def get_track_layout(self) -> list:
         """Retourne la liste des tuples (track, top_y, height) pour chaque piste"""

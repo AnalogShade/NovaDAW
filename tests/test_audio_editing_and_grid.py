@@ -366,3 +366,99 @@ def test_timeline_paint_with_tools_and_grid_no_crash(qapp):
     grid._hover_split_beat = 2.0
     img2 = QImage(800, 300, QImage.Format_ARGB32)
     grid.render(img2)
+
+
+def test_grid_snapping_libre_and_switch_back_to_quarter(qapp):
+    """
+    Vérifie le cycle complet rapporté par l'utilisateur :
+    1. Démarrage par défaut : Grille à 1/4 (1.0 temps), Snap actif.
+    2. Clic sur la règle (TimelineRuler) : la barre se snap sur la noire (1.0).
+    3. Passage en mode 'Off / Libre' : la barre ne se snap plus, déplacement fluide continu.
+    4. Retour en mode '1/4' (ou autre subdivision) : la barre et le snap se réactivent correctement à 1.0 !
+    5. Synchronisation bidirectionnelle entre le bouton Snap et le ComboBox.
+    """
+    window = MainWindow()
+    toolbar = window.editing_toolbar
+    ruler = window.ruler
+    grid = window.timeline_grid
+
+    # 1. État initial : Snap actif, grille 1/4 (1.0 temps)
+    assert toolbar.btn_snap.isChecked() is True
+    assert toolbar.combo_grid.currentData() == 1.0
+    assert grid.snap_enabled is True
+    assert grid.grid_resolution == 1.0
+    assert ruler.snap_enabled is True
+    assert ruler.grid_resolution == 1.0
+
+    # Snapping initial sur la règle et sur la grille
+    assert ruler.snap_beat(1.23) == 1.0
+    assert ruler.snap_beat(1.8) == 2.0
+    assert grid.snap_beat(1.23) == 1.0
+
+    # 2. Passage en mode "Off / Libre" (index 6, valeur 0.0)
+    libre_idx = -1
+    for i in range(toolbar.combo_grid.count()):
+        if float(toolbar.combo_grid.itemData(i)) == 0.0:
+            libre_idx = i
+            break
+    assert libre_idx != -1
+    toolbar.combo_grid.setCurrentIndex(libre_idx)
+
+    # Vérification que le snap est désactivé partout
+    assert toolbar.btn_snap.isChecked() is False
+    assert grid.snap_enabled is False or grid.grid_resolution == 0.0
+    assert ruler.snap_enabled is False or ruler.grid_resolution == 0.0
+    assert abs(ruler.snap_beat(1.23) - 1.23) < 1e-4
+    assert abs(grid.snap_beat(1.23) - 1.23) < 1e-4
+
+    # 3. Remise sur "1/4 (Temps / Noire)" (valeur 1.0)
+    quarter_idx = -1
+    for i in range(toolbar.combo_grid.count()):
+        if abs(float(toolbar.combo_grid.itemData(i)) - 1.0) < 1e-4:
+            quarter_idx = i
+            break
+    assert quarter_idx != -1
+    toolbar.combo_grid.setCurrentIndex(quarter_idx)
+
+    # Vérification CRUCIALE : Le snap et la grille DOIVENT être redevenus actifs à 1.0 !
+    assert toolbar.btn_snap.isChecked() is True
+    assert grid.snap_enabled is True
+    assert grid.grid_resolution == 1.0
+    assert ruler.snap_enabled is True
+    assert ruler.grid_resolution == 1.0
+    assert ruler.snap_beat(1.23) == 1.0
+    assert grid.snap_beat(1.23) == 1.0
+
+    # 4. Test avec subdivision fine 1/8 (0.5 temps)
+    toolbar.set_grid_resolution(0.5)
+    assert ruler.grid_resolution == 0.5
+    assert grid.grid_resolution == 0.5
+    assert ruler.snap_beat(1.23) == 1.0
+    assert ruler.snap_beat(1.3) == 1.5
+    assert ruler.snap_beat(1.7) == 1.5
+    assert ruler.snap_beat(1.8) == 2.0
+
+    # 5. Clic sur bouton Snap pour désactiver -> bascule automatiquement en Off / Libre
+    toolbar.btn_snap.click()
+    assert toolbar.btn_snap.isChecked() is False
+    assert float(toolbar.combo_grid.currentData()) == 0.0
+    assert abs(ruler.snap_beat(1.3) - 1.3) < 1e-4
+
+    # 6. Re-clic sur bouton Snap pour réactiver -> restaure la dernière subdivision active (0.5)
+    toolbar.btn_snap.click()
+    assert toolbar.btn_snap.isChecked() is True
+    assert float(toolbar.combo_grid.currentData()) == 0.5
+    assert ruler.snap_beat(1.3) == 1.5
+
+    # 7. Action MCP novadaw_set_grid
+    action_registry.execute("novadaw_set_grid", window, {
+        "resolution_beats": 4.0,
+        "snap_enabled": True
+    })
+    assert toolbar.combo_grid.currentData() == 4.0
+    assert ruler.grid_resolution == 4.0
+    assert ruler.snap_beat(5.2) == 4.0
+    assert ruler.snap_beat(6.8) == 8.0
+
+    window.close()
+

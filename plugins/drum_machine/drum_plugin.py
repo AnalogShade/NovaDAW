@@ -204,6 +204,7 @@ class DrumMachinePlugin(BasePlugin):
         ]
 
         # Voix actives en cours de lecture pour le rendu continu
+        self._voices_lock = threading.Lock()
         self._active_voices: List[Dict[str, Any]] = []
 
         # Système de mise en tampon audio instantané (Cache RAM FP32)
@@ -341,7 +342,7 @@ class DrumMachinePlugin(BasePlugin):
                 # Créer un son de remplacement synthétique propre en attendant
                 self._generate_fallback_sample(pad)
         # Pré-chargement des tampons en tâche de fond pour réactivité maximale
-        self.warm_up_cache(async_bg=True)
+        self.warm_up_cache(async_bg=False)
 
 
     def _generate_fallback_sample(self, pad: DrumPad):
@@ -540,112 +541,87 @@ class DrumMachinePlugin(BasePlugin):
 
         has_any_solo = any(p.soloed for p in self.pads)
 
-        # 1. Vérifier chaque note du clip
-        for note in notes:
-            abs_start = getattr(note, "start_beat", 0.0)
-            if not (start_b <= abs_start < end_b):
-                continue
+        with self._voices_lock:
+                # 1. Vérifier chaque note du clip
+            for note in notes:
+                abs_start = getattr(note, "start_beat", 0.0)
+                if not (start_b <= abs_start < end_b):
+                    continue
 
-            pitch = getattr(note, "pitch", 36)
-            vel = getattr(note, "velocity", 100)
-            pad = self.find_pad_by_pitch(pitch)
-            if not pad:
-                continue
+                pitch = getattr(note, "pitch", 36)
+                vel = getattr(note, "velocity", 100)
+                pad = self.find_pad_by_pitch(pitch)
+                if not pad:
+                    continue
 
-            if pad.muted:
-                continue
-            if has_any_solo and not pad.soloed:
-                continue
+                if pad.muted:
+                    continue
+                if has_any_solo and not pad.soloed:
+                    continue
 
-            # Gestion Choke Group : Si charleston fermé (choke_group=1), étouffer les voix actives du choke_group 1
-            if pad.choke_group > 0:
-                for voice in self._active_voices:
-                    if voice.get("choke_group") == pad.choke_group:
-                        voice["choked"] = True
+                # Gestion Choke Group : Si charleston fermé (choke_group=1), étouffer les voix actives du choke_group 1
+                if pad.choke_group > 0:
+                    for voice in self._active_voices:
+                        if voice.get("choke_group") == pad.choke_group:
+                            voice["choked"] = True
 
-            # Calcul du décalage en samples dans le buffer actuel
-            offset_sec = max(0.0, (abs_start - start_b) / beats_per_sec)
-            start_frame = int(offset_sec * sample_rate)
+                # Calcul du décalage en samples dans le buffer actuel
+                offset_sec = max(0.0, (abs_start - start_b) / beats_per_sec)
+                start_frame = int(offset_sec * sample_rate)
 
-            # Préparation des données audio du pad
-            data = pad.get_audio_data()
-            vel_gain = (max(1, min(127, vel)) / 127.0) * pad.volume * self.master_volume
-            pan = max(-1.0, min(1.0, pad.pan))
-            g_l = vel_gain * (1.0 - max(0.0, pan))
-            g_r = vel_gain * (1.0 + min(0.0, pan))
+                # Préparation des données audio du pad via le tampon RAM pré-calculé (tune, decay, pan, gain et réverbe inclus)
+                cached_data = self.get_cached_pad_audio(pad.pad_id, vel)
 
-            # Enregistrement de la voix active
-            self._active_voices.append({
-                "data": data,
-                "cursor": 0,
-                "start_offset": start_frame,
-                "gain_l": g_l,
-                "gain_r": g_r,
-                "reverb_send": pad.reverb_send,
-                "choke_group": pad.choke_group,
-                "choked": False,
-                "choke_fade": 1.0,
-            })
+                # Enregistrement de la voix active
+                self._active_voices.append({
+                    "data": cached_data,
+                    "cursor": 0,
+                    "start_offset": start_frame,
+                    "choke_group": pad.choke_group,
+                    "choked": False,
+                    "choke_fade": 1.0,
+                })
 
-        # 2. Rendu de toutes les voix actives dans le bloc audio
-        surviving_voices = []
-        for voice in self._active_voices:
-            data = voice["data"]
-            cur = voice["cursor"]
-            st_off = voice["start_offset"]
-            g_l = voice["gain_l"]
-            g_r = voice["gain_r"]
-            rev_send = voice["reverb_send"]
-            is_choked = voice["choked"]
+            # 2. Rendu de toutes les voix actives dans le bloc audio
+            surviving_voices = []
+            for voice in self._active_voices:
+                data = voice["data"]
+                cur = voice["cursor"]
+                st_off = voice["start_offset"]
+                is_choked = voice["choked"]
 
-            # Déterminer la fenêtre d'écriture
-            buf_start = max(0, st_off)
-            if buf_start >= frames:
-                # La voix commencera au prochain bloc
-                voice["start_offset"] -= frames
-                surviving_voices.append(voice)
-                continue
+                # Déterminer la fenêtre d'écriture
+                buf_start = max(0, st_off)
+                if buf_start >= frames:
+                    # La voix commencera au prochain bloc
+                    voice["start_offset"] -= frames
+                    surviving_voices.append(voice)
+                    continue
 
-            sample_start = cur
-            avail_in_data = len(data) - sample_start
-            to_render = min(frames - buf_start, avail_in_data)
+                sample_start = cur
+                avail_in_data = len(data) - sample_start
+                to_render = min(frames - buf_start, avail_in_data)
 
-            if to_render > 0:
-                chunk = data[sample_start:sample_start + to_render]
-                l_sig = chunk[:, 0] * g_l
-                r_sig = chunk[:, 1] * g_r
+                if to_render > 0:
+                    chunk = data[sample_start:sample_start + to_render]
 
-                if is_choked:
-                    # Fondu d'étouffement rapide (choke fade out)
-                    fade_len = min(to_render, int(0.008 * sample_rate))
-                    fade = np.linspace(voice["choke_fade"], 0.0, fade_len)
-                    l_sig[:fade_len] *= fade
-                    r_sig[:fade_len] *= fade
-                    l_sig[fade_len:] = 0.0
-                    r_sig[fade_len:] = 0.0
-                    voice["choke_fade"] = 0.0
+                    if is_choked:
+                        # Fondu d'étouffement rapide (choke fade out)
+                        fade_len = min(to_render, int(0.008 * sample_rate))
+                        fade = np.linspace(voice["choke_fade"], 0.0, fade_len, dtype=np.float32)[:, None]
+                        output[buf_start:buf_start + fade_len] += chunk[:fade_len] * fade
+                        voice["choke_fade"] = 0.0
+                    else:
+                        output[buf_start:buf_start + to_render] += chunk
 
-                output[buf_start:buf_start + to_render, 0] += l_sig
-                output[buf_start:buf_start + to_render, 1] += r_sig
+                    voice["cursor"] += to_render
+                    voice["start_offset"] = 0
 
-                if rev_send > 0.01:
-                    reverb_in[buf_start:buf_start + to_render, 0] += l_sig * rev_send
-                    reverb_in[buf_start:buf_start + to_render, 1] += r_sig * rev_send
+                # Garder la voix si non terminée et non étouffée à zéro
+                if voice["cursor"] < len(data) and (not is_choked or voice["choke_fade"] > 0.01):
+                    surviving_voices.append(voice)
 
-                voice["cursor"] += to_render
-                voice["start_offset"] = 0
-
-            # Garder la voix si non terminée et non étouffée à zéro
-            if voice["cursor"] < len(data) and (not is_choked or voice["choke_fade"] > 0.01):
-                surviving_voices.append(voice)
-
-        self._active_voices = surviving_voices
-
-        # 3. Traitement de la réverbération stéréo
-        if self.reverb.enabled and np.any(np.abs(reverb_in) > 1e-6):
-            rev_out = self.reverb.process(reverb_in)
-            output += rev_out
-
+            self._active_voices = surviving_voices
         return output
 
     def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -659,7 +635,8 @@ class DrumMachinePlugin(BasePlugin):
 
     def reset(self) -> None:
         """Réinitialise les voix et les mémoires de réverbération lors d'un arrêt de lecture"""
-        self._active_voices.clear()
+        with self._voices_lock:
+            self._active_voices.clear()
         self.reverb.reset()
 
     def apply_preset(self, preset_name: str):
@@ -715,7 +692,7 @@ class DrumMachinePlugin(BasePlugin):
                 p.reverb_send = 0.02
 
         self.invalidate_cache()
-        self.warm_up_cache(async_bg=True)
+        self.warm_up_cache(async_bg=False)
 
     def get_state(self) -> Dict[str, Any]:
         return {
@@ -753,7 +730,7 @@ class DrumMachinePlugin(BasePlugin):
                 pad.from_dict(pads_map[pad.pad_id], base_dirs=dirs)
 
         self.invalidate_cache()
-        self.warm_up_cache(async_bg=True)
+        self.warm_up_cache(async_bg=False)
 
 
     def create_editor(self, parent=None):
