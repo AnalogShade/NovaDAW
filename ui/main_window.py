@@ -612,6 +612,7 @@ class MainWindow(QMainWindow):
 
         # Clic sur un onglet ré-ouvre automatiquement si minimisé
         self.lower_zone.tabBarClicked.connect(self._on_tab_clicked)
+        self.lower_zone.currentChanged.connect(self._on_lower_zone_tab_changed)
 
         self.piano_roll = PianoRoll(self.audio_engine, self)
         self.piano_roll.notes_updated.connect(self._on_notes_updated)
@@ -630,7 +631,11 @@ class MainWindow(QMainWindow):
                 mixer_p = p
                 break
         if mixer_p:
+            if hasattr(mixer_p, "set_project"):
+                mixer_p.set_project(self.project)
             self.mixer_widget = mixer_p.create_editor(self)
+            self.mixer_widget.track_mixer_changed.connect(self._on_track_mixer_changed)
+            self.mixer_widget.track_selected.connect(self._on_track_selected)
             self.lower_zone.addTab(self.mixer_widget, "🎛️ Mixeur (F5)")
         else:
             self.mixer_widget = None
@@ -751,6 +756,8 @@ class MainWindow(QMainWindow):
                         p.set_project(self.project)
                     break
             self.mixer_widget.refresh_tracks()
+            if hasattr(self, "selected_track_id"):
+                self.mixer_widget.set_selected_track(self.selected_track_id)
 
         # Reconstruire les en-têtes
         while self.headers_layout.count() > 1:
@@ -810,6 +817,9 @@ class MainWindow(QMainWindow):
                 item = self.headers_layout.itemAt(i)
                 if item and item.widget() and isinstance(item.widget(), TrackHeaderWidget):
                     item.widget().set_selected(item.widget().track.id == track.id)
+
+            if hasattr(self, "mixer_widget") and self.mixer_widget:
+                self.mixer_widget.set_selected_track(track.id)
         else:
             self.selected_track_id = None
             if hasattr(self, "inspector"):
@@ -820,6 +830,8 @@ class MainWindow(QMainWindow):
                 item = self.headers_layout.itemAt(i)
                 if item and item.widget() and isinstance(item.widget(), TrackHeaderWidget):
                     item.widget().set_selected(False)
+            if hasattr(self, "mixer_widget") and self.mixer_widget:
+                self.mixer_widget.set_selected_track(None)
 
     def _on_rack_changed(self):
         """Appelé lors d'un changement dans la stack de plugins du projet"""
@@ -856,8 +868,18 @@ class MainWindow(QMainWindow):
         if self.is_lower_zone_minimized:
             self._expand_lower_zone()
         if hasattr(self, "mixer_widget") and self.mixer_widget:
+            self.mixer_widget.sync_controls_from_tracks()
+            if hasattr(self, "selected_track_id"):
+                self.mixer_widget.set_selected_track(self.selected_track_id)
             self.lower_zone.setCurrentWidget(self.mixer_widget)
             self.statusBar().showMessage("Console de Mixage affichée (F5)", 2000)
+
+    def _on_lower_zone_tab_changed(self, index: int):
+        current_w = self.lower_zone.widget(index)
+        if current_w == getattr(self, "mixer_widget", None) and self.mixer_widget:
+            self.mixer_widget.sync_controls_from_tracks()
+            if hasattr(self, "selected_track_id"):
+                self.mixer_widget.set_selected_track(self.selected_track_id)
 
     def select_master_track(self):
         """Sélectionne la piste Master dans l'inspecteur pour afficher sa pile de plugins"""
@@ -1354,6 +1376,9 @@ class MainWindow(QMainWindow):
                 if item and item.widget() and isinstance(item.widget(), TrackHeaderWidget):
                     item.widget().sync_controls_from_track()
 
+        if hasattr(self, "mixer_widget") and self.mixer_widget:
+            self.mixer_widget.sync_controls_from_tracks()
+
     def _on_track_mixer_changed(self):
         """Mise à jour ultra-rapide des contrôles de mixage (Mute, Solo, Vol, Pan) sans invalider le cache audio."""
         self.timeline_grid.update()
@@ -1364,6 +1389,15 @@ class MainWindow(QMainWindow):
                 item = self.headers_layout.itemAt(i)
                 if item and item.widget() and isinstance(item.widget(), TrackHeaderWidget):
                     item.widget().sync_controls_from_track()
+        if hasattr(self, "mixer_widget") and self.mixer_widget:
+            self.mixer_widget.sync_controls_from_tracks()
+        try:
+            from ui.plugin_dialogs import _open_native_editors
+            for dlg in list(_open_native_editors.values()):
+                if hasattr(dlg, "editor") and hasattr(dlg.editor, "sync_controls_from_tracks"):
+                    dlg.editor.sync_controls_from_tracks()
+        except Exception:
+            pass
 
     def _on_engine_caching_progress(self, current: int, total: int, track_name: str, progress: float = 0.0):
         self.cache_progress_signal.emit(current, total, track_name, progress)

@@ -19,6 +19,7 @@ from PySide6.QtGui import QPainter, QBrush, QColor, QFont, QLinearGradient, QPen
 
 from plugins.mixer.mixer_plugin import MixerPlugin
 from core.project import Project, Track
+from ui.track_header import ResetableSlider
 
 
 class VuMeterBar(QFrame):
@@ -66,41 +67,76 @@ class VuMeterBar(QFrame):
 class MixerChannelStrip(QFrame):
     """Tranche de console pour une piste individuelle"""
     track_modified = Signal()
+    track_selected = Signal(str)
 
     def __init__(self, track: Track, parent=None):
         super().__init__(parent)
         self.track = track
+        self.is_selected = False
         self.setFixedWidth(92)
-        self.setStyleSheet("""
-            MixerChannelStrip {
-                background-color: #151822;
-                border: 1px solid #232736;
+        self._apply_style(False)
+        self._init_ui()
+
+    def _apply_style(self, selected: bool):
+        border = "#38bdf8" if selected else "#232736"
+        bg = "#1b2030" if selected else "#151822"
+        self.setStyleSheet(f"""
+            MixerChannelStrip {{
+                background-color: {bg};
+                border: 1px solid {border};
                 border-radius: 5px;
-            }
-            QLabel {
+            }}
+            QLabel {{
                 color: #e2e8f0;
                 font-size: 10px;
-            }
-            QSlider::groove:vertical {
+            }}
+            QSlider::groove:vertical {{
                 width: 4px;
                 background: #0f1118;
                 border-radius: 2px;
-            }
-            QSlider::sub-page:vertical {
+            }}
+            QSlider::sub-page:vertical {{
                 background: #0f1118;
-            }
-            QSlider::add-page:vertical {
+            }}
+            QSlider::add-page:vertical {{
                 background: #38bdf8;
-            }
-            QSlider::handle:vertical {
+            }}
+            QSlider::handle:vertical {{
                 background: #ffffff;
                 height: 14px;
                 margin: 0 -5px;
                 border-radius: 2px;
-            }
+            }}
         """)
 
-        self._init_ui()
+    def set_selected(self, selected: bool):
+        if self.is_selected != selected:
+            self.is_selected = selected
+            self._apply_style(selected)
+
+    def mousePressEvent(self, event):
+        self.track_selected.emit(self.track.id)
+        super().mousePressEvent(event)
+
+    def _get_track_icon(self) -> str:
+        p_name = (self.track.plugin_name or "").lower()
+        p_path = (self.track.plugin_path or "").lower()
+        t_name = self.track.name.lower()
+        if "drum" in p_name or "batterie" in t_name or p_path == "novadaw.drum_machine":
+            return "🥁"
+        elif "synth" in p_name or p_path == "novadaw.synth":
+            return "⚡"
+        elif self.track.track_type == "midi":
+            return "🎹"
+        return "🔊"
+
+    def _update_name_label(self):
+        icon = self._get_track_icon()
+        self.lbl_name.setToolTip(self.track.name)
+        clean = self.track.name.replace("🎸 ", "").replace("🎹 ", "").replace("🔊 ", "").replace("🥁 ", "").replace("⚡ ", "")
+        fm = self.lbl_name.fontMetrics()
+        elided = fm.elidedText(clean, Qt.ElideRight, 78)
+        self.lbl_name.setText(f"{icon} {elided}")
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -114,15 +150,10 @@ class MixerChannelStrip(QFrame):
         self.color_tag.setStyleSheet(f"background-color: {self.track.color}; border-radius: 2px;")
         layout.addWidget(self.color_tag)
 
-        icon = "🎹" if self.track.track_type == "midi" else "🔊"
         self.lbl_name = QLabel()
         self.lbl_name.setAlignment(Qt.AlignCenter)
-        self.lbl_name.setToolTip(self.track.name)
         self.lbl_name.setStyleSheet("font-size: 10px; font-weight: bold; color: #f1f5f9; padding: 1px;")
-        fm = self.lbl_name.fontMetrics()
-        clean = self.track.name.replace("🎸 ", "").replace("🎹 ", "").replace("🔊 ", "")
-        elided = fm.elidedText(clean, Qt.ElideRight, 78)
-        self.lbl_name.setText(f"{icon} {elided}")
+        self._update_name_label()
         layout.addWidget(self.lbl_name)
 
         # 2. Panoramique
@@ -131,14 +162,16 @@ class MixerChannelStrip(QFrame):
         lbl_pan.setAlignment(Qt.AlignCenter)
         layout.addWidget(lbl_pan)
 
-        self.slider_pan = QSlider(Qt.Horizontal)
+        pan_val = int(round(self.track.pan * 100))
+        self.slider_pan = ResetableSlider(Qt.Horizontal, default_value=0)
         self.slider_pan.setRange(-100, 100)
-        self.slider_pan.setValue(int(self.track.pan * 100))
+        self.slider_pan.setValue(pan_val)
         self.slider_pan.setFixedHeight(12)
+        self._update_pan_tooltip(pan_val)
         self.slider_pan.valueChanged.connect(self._on_pan_changed)
         layout.addWidget(self.slider_pan)
 
-        # 3. Boutons M / S
+        # 3. Boutons M / S / R
         row_msr = QHBoxLayout()
         row_msr.setSpacing(3)
 
@@ -146,7 +179,7 @@ class MixerChannelStrip(QFrame):
         self.btn_m.setFixedSize(24, 20)
         self.btn_m.setCheckable(True)
         self.btn_m.setChecked(self.track.muted)
-        self.btn_m.setToolTip("Mute (Couper)")
+        self.btn_m.setToolTip("Mute (Couper le son)")
         self._update_mute_style(self.track.muted)
         self.btn_m.toggled.connect(self._on_mute_toggled)
         row_msr.addWidget(self.btn_m)
@@ -160,16 +193,27 @@ class MixerChannelStrip(QFrame):
         self.btn_s.toggled.connect(self._on_solo_toggled)
         row_msr.addWidget(self.btn_s)
 
+        self.btn_r = QPushButton("R")
+        self.btn_r.setFixedSize(24, 20)
+        self.btn_r.setCheckable(True)
+        self.btn_r.setChecked(self.track.armed)
+        self.btn_r.setToolTip("Armer pour l'enregistrement (R)")
+        self._update_rec_style(self.track.armed)
+        self.btn_r.toggled.connect(self._on_rec_toggled)
+        row_msr.addWidget(self.btn_r)
+
         layout.addLayout(row_msr)
 
         # 4. Section Fader + VU-Mètre
         fader_row = QHBoxLayout()
         fader_row.setSpacing(4)
 
-        self.slider_vol = QSlider(Qt.Vertical)
+        vol_val = int(round(self.track.volume * 100))
+        self.slider_vol = ResetableSlider(Qt.Vertical, default_value=80)
         self.slider_vol.setRange(0, 150)
-        self.slider_vol.setValue(int(self.track.volume * 100))
+        self.slider_vol.setValue(vol_val)
         self.slider_vol.setFixedHeight(130)
+        self.slider_vol.setToolTip(f"Volume : {vol_val}% (Double-clic: 80%)")
         self.slider_vol.valueChanged.connect(self._on_vol_changed)
         fader_row.addWidget(self.slider_vol)
 
@@ -180,10 +224,14 @@ class MixerChannelStrip(QFrame):
         layout.addLayout(fader_row)
 
         # 5. Label Valeur dB / %
-        self.lbl_vol_db = QLabel(f"{int(self.track.volume * 100)}%")
+        self.lbl_vol_db = QLabel(f"{vol_val}%")
         self.lbl_vol_db.setAlignment(Qt.AlignCenter)
         self.lbl_vol_db.setStyleSheet("font-size: 9px; font-weight: bold; color: #38bdf8;")
         layout.addWidget(self.lbl_vol_db)
+
+    def _update_pan_tooltip(self, val: int):
+        pan_str = "C" if val == 0 else (f"L{abs(val)}" if val < 0 else f"R{val}")
+        self.slider_pan.setToolTip(f"Pan : {pan_str} (Double-clic: C)")
 
     def _update_mute_style(self, chk: bool):
         bg = "#d97706" if chk else "#20232f"
@@ -197,13 +245,21 @@ class MixerChannelStrip(QFrame):
         border = "#facc15" if chk else "#33384a"
         self.btn_s.setStyleSheet(f"background-color: {bg}; color: {col}; border: 1px solid {border}; font-weight: bold; font-size: 10px; padding: 0px;")
 
+    def _update_rec_style(self, chk: bool):
+        bg = "#dc2626" if chk else "#20232f"
+        col = "#ffffff" if chk else "#94a3b8"
+        border = "#ef4444" if chk else "#33384a"
+        self.btn_r.setStyleSheet(f"background-color: {bg}; color: {col}; border: 1px solid {border}; font-weight: bold; font-size: 10px; padding: 0px;")
+
     def _on_pan_changed(self, val: int):
         self.track.pan = val / 100.0
+        self._update_pan_tooltip(val)
         self.track_modified.emit()
 
     def _on_vol_changed(self, val: int):
         self.track.volume = val / 100.0
         self.lbl_vol_db.setText(f"{val}%")
+        self.slider_vol.setToolTip(f"Volume : {val}% (Double-clic: 80%)")
         self.track_modified.emit()
 
     def _on_mute_toggled(self, chk: bool):
@@ -216,13 +272,55 @@ class MixerChannelStrip(QFrame):
         self._update_solo_style(chk)
         self.track_modified.emit()
 
+    def _on_rec_toggled(self, chk: bool):
+        self.track.armed = chk
+        self._update_rec_style(chk)
+        self.track_modified.emit()
+
+    def sync_controls_from_track(self):
+        """Synchronise l'ensemble des contrôles de la tranche depuis l'objet Track."""
+        self.btn_m.blockSignals(True)
+        self.btn_m.setChecked(self.track.muted)
+        self.btn_m.blockSignals(False)
+        self._update_mute_style(self.track.muted)
+
+        self.btn_s.blockSignals(True)
+        self.btn_s.setChecked(self.track.soloed)
+        self.btn_s.blockSignals(False)
+        self._update_solo_style(self.track.soloed)
+
+        if hasattr(self, "btn_r"):
+            self.btn_r.blockSignals(True)
+            self.btn_r.setChecked(self.track.armed)
+            self.btn_r.blockSignals(False)
+            self._update_rec_style(self.track.armed)
+
+        vol_val = int(round(self.track.volume * 100))
+        self.slider_vol.blockSignals(True)
+        self.slider_vol.setValue(vol_val)
+        self.slider_vol.blockSignals(False)
+        self.lbl_vol_db.setText(f"{vol_val}%")
+        self.slider_vol.setToolTip(f"Volume : {vol_val}% (Double-clic: 80%)")
+
+        pan_val = int(round(self.track.pan * 100))
+        self.slider_pan.blockSignals(True)
+        self.slider_pan.setValue(pan_val)
+        self.slider_pan.blockSignals(False)
+        self._update_pan_tooltip(pan_val)
+
+        self._update_name_label()
+        self.color_tag.setStyleSheet(f"background-color: {self.track.color}; border-radius: 2px;")
+
 
 class MixerConsoleWidget(QWidget):
     """Console de mixage principale regroupant toutes les tranches et le Master"""
+    track_mixer_changed = Signal()
+    track_selected = Signal(str)
 
     def __init__(self, mixer: MixerPlugin, parent=None):
         super().__init__(parent)
         self.mixer = mixer
+        self._selected_track_id: Optional[str] = None
         self.setObjectName("mixer_console")
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet("""
@@ -245,6 +343,18 @@ class MixerConsoleWidget(QWidget):
         self.meter_timer.setInterval(33)
         self.meter_timer.timeout.connect(self._update_meters)
         self.meter_timer.start()
+
+    def _on_strip_track_modified(self):
+        self.track_mixer_changed.emit()
+
+    def _on_strip_track_selected(self, track_id: str):
+        self.set_selected_track(track_id)
+        self.track_selected.emit(track_id)
+
+    def set_selected_track(self, track_id: Optional[str]):
+        self._selected_track_id = track_id
+        for tid, strip in self.strips.items():
+            strip.set_selected(tid == track_id)
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -345,10 +455,12 @@ class MixerConsoleWidget(QWidget):
         fader_row = QHBoxLayout()
         fader_row.setSpacing(4)
 
-        self.slider_master = QSlider(Qt.Vertical)
+        master_vol_val = int(round(self.mixer.master_volume * 100))
+        self.slider_master = ResetableSlider(Qt.Vertical, default_value=100)
         self.slider_master.setRange(0, 150)
-        self.slider_master.setValue(int(self.mixer.master_volume * 100))
+        self.slider_master.setValue(master_vol_val)
         self.slider_master.setFixedHeight(140)
+        self.slider_master.setToolTip(f"Volume Master : {master_vol_val}% (Double-clic: 100%)")
         self.slider_master.valueChanged.connect(self._on_master_fader_changed)
         fader_row.addWidget(self.slider_master)
 
@@ -359,7 +471,7 @@ class MixerConsoleWidget(QWidget):
 
         layout.addLayout(fader_row)
 
-        self.lbl_master_db = QLabel(f"{int(self.mixer.master_volume * 100)}%")
+        self.lbl_master_db = QLabel(f"{master_vol_val}%")
         self.lbl_master_db.setAlignment(Qt.AlignCenter)
         self.lbl_master_db.setStyleSheet("font-size: 10px; font-weight: bold; color: #ef4444;")
         layout.addWidget(self.lbl_master_db)
@@ -369,6 +481,7 @@ class MixerConsoleWidget(QWidget):
     def _on_master_fader_changed(self, val: int):
         self.mixer.master_volume = val / 100.0
         self.lbl_master_db.setText(f"{val}%")
+        self.slider_master.setToolTip(f"Volume Master : {val}% (Double-clic: 100%)")
 
     def refresh_tracks(self):
         """Reconstruit les tranches selon les pistes du projet"""
@@ -382,8 +495,46 @@ class MixerConsoleWidget(QWidget):
         if self.mixer.project and hasattr(self.mixer.project, "tracks"):
             for track in self.mixer.project.tracks:
                 strip = MixerChannelStrip(track, self)
+                strip.track_modified.connect(self._on_strip_track_modified)
+                strip.track_selected.connect(self._on_strip_track_selected)
+                if self._selected_track_id:
+                    strip.set_selected(track.id == self._selected_track_id)
                 self.strips[track.id] = strip
                 self.tracks_layout.insertWidget(self.tracks_layout.count() - 1, strip)
+
+    def sync_controls_from_tracks(self):
+        """Synchronise l'ensemble des tranches avec le projet actif."""
+        if not self.mixer.project or not hasattr(self.mixer.project, "tracks"):
+            return
+
+        proj_track_ids = [t.id for t in self.mixer.project.tracks]
+        current_strip_ids = list(self.strips.keys())
+
+        if proj_track_ids != current_strip_ids:
+            self.refresh_tracks()
+            return
+
+        for track in self.mixer.project.tracks:
+            strip = self.strips.get(track.id)
+            if strip:
+                strip.sync_controls_from_track()
+
+        # Synchroniser la tranche Master
+        if hasattr(self, "slider_master"):
+            m_val = int(round(self.mixer.master_volume * 100))
+            self.slider_master.blockSignals(True)
+            self.slider_master.setValue(m_val)
+            self.slider_master.blockSignals(False)
+            self.lbl_master_db.setText(f"{m_val}%")
+            self.slider_master.setToolTip(f"Volume Master : {m_val}% (Double-clic: 100%)")
+        if hasattr(self, "btn_mono"):
+            self.btn_mono.blockSignals(True)
+            self.btn_mono.setChecked(self.mixer.mono_switch)
+            self.btn_mono.blockSignals(False)
+        if hasattr(self, "btn_dim"):
+            self.btn_dim.blockSignals(True)
+            self.btn_dim.setChecked(self.mixer.dim_switch)
+            self.btn_dim.blockSignals(False)
 
     def _update_meters(self):
         """Mise à jour périodique des VU-mètres Master et Pistes"""

@@ -408,6 +408,13 @@ class NativePluginDialog(QDialog):
         self.editor = plugin.create_editor(self)
         if self.editor:
             layout.addWidget(self.editor)
+            p = parent
+            while p and not hasattr(p, "_on_track_mixer_changed"):
+                p = p.parent() if hasattr(p, "parent") else None
+            if p and hasattr(p, "_on_track_mixer_changed") and hasattr(self.editor, "track_mixer_changed"):
+                self.editor.track_mixer_changed.connect(p._on_track_mixer_changed)
+            if p and hasattr(p, "_on_track_selected") and hasattr(self.editor, "track_selected"):
+                self.editor.track_selected.connect(p._on_track_selected)
 
         # Remplir la liste des presets
         self._populate_presets()
@@ -543,7 +550,9 @@ class NativePluginDialog(QDialog):
                     self.editor.curve_widget.update()
             if hasattr(self.editor, "_sync_controls"):
                 self.editor._sync_controls()
-            if hasattr(self.editor, "refresh_tracks"):
+            if hasattr(self.editor, "sync_controls_from_tracks"):
+                self.editor.sync_controls_from_tracks()
+            elif hasattr(self.editor, "refresh_tracks"):
                 self.editor.refresh_tracks()
         except Exception as e:
             print(f"[NativePluginDialog] Erreur rafraîchissement éditeur : {e}")
