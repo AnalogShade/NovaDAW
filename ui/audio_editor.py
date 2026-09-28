@@ -123,6 +123,15 @@ class AudioEditor(QWidget):
 
         self._init_ui()
 
+    def zoom_in(self):
+        pass
+
+    def zoom_out(self):
+        pass
+
+    def zoom_reset(self):
+        pass
+
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 8)

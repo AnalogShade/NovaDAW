@@ -10,8 +10,8 @@ from PySide6.QtWidgets import (
     QScrollArea, QTabWidget, QFileDialog, QMessageBox, QStatusBar,
     QFrame, QLabel, QPushButton, QSizePolicy, QProgressBar
 )
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QKeySequence, QIcon, QPixmap
+from PySide6.QtCore import Qt, QTimer, Signal, QEvent
+from PySide6.QtGui import QAction, QKeySequence, QIcon, QPixmap, QShortcut
 
 from core.project import Project, Track, MidiClip, AudioClip
 from core.serializer import save_project, load_project
@@ -56,10 +56,15 @@ class MainWindow(QMainWindow):
         self.audio_engine = AudioEngine()
         self.audio_engine.set_project(self.project)
 
+        self._is_dirty: bool = False
+        self._saved_project_snapshot: Optional[str] = None
+        self._test_save_prompt_response: Optional[str] = None
+
         self.is_lower_zone_minimized = False
         self._saved_lower_height = 270
         self._active_recording_clips: Dict[str, Any] = {}
         self.floating_vst_rack: Optional[FloatingPluginRackDialog] = None
+        self.autoscroll_enabled: bool = True
 
         # 2. Construction de l'interface
         self._init_menus()
@@ -78,6 +83,9 @@ class MainWindow(QMainWindow):
 
         # Recharger l'affichage avec les pistes initiales
         self.refresh_project_ui()
+        self._saved_project_snapshot = self._capture_project_snapshot()
+        self._is_dirty = False
+        self._update_window_title()
         global_plugin_manager.scan_updated.connect(self.refresh_project_ui)
 
         # 4. Serveur IPC pour le contrôle distant et protocole MCP (IA)
@@ -173,7 +181,24 @@ class MainWindow(QMainWindow):
 
         menu_edit.addSeparator()
 
-        act_split = QAction("✂️ &Scinder au curseur (Playhead)", self)
+        act_tool_select = QAction("🖱️ Outil &Pointeur", self)
+        act_tool_select.setShortcut("1")
+        act_tool_select.triggered.connect(lambda: self.editing_toolbar.set_active_tool("select"))
+        menu_edit.addAction(act_tool_select)
+
+        act_tool_split = QAction("✂️ Outil &Ciseaux (Scinder au clic)", self)
+        act_tool_split.setShortcut("2")
+        act_tool_split.triggered.connect(lambda: self.editing_toolbar.set_active_tool("split"))
+        menu_edit.addAction(act_tool_split)
+
+        act_tool_erase = QAction("🗑️ Outil &Gomme", self)
+        act_tool_erase.setShortcut("3")
+        act_tool_erase.triggered.connect(lambda: self.editing_toolbar.set_active_tool("erase"))
+        menu_edit.addAction(act_tool_erase)
+
+        menu_edit.addSeparator()
+
+        act_split = QAction("⚡ &Scinder à la tête de lecture (Playhead)", self)
         act_split.setShortcut("Ctrl+K")
         act_split.triggered.connect(self._on_split_playhead)
         menu_edit.addAction(act_split)
@@ -308,6 +333,20 @@ class MainWindow(QMainWindow):
         act_zoom_tracks_reset.setShortcut("Ctrl+Alt+0")
         act_zoom_tracks_reset.triggered.connect(self._zoom_track_heights_reset)
         menu_view.addAction(act_zoom_tracks_reset)
+
+        menu_view.addSeparator()
+
+        act_zoom_reset = QAction("🔍 Réinitialiser le Zoom à 100% (Arrangement & Éditeur)", self)
+        act_zoom_reset.setShortcut("Ctrl+0")
+        act_zoom_reset.triggered.connect(self._on_global_zoom_reset)
+        menu_view.addAction(act_zoom_reset)
+
+        self.act_autoscroll = QAction("📜 Défilement Automatique (Follow Playhead)", self)
+        self.act_autoscroll.setShortcut("F")
+        self.act_autoscroll.setCheckable(True)
+        self.act_autoscroll.setChecked(True)
+        self.act_autoscroll.toggled.connect(self._on_autoscroll_toggled)
+        menu_view.addAction(self.act_autoscroll)
 
         # Menu Périphériques (Audio & GPU)
         menu_devices = menubar.addMenu("&Périphériques")
@@ -460,10 +499,10 @@ class MainWindow(QMainWindow):
         self.inspector.track_mixer_changed.connect(self._on_track_mixer_changed)
         self.arranger_splitter.addWidget(self.inspector)
 
-        # Panneau central-gauche : En-têtes de pistes (redimensionnable)
+        # Panneau central-gauche : En-têtes de pistes (redimensionnable, largeur minimale garantie pour voir tous les boutons)
         left_panel = QWidget()
         left_panel.setObjectName("left_headers_panel")
-        left_panel.setMinimumWidth(180)
+        left_panel.setMinimumWidth(260)
         left_panel.setMaximumWidth(550)
         left_panel.setStyleSheet("QWidget#left_headers_panel { background-color: #161820; border-right: 1px solid #282a36; }")
         left_layout = QVBoxLayout(left_panel)
@@ -503,6 +542,7 @@ class MainWindow(QMainWindow):
 
         self.headers_container = QWidget()
         self.headers_container.setObjectName("headers_container")
+        self.headers_container.setMinimumWidth(260)
         self.headers_container.setStyleSheet("QWidget#headers_container { background: transparent; }")
         self.headers_layout = QVBoxLayout(self.headers_container)
         self.headers_layout.setContentsMargins(0, 0, 0, 0)
@@ -556,7 +596,20 @@ class MainWindow(QMainWindow):
         self.editing_toolbar.zoom_out_requested.connect(self._zoom_timeline_out)
         self.editing_toolbar.zoom_reset_requested.connect(self._zoom_timeline_reset)
 
+        # Connexions Zoom molette pour règle et grille
+        self.ruler.zoom_in_requested.connect(self._zoom_timeline_in)
+        self.ruler.zoom_out_requested.connect(self._zoom_timeline_out)
+        self.timeline_grid.zoom_in_requested.connect(self._zoom_timeline_in)
+        self.timeline_grid.zoom_out_requested.connect(self._zoom_timeline_out)
+
         self.timeline_scroll.setWidget(self.timeline_grid)
+
+        # Filtre d'événements pour Ctrl + Molette sur toute la timeline, règle et en-têtes
+        self.timeline_scroll.installEventFilter(self)
+        self.timeline_scroll.viewport().installEventFilter(self)
+        self.headers_scroll.installEventFilter(self)
+        self.headers_scroll.viewport().installEventFilter(self)
+        self.ruler.installEventFilter(self)
 
         # Synchronisation des scrolls
         self.timeline_scroll.verticalScrollBar().valueChanged.connect(
@@ -572,7 +625,7 @@ class MainWindow(QMainWindow):
         self.arranger_splitter.setCollapsible(0, True)
         self.arranger_splitter.setCollapsible(1, False)
         self.arranger_splitter.setCollapsible(2, False)
-        self.arranger_splitter.setSizes([230, 240, 810])
+        self.arranger_splitter.setSizes([200, 280, 800])
         self.arranger_splitter.setStretchFactor(0, 0)
         self.arranger_splitter.setStretchFactor(1, 0)
         self.arranger_splitter.setStretchFactor(2, 1)
@@ -598,6 +651,7 @@ class MainWindow(QMainWindow):
         self.transport_bar.goto_end_clicked.connect(self._on_goto_end)
         self.transport_bar.step_rewind.connect(self._on_step_relative)
         self.transport_bar.step_forward.connect(self._on_step_relative)
+        self.transport_bar.autoscroll_toggled.connect(self._on_autoscroll_toggled)
         bottom_layout.addWidget(self.transport_bar)
 
         # Zone inférieure avec onglets
@@ -652,6 +706,25 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(self.main_splitter)
         self.setCentralWidget(main_widget)
+
+        # Raccourcis clavier globaux (Zoom, Défilement)
+        self.shortcut_zoom_reset = QShortcut(QKeySequence("Ctrl+0"), self)
+        self.shortcut_zoom_reset.activated.connect(self._on_global_zoom_reset)
+
+        self.shortcut_zoom_reset_num = QShortcut(QKeySequence(Qt.CTRL | Qt.Key_0), self)
+        self.shortcut_zoom_reset_num.activated.connect(self._on_global_zoom_reset)
+
+        self.shortcut_zoom_in = QShortcut(QKeySequence("Ctrl++"), self)
+        self.shortcut_zoom_in.activated.connect(self._on_global_zoom_in)
+
+        self.shortcut_zoom_in_equal = QShortcut(QKeySequence("Ctrl+="), self)
+        self.shortcut_zoom_in_equal.activated.connect(self._on_global_zoom_in)
+
+        self.shortcut_zoom_out = QShortcut(QKeySequence("Ctrl+-"), self)
+        self.shortcut_zoom_out.activated.connect(self._on_global_zoom_out)
+
+        self.shortcut_follow = QShortcut(QKeySequence("F"), self)
+        self.shortcut_follow.activated.connect(self._toggle_autoscroll)
 
     def _init_status_bar(self):
         status = QStatusBar()
@@ -735,7 +808,7 @@ class MainWindow(QMainWindow):
             self._expand_lower_zone()
 
     def refresh_project_ui(self):
-        self.setWindowTitle(f"NovaDAW - {self.project.name}")
+        self._update_window_title()
 
         self.ruler.set_loop(self.project.loop_enabled, self.project.loop_start_beat, self.project.loop_end_beat)
         self.timeline_grid.project = self.project
@@ -773,6 +846,15 @@ class MainWindow(QMainWindow):
             header.track_selected.connect(self._on_track_selected)
             header.track_height_changed.connect(self._on_track_height_changed)
             self.headers_layout.insertWidget(self.headers_layout.count() - 1, header)
+
+        # S'assurer que le panneau des en-têtes conserve une largeur confortable (>= 260px) sans boutons masqués
+        cur_sizes = self.arranger_splitter.sizes()
+        if len(cur_sizes) >= 3 and cur_sizes[1] < 260:
+            diff = 280 - cur_sizes[1]
+            cur_sizes[1] = 280
+            if cur_sizes[2] > diff + 300:
+                cur_sizes[2] -= diff
+            self.arranger_splitter.setSizes(cur_sizes)
 
         # Mettre à jour l'inspecteur avec la piste sélectionnée
         if self.project.tracks:
@@ -977,12 +1059,14 @@ class MainWindow(QMainWindow):
             self.selected_track_id = new_track.id
             self.refresh_project_ui()
             self._on_track_selected(new_track.id)
+            self.set_dirty(True)
             inst_info = f" (Instrument : {new_track.plugin_name})" if new_track.plugin_name else ""
             self.statusBar().showMessage(f"Piste '{new_track.name}'{inst_info} ajoutée.", 3000)
 
     def _on_track_deleted(self, track_id: str):
         self.project.remove_track(track_id)
         self.refresh_project_ui()
+        self.set_dirty(True)
         self.statusBar().showMessage("Piste supprimée.", 3000)
 
     def _on_clip_selected(self, track: Track, clip):
@@ -1070,6 +1154,57 @@ class MainWindow(QMainWindow):
         self.timeline_grid.set_zoom(40.0)
         self.ruler.set_zoom(40.0)
         self.statusBar().showMessage("Zoom arrangement : 100%", 1500)
+
+    def _on_global_zoom_reset(self):
+        """Réinitialise le zoom à 100% dans la timeline et l'éditeur actif (Ctrl + 0)"""
+        self._zoom_timeline_reset()
+        if hasattr(self, "piano_roll"):
+            self.piano_roll.zoom_reset()
+        if hasattr(self, "audio_editor"):
+            self.audio_editor.zoom_reset()
+        self.statusBar().showMessage("🔍 Zoom réinitialisé à 100% (Séquenceur & Éditeurs)", 2000)
+
+    def _on_global_zoom_in(self):
+        """Zoom avant dans la fenêtre active ou timeline (Ctrl + +)"""
+        if hasattr(self, "lower_zone") and self.lower_zone.currentWidget() == self.piano_roll and self.piano_roll.hasFocus():
+            self.piano_roll.zoom_in()
+        else:
+            self._zoom_timeline_in()
+
+    def _on_global_zoom_out(self):
+        """Zoom arrière dans la fenêtre active ou timeline (Ctrl + -)"""
+        if hasattr(self, "lower_zone") and self.lower_zone.currentWidget() == self.piano_roll and self.piano_roll.hasFocus():
+            self.piano_roll.zoom_out()
+        else:
+            self._zoom_timeline_out()
+
+    def _on_autoscroll_toggled(self, enabled: bool):
+        self.autoscroll_enabled = enabled
+        if hasattr(self, "act_autoscroll") and self.act_autoscroll.isChecked() != enabled:
+            self.act_autoscroll.blockSignals(True)
+            self.act_autoscroll.setChecked(enabled)
+            self.act_autoscroll.blockSignals(False)
+        if hasattr(self, "transport_bar") and hasattr(self.transport_bar, "btn_autoscroll") and self.transport_bar.btn_autoscroll.isChecked() != enabled:
+            self.transport_bar.btn_autoscroll.blockSignals(True)
+            self.transport_bar.btn_autoscroll.setChecked(enabled)
+            self.transport_bar.btn_autoscroll.blockSignals(False)
+        etat = "activé" if enabled else "désactivé"
+        self.statusBar().showMessage(f"📜 Défilement automatique (Follow Playhead) : {etat}", 2000)
+
+    def _toggle_autoscroll(self):
+        new_state = not getattr(self, "autoscroll_enabled", True)
+        self._on_autoscroll_toggled(new_state)
+
+    def eventFilter(self, watched, event):
+        """Capture Ctrl + Molette sur toute la timeline, règle et en-têtes pour zoomer"""
+        if event.type() == QEvent.Wheel and (event.modifiers() & Qt.ControlModifier):
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self._zoom_timeline_in()
+            elif delta < 0:
+                self._zoom_timeline_out()
+            return True
+        return super().eventFilter(watched, event)
 
     def _on_play_toggled(self, playing: bool):
         if playing:
@@ -1321,6 +1456,7 @@ class MainWindow(QMainWindow):
             self.transport_bar.btn_loop.blockSignals(False)
         self.ruler.set_loop(enabled, self.project.loop_start_beat, self.project.loop_end_beat)
         self.timeline_grid.update()
+        self.set_dirty(True)
         state_str = "activée" if enabled else "désactivée"
         self.statusBar().showMessage(f"Lecture en boucle {state_str} (L)", 2000)
 
@@ -1333,6 +1469,7 @@ class MainWindow(QMainWindow):
         self.transport_bar.btn_loop.blockSignals(False)
         self.ruler.set_loop(True, start_b, end_b)
         self.timeline_grid.update()
+        self.set_dirty(True)
         self.statusBar().showMessage(
             f"Boucle active : temps {start_b:.1f} → {end_b:.1f} ({end_b - start_b:.1f} temps)", 2500
         )
@@ -1344,8 +1481,20 @@ class MainWindow(QMainWindow):
         self.piano_roll.set_playhead(beat)
         self.transport_bar.update_position(beat, self.project.bpm)
 
+        # Repositionne la vue lors d'un déplacement manuel si le défilement auto est actif
+        if getattr(self, "autoscroll_enabled", True):
+            playhead_x = int(beat * self.timeline_grid.pixels_per_beat)
+            h_bar = self.timeline_scroll.horizontalScrollBar()
+            viewport_w = self.timeline_scroll.viewport().width()
+            current_scroll = h_bar.value()
+            if playhead_x >= (current_scroll + viewport_w - 40) or playhead_x < current_scroll:
+                target_scroll = max(0, playhead_x - int(viewport_w * 0.12))
+                h_bar.setValue(target_scroll)
+
     def _on_bpm_changed(self, bpm: float):
-        self.project.bpm = bpm
+        if self.project.bpm != bpm:
+            self.project.bpm = bpm
+            self.set_dirty(True)
 
     def _on_master_vol_changed(self, vol: float):
         self.audio_engine.master_volume = vol
@@ -1353,10 +1502,12 @@ class MainWindow(QMainWindow):
     def _on_notes_updated(self):
         """Appelé lors de l'édition d'une note dans le Piano Roll."""
         self.timeline_grid.update()
+        self.set_dirty(True)
         if hasattr(self, "audio_engine") and hasattr(self.audio_engine, "invalidate_track_cache"):
             self.audio_engine.invalidate_track_cache(self.selected_track_id, trigger_async=True)
 
     def _on_project_modified(self):
+        self.set_dirty(True)
         self.timeline_grid.update()
         if hasattr(self, "audio_engine") and hasattr(self.audio_engine, "invalidate_track_cache"):
             self.audio_engine.invalidate_track_cache(None, trigger_async=True)
@@ -1381,6 +1532,7 @@ class MainWindow(QMainWindow):
 
     def _on_track_mixer_changed(self):
         """Mise à jour ultra-rapide des contrôles de mixage (Mute, Solo, Vol, Pan) sans invalider le cache audio."""
+        self.set_dirty(True)
         self.timeline_grid.update()
         if hasattr(self, "inspector") and self.inspector.current_track:
             self.inspector.sync_controls_from_track()
@@ -1442,6 +1594,31 @@ class MainWindow(QMainWindow):
             self.piano_roll.set_playhead(beat)
             self.transport_bar.update_position(beat, self.project.bpm)
 
+            # Défilement automatique pendant la lecture (Follow Playhead / Auto-scroll)
+            if getattr(self, "autoscroll_enabled", True):
+                # 1. Timeline / Séquenceur
+                playhead_x = int(beat * self.timeline_grid.pixels_per_beat)
+                h_bar = self.timeline_scroll.horizontalScrollBar()
+                viewport_w = self.timeline_scroll.viewport().width()
+                current_scroll = h_bar.value()
+
+                if playhead_x >= (current_scroll + viewport_w - 40) or playhead_x < current_scroll:
+                    target_scroll = max(0, playhead_x - int(viewport_w * 0.12))
+                    h_bar.setValue(target_scroll)
+
+                # 2. Séquenceur MIDI (Piano Roll) si visible et sur le clip joué
+                if hasattr(self, "lower_zone") and self.lower_zone.currentWidget() == self.piano_roll:
+                    clip = getattr(self.piano_roll, "current_clip", None)
+                    if clip and (clip.start_beat <= beat <= (clip.start_beat + clip.length_beats)):
+                        rel_beat = beat - clip.start_beat
+                        pr_px = int(rel_beat * self.piano_roll.note_grid.pixels_per_beat)
+                        pr_hbar = self.piano_roll.scroll_area.horizontalScrollBar()
+                        pr_vp_w = max(100, self.piano_roll.scroll_area.viewport().width() - self.piano_roll.piano_keys.width())
+                        pr_scroll = pr_hbar.value()
+                        if pr_px >= (pr_scroll + pr_vp_w - 40) or pr_px < pr_scroll:
+                            pr_target = max(0, pr_px - int(pr_vp_w * 0.12))
+                            pr_hbar.setValue(pr_target)
+
             # Si enregistrement actif, mise à jour des blocs et forme d'onde en temps réel
             if getattr(self.audio_engine, "is_recording", False) and getattr(self, "_active_recording_clips", None):
                 live_audio = self.audio_engine.get_live_recording_audio()
@@ -1458,29 +1635,206 @@ class MainWindow(QMainWindow):
                 self.timeline_grid.update()
 
 
+    # --- Détection des modifications et protection de sauvegarde ---
+
+    def set_dirty(self, dirty: bool = True):
+        """Marque le projet comme modifié ou propre (sauvegardé) et met à jour l'intitulé de la fenêtre."""
+        self._is_dirty = dirty
+        self._update_window_title()
+
+    def has_unsaved_changes(self) -> bool:
+        """
+        Détermine avec précision si des modifications non sauvegardées existent :
+        1. Si le flag explicite _is_dirty est actif.
+        2. Ou si l'état sérialisé du projet a divergé de son instantané au dernier enregistrement.
+        """
+        if getattr(self, "_is_dirty", False):
+            return True
+
+        saved = getattr(self, "_saved_project_snapshot", None)
+        if saved:
+            current_snapshot = self._capture_project_snapshot()
+            if current_snapshot and current_snapshot != saved:
+                self.set_dirty(True)
+                return True
+
+        return False
+
+    def _capture_project_snapshot(self) -> str:
+        """Génère une empreinte JSON stable et rapide de l'état du projet pour comparaison."""
+        try:
+            import json
+            state = {
+                "name": getattr(self.project, "name", ""),
+                "bpm": float(getattr(self.project, "bpm", 120.0)),
+                "time_sig_num": int(getattr(self.project, "time_sig_num", 4)),
+                "time_sig_den": int(getattr(self.project, "time_sig_den", 4)),
+                "loop_enabled": bool(getattr(self.project, "loop_enabled", False)),
+                "loop_start_beat": float(getattr(self.project, "loop_start_beat", 0.0)),
+                "loop_end_beat": float(getattr(self.project, "loop_end_beat", 16.0)),
+                "tracks": [t.to_dict() for t in getattr(self.project, "tracks", [])],
+                "plugin_rack": list(getattr(self.project, "plugin_rack", [])),
+                "plugin_states": getattr(self.project, "plugin_states", {}),
+            }
+            return json.dumps(state, sort_keys=True)
+        except Exception:
+            return ""
+
+    def _update_window_title(self):
+        """Met à jour le titre de la fenêtre avec le nom du projet et l'indicateur '*' de modification."""
+        star = " *" if getattr(self, "_is_dirty", False) else ""
+        file_info = f" [{os.path.basename(self.project.file_path)}]" if getattr(self.project, "file_path", None) else ""
+        self.setWindowTitle(f"NovaDAW - {self.project.name}{file_info}{star}")
+
+    def _prompt_save_dialog(self, message: str) -> str:
+        """
+        Affiche la boîte de dialogue de confirmation de sauvegarde.
+        Retourne 'save', 'discard', ou 'cancel'.
+        """
+        # Hook pour les tests automatisés
+        if hasattr(self, "_test_save_prompt_response") and self._test_save_prompt_response is not None:
+            return self._test_save_prompt_response
+
+        # En mode test automatisé pytest, si aucun choix explicite n'a été injecté,
+        # on ne bloque pas les tests avec une boîte modale bloquante
+        if os.environ.get("NOVADAW_SILENT_TESTS") == "1" or "PYTEST_CURRENT_TEST" in os.environ:
+            return "discard"
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Modifications non enregistrées - NovaDAW")
+        box.setIcon(QMessageBox.Question)
+        box.setText(message)
+        box.setStyleSheet("""
+            QMessageBox {
+                background-color: #1a1c24;
+                color: #f8fafc;
+            }
+            QLabel {
+                color: #e2e8f0;
+                font-size: 13px;
+            }
+            QPushButton {
+                background-color: #2a2e3f;
+                color: #f8fafc;
+                border: 1px solid #3b4252;
+                border-radius: 4px;
+                padding: 6px 16px;
+                font-weight: 600;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #38bdf8;
+                color: #0f172a;
+                border: 1px solid #38bdf8;
+            }
+        """)
+
+        btn_save = box.addButton("Enregistrer", QMessageBox.AcceptRole)
+        btn_discard = box.addButton("Ne pas enregistrer", QMessageBox.DestructiveRole)
+        btn_cancel = box.addButton("Annuler", QMessageBox.RejectRole)
+        box.setDefaultButton(btn_save)
+
+        btn_save.setStyleSheet("""
+            background-color: #0284c7;
+            color: #ffffff;
+            border: 1px solid #38bdf8;
+            border-radius: 4px;
+            padding: 6px 16px;
+            font-weight: bold;
+        """)
+
+        box.exec()
+        clicked = box.clickedButton()
+
+        if clicked == btn_save:
+            return "save"
+        elif clicked == btn_discard:
+            return "discard"
+        else:
+            return "cancel"
+
+    def maybe_save_changes(self, reason: str = "close") -> bool:
+        """
+        Vérifie si le projet contient des modifications non enregistrées.
+        Si oui, demande à l'utilisateur s'il souhaite enregistrer les modifications :
+        - 'save' : enregistre le projet. Si la sauvegarde réussit, continue (True), sinon annule (False).
+        - 'discard' : ignore les modifications non enregistrées et continue (True).
+        - 'cancel' : annule l'opération (False).
+        Retourne True pour poursuivre l'action (fermeture/nouveau/ouvrir), False pour annuler.
+        """
+        if not self.has_unsaved_changes():
+            return True
+
+        project_name = getattr(self.project, "name", "Sans Titre")
+        if reason == "close":
+            msg = (
+                f"Le projet « {project_name} » contient des modifications non enregistrées.\n\n"
+                "Voulez-vous enregistrer les modifications avant de quitter NovaDAW ?"
+            )
+        elif reason == "new":
+            msg = (
+                f"Le projet « {project_name} » contient des modifications non enregistrées.\n\n"
+                "Voulez-vous enregistrer les modifications avant de créer un nouveau projet ?"
+            )
+        elif reason == "open":
+            msg = (
+                f"Le projet « {project_name} » contient des modifications non enregistrées.\n\n"
+                "Voulez-vous enregistrer les modifications avant d'ouvrir un autre projet ?"
+            )
+        elif reason == "demo":
+            msg = (
+                f"Le projet « {project_name} » contient des modifications non enregistrées.\n\n"
+                "Voulez-vous enregistrer les modifications avant de charger le projet de démonstration ?"
+            )
+        else:
+            msg = (
+                f"Le projet « {project_name} » contient des modifications non enregistrées.\n\n"
+                "Voulez-vous enregistrer les modifications ?"
+            )
+
+        choice = self._prompt_save_dialog(msg)
+        if choice == "save":
+            return self.save_project_action()
+        elif choice == "discard":
+            return True
+        else:
+            return False
+
     # --- Actions Fichier ---
 
-    def new_project(self):
+    def new_project(self) -> bool:
+        if not self.maybe_save_changes(reason="new"):
+            return False
         global_plugin_manager.close_all_editors()
         self.audio_engine.stop()
         self.project = Project.create_empty()
         self.audio_engine.set_project(self.project)
         self.selected_track_id = None
         self._on_seek(0.0)
+        self._saved_project_snapshot = self._capture_project_snapshot()
+        self.set_dirty(False)
         self.refresh_project_ui()
         self.statusBar().showMessage("Nouveau projet vide créé.", 3000)
+        return True
 
-    def load_demo_project(self):
+    def load_demo_project(self) -> bool:
+        if not self.maybe_save_changes(reason="demo"):
+            return False
         global_plugin_manager.close_all_editors()
         self.audio_engine.stop()
         self.project = Project.create_demo()
         self.audio_engine.set_project(self.project)
         self.selected_track_id = None
         self._on_seek(0.0)
+        self._saved_project_snapshot = self._capture_project_snapshot()
+        self.set_dirty(False)
         self.refresh_project_ui()
         self.statusBar().showMessage("Projet de démonstration chargé.", 3000)
+        return True
 
-    def open_project_dialog(self):
+    def open_project_dialog(self) -> bool:
+        if not self.maybe_save_changes(reason="open"):
+            return False
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Ouvrir un projet NovaDAW",
@@ -1498,22 +1852,31 @@ class MainWindow(QMainWindow):
                     self.lbl_cache_text.setText("Chargement du cache audio...")
                 self.project = load_project(file_path)
                 self.audio_engine.set_project(self.project)
+                self._saved_project_snapshot = self._capture_project_snapshot()
+                self.set_dirty(False)
                 self.refresh_project_ui()
                 self.statusBar().showMessage(f"Projet chargé : {os.path.basename(file_path)}", 4000)
+                return True
             except Exception as e:
                 QMessageBox.critical(self, "Erreur d'ouverture", f"Impossible d'ouvrir le projet :\n{e}")
+                return False
+        return False
 
-    def save_project_action(self):
+    def save_project_action(self) -> bool:
         if self.project.file_path:
             try:
                 save_project(self.project, self.project.file_path)
+                self._saved_project_snapshot = self._capture_project_snapshot()
+                self.set_dirty(False)
                 self.statusBar().showMessage("Projet enregistré avec succès.", 3000)
+                return True
             except Exception as e:
                 QMessageBox.critical(self, "Erreur d'enregistrement", f"Impossible d'enregistrer le projet :\n{e}")
+                return False
         else:
-            self.save_project_as_dialog()
+            return self.save_project_as_dialog()
 
-    def save_project_as_dialog(self):
+    def save_project_as_dialog(self) -> bool:
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Enregistrer le projet sous...",
@@ -1526,10 +1889,15 @@ class MainWindow(QMainWindow):
             try:
                 self.project.name = os.path.splitext(os.path.basename(file_path))[0]
                 save_project(self.project, file_path)
+                self._saved_project_snapshot = self._capture_project_snapshot()
+                self.set_dirty(False)
                 self.refresh_project_ui()
                 self.statusBar().showMessage(f"Projet enregistré sous {os.path.basename(file_path)}", 4000)
+                return True
             except Exception as e:
                 QMessageBox.critical(self, "Erreur d'enregistrement", f"Impossible d'enregistrer le projet :\n{e}")
+                return False
+        return False
 
     def export_audio_dialog(self):
         file_path, _ = QFileDialog.getSaveFileName(
@@ -1620,6 +1988,7 @@ class MainWindow(QMainWindow):
                 f"Fichier audio importé avec succès : {res['clip_name']} ({res['duration_seconds']}s sur {res['track_name']})",
                 4000
             )
+            self.set_dirty(True)
         except Exception as e:
             QMessageBox.warning(self, "Erreur d'importation", f"Impossible d'importer le fichier audio :\n{e}")
 
@@ -1645,6 +2014,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Configuration des périphériques mise à jour avec succès.", 3000)
 
     def closeEvent(self, event):
+        if not self.maybe_save_changes(reason="close"):
+            event.ignore()
+            return
+
         global_plugin_manager.close_all_editors()
         if hasattr(self, "ipc_server"):
             self.ipc_server.stop()

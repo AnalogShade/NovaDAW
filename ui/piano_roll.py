@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import (
     QPainter, QColor, QPen, QBrush, QFont, QMouseEvent, QWheelEvent, QPolygonF
 )
-from PySide6.QtCore import Qt, Signal, QRectF, QPointF
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QEvent
 from core.project import MidiClip, MidiNote, Track
 from core.audio_engine import AudioEngine
 
@@ -145,6 +145,32 @@ class NoteGridWidget(QWidget):
 
     def set_snap(self, snap: float):
         self.snap_beats = snap
+
+    def set_zoom(self, ppb: float):
+        self.pixels_per_beat = max(15.0, min(300.0, float(ppb)))
+        self.update_dimensions()
+        self.update()
+
+    def zoom_in(self):
+        self.set_zoom(self.pixels_per_beat * 1.25)
+
+    def zoom_out(self):
+        self.set_zoom(self.pixels_per_beat / 1.25)
+
+    def zoom_reset(self):
+        self.set_zoom(60.0)
+
+    def wheelEvent(self, event: QWheelEvent):
+        """Ctrl + Molette pour zoomer / dézoomer la grille du piano roll"""
+        if event.modifiers() & Qt.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.zoom_in()
+            elif delta < 0:
+                self.zoom_out()
+            event.accept()
+            return
+        super().wheelEvent(event)
 
     def update_dimensions(self):
         h = self.num_pitches * self.row_height
@@ -405,6 +431,25 @@ class PianoRoll(QWidget):
         self.combo_snap.currentIndexChanged.connect(self._on_snap_changed)
         tb_layout.addWidget(self.combo_snap)
 
+        # Contrôles de Zoom
+        self.btn_zoom_out = QPushButton("🔍-")
+        self.btn_zoom_out.setFixedSize(32, 26)
+        self.btn_zoom_out.setToolTip("Dézoomer (Ctrl + Molette bas)")
+        self.btn_zoom_out.clicked.connect(self.zoom_out)
+        tb_layout.addWidget(self.btn_zoom_out)
+
+        self.btn_zoom_reset = QPushButton("100%")
+        self.btn_zoom_reset.setFixedSize(45, 26)
+        self.btn_zoom_reset.setToolTip("Réinitialiser le zoom (Ctrl + 0)")
+        self.btn_zoom_reset.clicked.connect(self.zoom_reset)
+        tb_layout.addWidget(self.btn_zoom_reset)
+
+        self.btn_zoom_in = QPushButton("🔍+")
+        self.btn_zoom_in.setFixedSize(32, 26)
+        self.btn_zoom_in.setToolTip("Zoomer (Ctrl + Molette haut)")
+        self.btn_zoom_in.clicked.connect(self.zoom_in)
+        tb_layout.addWidget(self.btn_zoom_in)
+
         tb_layout.addStretch()
 
         # Bouton Ouvrir Interface Plugin
@@ -446,6 +491,8 @@ class PianoRoll(QWidget):
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setStyleSheet("QScrollArea { border: none; background-color: #121318; }")
+        self.scroll_area.installEventFilter(self)
+        self.scroll_area.viewport().installEventFilter(self)
 
         # Container regroupant les touches et la grille côte à côte
         content_widget = QWidget()
@@ -470,6 +517,26 @@ class PianoRoll(QWidget):
 
         # Centrer le défilement vertical vers le milieu (Do4 / C4)
         self.scroll_area.verticalScrollBar().setValue(200)
+
+    def eventFilter(self, watched, event):
+        """Intercepte Ctrl + Molette partout dans la zone de défilement du Piano Roll pour zoomer"""
+        if event.type() == QEvent.Wheel and (event.modifiers() & Qt.ControlModifier):
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.zoom_in()
+            elif delta < 0:
+                self.zoom_out()
+            return True
+        return super().eventFilter(watched, event)
+
+    def zoom_in(self):
+        self.note_grid.zoom_in()
+
+    def zoom_out(self):
+        self.note_grid.zoom_out()
+
+    def zoom_reset(self):
+        self.note_grid.zoom_reset()
 
     def set_playhead(self, beat: float):
         self.note_grid.set_playhead(beat)

@@ -65,6 +65,9 @@ def create_track(app, name: str, track_type: str = "midi", color: Optional[str] 
     )
     app.project.add_track(new_track)
 
+    if hasattr(app, "set_dirty"):
+        app.set_dirty(True)
+
     if hasattr(app, "refresh_project_ui"):
         app.refresh_project_ui()
 
@@ -109,6 +112,9 @@ def set_track_controls(
     if soloed is not None:
         target_track.soloed = bool(soloed)
 
+    if hasattr(app, "set_dirty"):
+        app.set_dirty(True)
+
     if hasattr(app, "refresh_project_ui"):
         app.refresh_project_ui()
 
@@ -134,6 +140,10 @@ def save_project_action(app, file_path: Optional[str] = None) -> Dict[str, Any]:
 
     save_project(app.project, target_path)
     app.project.file_path = target_path
+    if hasattr(app, "set_dirty"):
+        app.set_dirty(False)
+    if hasattr(app, "_saved_project_snapshot") and hasattr(app, "_capture_project_snapshot"):
+        app._saved_project_snapshot = app._capture_project_snapshot()
     if hasattr(app, "statusBar"):
         app.statusBar().showMessage(f"Projet sauvegardé : {os.path.basename(target_path)}", 3000)
 
@@ -224,6 +234,9 @@ def import_audio_file_action(
     target_track.clips.append(new_clip)
 
     # Mise à jour de l'interface utilisateur
+    if hasattr(app, "set_dirty"):
+        app.set_dirty(True)
+
     if hasattr(app, "refresh_project_ui"):
         app.refresh_project_ui()
 

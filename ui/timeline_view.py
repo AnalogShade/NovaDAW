@@ -8,10 +8,66 @@ from PySide6.QtWidgets import (
     QWidget, QScrollArea, QVBoxLayout, QHBoxLayout, QFrame, QMenu, QInputDialog, QToolTip
 )
 from PySide6.QtGui import (
-    QPainter, QColor, QPen, QBrush, QFont, QFontMetrics, QMouseEvent, QWheelEvent, QPolygonF, QCursor
+    QPainter, QColor, QPen, QBrush, QFont, QFontMetrics, QMouseEvent, QWheelEvent,
+    QPolygonF, QCursor, QPixmap, QPainterPath
 )
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF
 from core.project import Project, Track, MidiClip, AudioClip, MidiNote, ClipType
+
+
+def create_scissors_cursor() -> QCursor:
+    """Génère un curseur de souris représentant une véritable paire de ciseaux professionnelle."""
+    size = 32
+    pix = QPixmap(size, size)
+    pix.fill(Qt.transparent)
+
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.Antialiasing)
+
+    # 1. Tracé de l'ombre / contour noir pour un contraste absolu sur tout type de bloc (clair ou sombre)
+    path_blade1 = QPainterPath()
+    path_blade1.moveTo(2, 2)
+    path_blade1.lineTo(13, 13)
+    path_blade1.lineTo(24, 24)
+
+    path_h1 = QPainterPath()
+    path_h1.addEllipse(QPointF(23, 20), 5.5, 4.5)
+
+    path_h2 = QPainterPath()
+    path_h2.addEllipse(QPointF(19, 24), 4.5, 5.5)
+
+    path_blade2 = QPainterPath()
+    path_blade2.moveTo(2, 11)
+    path_blade2.lineTo(13, 13)
+    path_blade2.lineTo(17, 16)
+
+    p.setPen(QPen(QColor(0, 0, 0, 240), 3.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    p.drawPath(path_h1)
+    p.drawPath(path_h2)
+    p.drawPath(path_blade1)
+    p.drawPath(path_blade2)
+
+    # 2. Anneaux ergonomiques de la poignée en cyan Nova
+    p.setPen(QPen(QColor("#38bdf8"), 1.8))
+    p.drawEllipse(QPointF(23, 20), 4.5, 3.5)
+    p.drawEllipse(QPointF(19, 24), 3.5, 4.5)
+
+    # 3. Lames acérées argentées / blanches contrastées
+    p.setPen(QPen(QColor("#ffffff"), 2.0, Qt.SolidLine, Qt.RoundCap))
+    p.drawLine(QPointF(2, 2), QPointF(13, 13))
+    p.drawLine(QPointF(2, 11), QPointF(13, 13))
+    p.drawLine(QPointF(13, 13), QPointF(22, 22))
+
+    # 4. Rivet central / vis de pivot en laiton doré
+    p.setPen(QPen(QColor("#0f172a"), 1))
+    p.setBrush(QBrush(QColor("#facc15")))
+    p.drawEllipse(QPointF(13, 13), 2.2, 2.2)
+
+    p.end()
+
+    # Le point actif (hotspot) est à la pointe exacte de découpe de la lame supérieure : (2, 2)
+    return QCursor(pix, 2, 2)
+
 
 
 class TimelineRuler(QWidget):
@@ -19,6 +75,8 @@ class TimelineRuler(QWidget):
     seek_requested = Signal(float)
     loop_changed = Signal(float, float)
     status_hint = Signal(str)
+    zoom_in_requested = Signal()
+    zoom_out_requested = Signal()
 
     HANDLE_MARGIN = 10  # Zone de détection en pixels pour les poignées gauche et droite
 
@@ -41,6 +99,18 @@ class TimelineRuler(QWidget):
         self._drag_anchor_beat = 0.0
         self._hovered_handle = None  # None, "start", "end", "region"
         self.setMouseTracking(True)
+
+    def wheelEvent(self, event: QWheelEvent):
+        """Ctrl + Molette pour zoomer / dézoomer la règle et la timeline"""
+        if event.modifiers() & Qt.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.zoom_in_requested.emit()
+            elif delta < 0:
+                self.zoom_out_requested.emit()
+            event.accept()
+            return
+        super().wheelEvent(event)
 
     def set_zoom(self, ppb: float):
         self.pixels_per_beat = ppb
@@ -390,6 +460,8 @@ class TimelineGrid(QWidget):
     time_range_selected = Signal(float, float)
     track_height_changed = Signal(str, int, bool)  # (track_id, height, apply_all)
     status_message = Signal(str, int)  # (message, duration_ms)
+    zoom_in_requested = Signal()
+    zoom_out_requested = Signal()
 
     DEFAULT_TRACK_HEIGHT = 76
     RESIZE_MARGIN = 5
@@ -431,8 +503,29 @@ class TimelineGrid(QWidget):
         self._drag_start_track_h = 76
         self._drag_start_track_y = 0
 
+        self._scissors_cursor: Optional[QCursor] = None
+
         self.setMouseTracking(True)
         self.update_dimensions()
+
+    def get_scissors_cursor(self) -> QCursor:
+        """Retourne le curseur personnalisé en forme de ciseaux (mis en cache)."""
+        if self._scissors_cursor is None:
+            self._scissors_cursor = create_scissors_cursor()
+        return self._scissors_cursor
+
+    def enterEvent(self, event):
+        if self.active_tool == "split":
+            self.setCursor(self.get_scissors_cursor())
+        elif self.active_tool == "erase":
+            self.setCursor(Qt.PointingHandCursor)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover_split_beat = None
+        self._hover_clip = None
+        self.update()
+        super().leaveEvent(event)
 
     def snap_beat(self, beat: float) -> float:
         """Aligne un temps sur la grille active selon la résolution choisie si snap est actif"""
@@ -447,11 +540,14 @@ class TimelineGrid(QWidget):
         self._hover_split_beat = None
         self._hover_clip = None
         if tool_name == "split":
-            self.setCursor(Qt.SplitHCursor)
+            self.setCursor(self.get_scissors_cursor())
+            self.status_message.emit("✂️ Outil Ciseaux actif : Cliquez sur un clip pour le scinder à l'endroit précis (Raccourci: 2 ou C)", 3500)
         elif tool_name == "erase":
             self.setCursor(Qt.PointingHandCursor)
+            self.status_message.emit("🗑️ Outil Gomme actif : Cliquez sur un clip pour le supprimer instantanément (Raccourci: 3)", 3500)
         else:
             self.unsetCursor()
+            self.status_message.emit("🖱️ Outil Pointeur actif : Sélectionner, déplacer et redimensionner des blocs (Raccourci: 1 ou V)", 2500)
         self.update()
 
     def set_grid_resolution(self, res_beats: float):
@@ -608,10 +704,39 @@ class TimelineGrid(QWidget):
         self.update_dimensions()
         self.update()
 
+    def get_total_project_beats(self) -> float:
+        """Calcule la durée totale en temps (beats) du projet avec marge de fin dynamique"""
+        max_beat = 128.0  # Au minimum 32 mesures
+        if hasattr(self.project, "loop_end_beat") and self.project.loop_end_beat:
+            max_beat = max(max_beat, float(self.project.loop_end_beat))
+        if hasattr(self, "playhead_beat") and self.playhead_beat:
+            max_beat = max(max_beat, float(self.playhead_beat))
+        for track in self.project.tracks:
+            for clip in track.clips:
+                clip_end = float(clip.start_beat) + float(clip.length_beats)
+                if clip_end > max_beat:
+                    max_beat = clip_end
+        # Marge de fin d'au moins 16 mesures (64 temps) pour respirer et éditer librement
+        return max_beat + 64.0
+
+    def wheelEvent(self, event: QWheelEvent):
+        """Ctrl + Molette pour zoomer / dézoomer la timeline"""
+        if event.modifiers() & Qt.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.zoom_in_requested.emit()
+            elif delta < 0:
+                self.zoom_out_requested.emit()
+            event.accept()
+            return
+        super().wheelEvent(event)
+
     def set_playhead(self, beat: float):
         old_px = int(self.playhead_beat * self.pixels_per_beat)
         new_px = int(beat * self.pixels_per_beat)
         self.playhead_beat = beat
+        if (new_px + 200) > self.width():
+            self.update_dimensions()
         if old_px == new_px:
             return
         h = self.height()
@@ -636,7 +761,8 @@ class TimelineGrid(QWidget):
     def update_dimensions(self):
         total_tracks_h = sum(getattr(t, "height", self.DEFAULT_TRACK_HEIGHT) for t in self.project.tracks)
         h = max(400, total_tracks_h)
-        w = max(2400, int(128.0 * self.pixels_per_beat))
+        total_beats = self.get_total_project_beats()
+        w = max(2400, int(total_beats * self.pixels_per_beat))
         self.setFixedSize(w, h)
 
     def _get_track_at_y(self, y: int) -> Tuple[Optional[Track], int]:
@@ -694,12 +820,22 @@ class TimelineGrid(QWidget):
             if self.active_tool == "split":
                 if clip and track:
                     raw_beat = x / self.pixels_per_beat
-                    split_beat = self.snap_beat(raw_beat)
+                    split_beat = self.snap_beat(raw_beat) if (self.snap_enabled and self.grid_resolution > 0) else raw_beat
                     # Vérifier que le point de coupe est à l'intérieur du bloc
-                    if clip.start_beat + 0.04 < split_beat < clip.start_beat + clip.length_beats - 0.04:
-                        self.split_clip_at(track, clip, split_beat)
-                    elif clip.start_beat + 0.04 < raw_beat < clip.start_beat + clip.length_beats - 0.04:
-                        self.split_clip_at(track, clip, raw_beat)
+                    target_split = None
+                    if clip.start_beat + 0.02 < split_beat < clip.start_beat + clip.length_beats - 0.02:
+                        target_split = split_beat
+                    elif clip.start_beat + 0.02 < raw_beat < clip.start_beat + clip.length_beats - 0.02:
+                        target_split = raw_beat
+
+                    if target_split is not None:
+                        p1, p2 = self.split_clip_at(track, clip, target_split)
+                        self._hover_split_beat = target_split
+                        self._hover_clip = (track, p2)
+                        self.status_message.emit(f"✂️ Bloc '{clip.name}' scindé à {target_split:.2f} temps en deux parties", 3500)
+                        self.update()
+                    else:
+                        self.status_message.emit("Point de coupe trop proche des extrémités du bloc", 2000)
                 return
 
             # 3. Outil Gomme (Erase Tool)
@@ -810,20 +946,19 @@ class TimelineGrid(QWidget):
             event.accept()
             return
 
-        # Survol avec outil Ciseaux : affiche la ligne repère de coupe aimantée
+        # Survol avec outil Ciseaux : conserve le curseur ciseaux et affiche la ligne repère de coupe aimantée
         if self.active_tool == "split":
+            self.setCursor(self.get_scissors_cursor())
             track, clip, _ = self._get_clip_at(x, y)
+            raw_beat = x / self.pixels_per_beat
+            snapped = self.snap_beat(raw_beat) if (self.snap_enabled and self.grid_resolution > 0) else raw_beat
             if track and clip:
-                self.setCursor(Qt.SplitHCursor)
-                raw_beat = x / self.pixels_per_beat
-                snapped = self.snap_beat(raw_beat)
                 if clip.start_beat <= snapped <= clip.start_beat + clip.length_beats:
                     self._hover_split_beat = snapped
                 else:
                     self._hover_split_beat = raw_beat
                 self._hover_clip = (track, clip)
             else:
-                self.setCursor(Qt.ArrowCursor)
                 self._hover_split_beat = None
                 self._hover_clip = None
             self.update()
@@ -914,14 +1049,23 @@ class TimelineGrid(QWidget):
             self.update()
 
     def keyPressEvent(self, event):
-        # Outils rapides clavier : 1 = Pointeur, 2 = Ciseaux, 3 = Gomme
-        if event.key() == Qt.Key_1 and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
+        # Touche Échap : Revenir immédiatement à l'outil Pointeur
+        if event.key() == Qt.Key_Escape:
+            if self.active_tool != "select":
+                self.set_active_tool("select")
+                if hasattr(self.parent(), "editing_toolbar"):
+                    self.parent().editing_toolbar.set_active_tool("select")
+                event.accept()
+                return
+
+        # Outils rapides clavier : 1 ou V = Pointeur, 2 ou C = Ciseaux, 3 = Gomme
+        if event.key() in (Qt.Key_1, Qt.Key_V) and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
             self.set_active_tool("select")
             if hasattr(self.parent(), "editing_toolbar"):
                 self.parent().editing_toolbar.set_active_tool("select")
             event.accept()
             return
-        elif event.key() == Qt.Key_2 and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
+        elif event.key() in (Qt.Key_2, Qt.Key_C) and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
             self.set_active_tool("split")
             if hasattr(self.parent(), "editing_toolbar"):
                 self.parent().editing_toolbar.set_active_tool("split")
@@ -976,10 +1120,11 @@ class TimelineGrid(QWidget):
     def _show_clip_context_menu(self, pos, track: Track, clip: ClipType):
         menu = QMenu(self)
         action_edit = menu.addAction("✏ Éditer le bloc")
-        action_split_playhead = menu.addAction("✂️ Scinder à la tête de lecture (Ctrl+K)")
+        action_tool_split = menu.addAction("✂️ Activer l'outil Ciseaux (2)")
+        action_split_playhead = menu.addAction("⚡ Scinder à la tête de lecture (Ctrl+K)")
         menu.addSeparator()
         action_copy = menu.addAction("📋 Copier (Ctrl+C)")
-        action_cut = menu.addAction("✂️ Couper (Ctrl+X)")
+        action_cut = menu.addAction("✂️ Couper Bloc (Ctrl+X)")
         action_dup = menu.addAction("📑 Dupliquer (Ctrl+D)")
         action_rename = menu.addAction("Renommer...")
         menu.addSeparator()
@@ -988,6 +1133,10 @@ class TimelineGrid(QWidget):
         action = menu.exec(pos)
         if action == action_edit:
             self.clip_double_clicked.emit(track, clip)
+        elif action == action_tool_split:
+            self.set_active_tool("split")
+            if hasattr(self.parent(), "editing_toolbar"):
+                self.parent().editing_toolbar.set_active_tool("split")
         elif action == action_split_playhead:
             self.split_at_playhead()
         elif action == action_copy:
@@ -1238,18 +1387,42 @@ class TimelineGrid(QWidget):
             cut_x = int(self._hover_split_beat * self.pixels_per_beat)
             for t, ty, th in track_layout:
                 if t.id == h_track.id:
-                    guide_y1 = ty + 4
-                    guide_y2 = ty + th - 4
+                    guide_y1 = ty + 2
+                    guide_y2 = ty + th - 2
                     painter.setPen(QPen(QColor("#38bdf8"), 2, Qt.DashLine))
                     painter.drawLine(cut_x, guide_y1, cut_x, guide_y2)
                     painter.setBrush(QBrush(QColor("#38bdf8")))
                     painter.setPen(Qt.NoPen)
-                    tri = QPolygonF([
+
+                    # Triangle supérieur
+                    tri_top = QPolygonF([
                         QPointF(cut_x - 5, guide_y1),
                         QPointF(cut_x + 5, guide_y1),
                         QPointF(cut_x, guide_y1 + 7)
                     ])
-                    painter.drawPolygon(tri)
+                    painter.drawPolygon(tri_top)
+
+                    # Triangle inférieur
+                    tri_bot = QPolygonF([
+                        QPointF(cut_x - 5, guide_y2),
+                        QPointF(cut_x + 5, guide_y2),
+                        QPointF(cut_x, guide_y2 - 7)
+                    ])
+                    painter.drawPolygon(tri_bot)
+
+                    # Badge textuel avec position exacte en temps
+                    tag_text = f"✂ {self._hover_split_beat:.2f} t"
+                    painter.setFont(QFont("Consolas", 8, QFont.Bold))
+                    fm = QFontMetrics(painter.font())
+                    tw = fm.horizontalAdvance(tag_text) + 8
+                    th_box = 16
+                    tag_x = max(0, cut_x - tw // 2)
+                    tag_y = max(0, guide_y1 - th_box - 2)
+                    painter.setBrush(QBrush(QColor("#0284c7")))
+                    painter.setPen(QPen(QColor("#38bdf8"), 1))
+                    painter.drawRoundedRect(tag_x, tag_y, tw, th_box, 3, 3)
+                    painter.setPen(QColor("#ffffff"))
+                    painter.drawText(tag_x, tag_y, tw, th_box, Qt.AlignCenter, tag_text)
                     break
 
         # Tête de lecture (Ligne verticale)

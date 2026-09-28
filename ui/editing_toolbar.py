@@ -67,7 +67,7 @@ class EditingToolbar(QWidget):
                 color: #cbd5e1;
                 border: 1px solid #2f354a;
                 border-radius: 4px;
-                padding: 2px 8px;
+                padding: 2px 7px;
                 font-size: 11px;
             }
             QPushButton.action_btn:hover {
@@ -80,7 +80,7 @@ class EditingToolbar(QWidget):
                 color: #94a3b8;
                 border: 1px solid #2f354a;
                 border-radius: 4px;
-                padding: 2px 8px;
+                padding: 2px 7px;
                 font-size: 11px;
             }
             QPushButton.snap_btn:checked {
@@ -94,9 +94,9 @@ class EditingToolbar(QWidget):
                 color: #e2e8f0;
                 border: 1px solid #2e354a;
                 border-radius: 4px;
-                padding: 2px 6px;
+                padding: 2px 5px;
                 font-size: 11px;
-                min-width: 120px;
+                min-width: 105px;
             }
             QComboBox::drop-down {
                 border: none;
@@ -133,15 +133,15 @@ class EditingToolbar(QWidget):
         self.tool_group.setExclusive(True)
 
         self.btn_select = QPushButton("🖱️ Pointeur (1)")
-        self.btn_select.setToolTip("Outil Pointeur [1] : Sélectionner, déplacer et redimensionner des blocs")
+        self.btn_select.setToolTip("Outil Pointeur [1 ou V] : Sélectionner, déplacer et redimensionner des blocs")
         self.btn_select.setProperty("class", "tool_btn")
         self.btn_select.setCheckable(True)
         self.btn_select.setChecked(True)
         self.tool_group.addButton(self.btn_select)
         layout.addWidget(self.btn_select)
 
-        self.btn_split = QPushButton("✂️ Ciseaux (2)")
-        self.btn_split.setToolTip("Outil Ciseaux [2] : Cliquer sur un bloc pour le scinder en deux selon la grille")
+        self.btn_split = QPushButton("✂️ Ciseaux / Scinder (2)")
+        self.btn_split.setToolTip("Outil Ciseaux [2 ou C] : Transforme le curseur en ciseaux pour scinder précisément n'importe quel clip au clic de souris")
         self.btn_split.setProperty("class", "tool_btn")
         self.btn_split.setCheckable(True)
         self.tool_group.addButton(self.btn_split)
@@ -159,8 +159,8 @@ class EditingToolbar(QWidget):
         layout.addWidget(self._create_sep())
 
         # --- 2. ACTION SCISSION DIRECTE À LA TÊTE ---
-        self.btn_split_playhead = QPushButton("✂️ Scinder Tête (Ctrl+K)")
-        self.btn_split_playhead.setToolTip("Scinder le bloc sélectionné (ou sous la tête) à la position de lecture actuelle [Ctrl+K ou S]")
+        self.btn_split_playhead = QPushButton("⚡ Scinder Tête (Ctrl+K)")
+        self.btn_split_playhead.setToolTip("Action instantanée : Scinder le clip sous la tête de lecture à sa position actuelle [Ctrl+K ou S]")
         self.btn_split_playhead.setProperty("class", "action_btn")
         self.btn_split_playhead.clicked.connect(self.split_playhead_requested.emit)
         layout.addWidget(self.btn_split_playhead)
@@ -174,8 +174,8 @@ class EditingToolbar(QWidget):
         self.btn_copy.clicked.connect(self.copy_requested.emit)
         layout.addWidget(self.btn_copy)
 
-        self.btn_cut = QPushButton("✂️ Couper")
-        self.btn_cut.setToolTip("Couper le bloc sélectionné [Ctrl+X]")
+        self.btn_cut = QPushButton("✂️ Couper Bloc")
+        self.btn_cut.setToolTip("Couper le bloc sélectionné vers le presse-papier [Ctrl+X]")
         self.btn_cut.setProperty("class", "action_btn")
         self.btn_cut.clicked.connect(self.cut_requested.emit)
         layout.addWidget(self.btn_cut)

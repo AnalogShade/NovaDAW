@@ -462,3 +462,137 @@ def test_grid_snapping_libre_and_switch_back_to_quarter(qapp):
 
     window.close()
 
+
+def test_scissors_tool_cursor_and_interactive_click_splitting(qapp):
+    """
+    Vérifie les améliorations demandées par l'utilisateur pour l'outil Ciseaux :
+    1. Activer l'outil Ciseaux (2) applique le vrai curseur personnalisé en forme de ciseaux.
+    2. Le survol de la timeline conserve le curseur ciseaux sur toute la grille.
+    3. Cliquer à un endroit précis scinde le bloc en deux immédiatement.
+    4. L'outil Ciseaux RESTE actif après la découpe pour permettre plusieurs découpes d'affilée.
+    5. Les raccourcis clavier (2, C, V, 1, Échap) basculent correctement les outils.
+    """
+    from PySide6.QtCore import Qt, QPointF
+    from PySide6.QtGui import QMouseEvent, QKeyEvent
+
+    proj = Project.create_empty()
+    t = Track(name="Guitare", track_type="audio")
+    data = np.zeros((44100 * 8, 2), dtype=np.float32)
+    clip = AudioClip(name="SoloGuitare", audio_data=data, sample_rate=44100, start_beat=0.0, length_beats=8.0)
+    t.clips.append(clip)
+    proj.add_track(t)
+
+    grid = TimelineGrid(proj)
+    grid.resize(800, 300)
+
+    # 1. Activation de l'outil Ciseaux
+    grid.set_active_tool("split")
+    assert grid.active_tool == "split"
+    assert grid.cursor() is not None
+    # Le curseur est bien un Bitmap / Custom cursor (ciseaux)
+    assert grid.cursor().shape() == Qt.BitmapCursor
+
+    # 2. Le survol de la timeline conserve le curseur ciseaux (ne revient pas en flèche)
+    move_ev = QMouseEvent(QMouseEvent.Type.MouseMove, QPointF(120, 30), Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+    grid.mouseMoveEvent(move_ev)
+    assert grid.cursor().shape() == Qt.BitmapCursor
+    assert grid._hover_split_beat is not None
+    assert grid._hover_clip is not None
+
+    # Survol hors clip : le curseur reste ciseaux
+    move_empty = QMouseEvent(QMouseEvent.Type.MouseMove, QPointF(700, 200), Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+    grid.mouseMoveEvent(move_empty)
+    assert grid.cursor().shape() == Qt.BitmapCursor
+
+    # 3. Clic pour scinder à 3.0 temps
+    # pixels_per_beat par défaut = 40, donc 3.0 temps = 120 px
+    click_ev = QMouseEvent(QMouseEvent.Type.MouseButtonPress, QPointF(120, 30), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    grid.mousePressEvent(click_ev)
+
+    # Vérification : le bloc est scindé en 2 parties
+    assert len(t.clips) == 2
+    assert np.isclose(t.clips[0].length_beats, 3.0)
+    assert np.isclose(t.clips[1].length_beats, 5.0)
+
+    # 4. L'outil Ciseaux DOIT RESTER ACTIF pour continuer à découper
+    assert grid.active_tool == "split"
+    assert grid.cursor().shape() == Qt.BitmapCursor
+
+    # 5. Deuxième découpe sur le deuxième morceau à 6.0 temps (x = 240)
+    click_ev2 = QMouseEvent(QMouseEvent.Type.MouseButtonPress, QPointF(240, 30), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    grid.mousePressEvent(click_ev2)
+    assert len(t.clips) == 3
+
+    # 6. Raccourcis clavier : Échap ou 1 ou V revient au Pointeur
+    key_esc = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key_Escape, Qt.NoModifier)
+    grid.keyPressEvent(key_esc)
+    assert grid.active_tool == "select"
+
+    key_c = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key_C, Qt.NoModifier)
+    grid.keyPressEvent(key_c)
+    assert grid.active_tool == "split"
+
+    key_v = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key_V, Qt.NoModifier)
+    grid.keyPressEvent(key_v)
+    assert grid.active_tool == "select"
+
+
+def test_track_header_controls_never_clipped(qapp):
+    """
+    Vérifie le correctif de mise en page pour que tous les boutons (M, Solo, Record, Suppr)
+    soient toujours visibles et jamais tronqués ou cachés :
+    1. left_panel a une largeur minimale garantie >= 260px.
+    2. TrackHeaderWidget a une largeur minimale de 250px.
+    3. Les boutons Mute, Solo, Record et Supprimer sont dans un conteneur rigide insécable.
+    4. Le bouton Solo est visible et accessible sans nécessiter d'agrandir ou scroller.
+    """
+    from PySide6.QtCore import Qt, QPoint
+    from PySide6.QtWidgets import QWidget
+    from ui.track_header import TrackHeaderWidget
+
+    window = MainWindow()
+    window.resize(1280, 820)
+    window.show()
+
+    # Vérifier que le panneau gauche d'en-tête de piste a une largeur minimale garantie
+    left_panel = window.findChild(QWidget, "left_headers_panel")
+    assert left_panel is not None
+    assert left_panel.minimumWidth() >= 260
+
+    # Créer un projet avec des pistes
+    t1 = Track(name="Basse Électrique Super Longue", track_type="audio", soloed=True)
+    t2 = Track(name="Synth Pad", track_type="midi", muted=True)
+    window.project.tracks = [t1, t2]
+    window.refresh_project_ui()
+    QApplication.processEvents()
+
+    # Récupérer les en-têtes
+    headers = [w for w in window.headers_container.findChildren(TrackHeaderWidget)]
+    assert len(headers) == 2
+
+    h1 = headers[0]
+    h1.show()
+    QApplication.processEvents()
+    # Vérifications des boutons de h1
+    assert h1.btn_mute.isVisible() is True
+    assert h1.btn_solo.isVisible() is True
+    assert h1.btn_rec.isVisible() is True
+    assert h1.btn_delete.isVisible() is True
+
+    # Solo est activé et son aura/état est vérifiable
+    assert h1.btn_solo.isChecked() is True
+    assert h1.btn_solo.width() == 22
+    assert h1.btn_solo.height() == 22
+
+    # Même si l'en-tête est contraint à sa largeur minimale (250px),
+    # le champ de nom rétrécit et laisse le bouton Solo 100% dans les limites visibles
+    h1.resize(250, 76)
+    QApplication.processEvents()
+
+    # Le bouton Solo se trouve bien dans la zone visible (x < 250)
+    solo_pos_in_header = h1.btn_solo.mapTo(h1, QPoint(0, 0))
+    assert solo_pos_in_header.x() + h1.btn_solo.width() <= 250
+    assert solo_pos_in_header.x() > 0
+
+    window.close()
+

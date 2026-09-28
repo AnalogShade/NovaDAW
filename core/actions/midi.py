@@ -160,6 +160,9 @@ def add_midi_notes(
         app.timeline_grid.update_dimensions()
         app.timeline_grid.update()
 
+    if hasattr(app, "set_dirty"):
+        app.set_dirty(True)
+
     return {
         "status": "success",
         "clip_id": clip.id,
@@ -187,6 +190,8 @@ def clear_midi_notes(app, clip_id_or_name: Optional[str] = None, track_id_or_nam
         app.piano_roll.note_grid.update()
     if hasattr(app, "timeline_grid"):
         app.timeline_grid.update()
+    if hasattr(app, "set_dirty"):
+        app.set_dirty(True)
 
     return {"status": "success", "clip_id": clip.id, "cleared_count": count}
 
@@ -230,6 +235,8 @@ def remove_midi_notes(
         app.piano_roll.note_grid.update()
     if hasattr(app, "timeline_grid"):
         app.timeline_grid.update()
+    if hasattr(app, "set_dirty"):
+        app.set_dirty(True)
 
     return {"status": "success", "clip_id": clip.id, "removed_count": removed_count, "remaining_count": len(remaining)}
 
@@ -274,6 +281,8 @@ def create_midi_clip(
     if hasattr(app, "timeline_grid"):
         app.timeline_grid.update_dimensions()
         app.timeline_grid.update()
+    if hasattr(app, "set_dirty"):
+        app.set_dirty(True)
 
     return {
         "status": "success",
@@ -303,6 +312,8 @@ def transpose_clip(app, semitones: int, clip_id_or_name: Optional[str] = None) -
         app.piano_roll.note_grid.update()
     if hasattr(app, "timeline_grid"):
         app.timeline_grid.update()
+    if hasattr(app, "set_dirty"):
+        app.set_dirty(True)
 
     return {"status": "success", "clip_id": clip.id, "semitones": shift, "notes_count": len(clip.notes)}
 
@@ -325,5 +336,7 @@ def quantize_notes(app, grid_division: float = 0.25, clip_id_or_name: Optional[s
         app.piano_roll.note_grid.update()
     if hasattr(app, "timeline_grid"):
         app.timeline_grid.update()
+    if hasattr(app, "set_dirty"):
+        app.set_dirty(True)
 
     return {"status": "success", "clip_id": clip.id, "grid_division": div, "notes_count": len(clip.notes)}

@@ -83,6 +83,7 @@ class TrackHeaderWidget(QFrame):
 
         initial_h = getattr(self.track, "height", 76)
         self.setFixedHeight(initial_h)
+        self.setMinimumWidth(250)
         self.setObjectName("track_header")
         self.setProperty("class", "track_header")
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -94,8 +95,8 @@ class TrackHeaderWidget(QFrame):
 
     def _init_ui(self):
         main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 6, 0)
-        main_layout.setSpacing(5)
+        main_layout.setContentsMargins(0, 0, 4, 0)
+        main_layout.setSpacing(4)
 
         # 1. Bande latérale de couleur
         self.color_bar = QFrame()
@@ -123,12 +124,16 @@ class TrackHeaderWidget(QFrame):
             icon = "🔊"
         self.lbl_icon = QLabel(icon)
         self.lbl_icon.setStyleSheet("font-size: 12px;")
+        self.lbl_icon.setFixedWidth(16)
+        self.lbl_icon.setAlignment(Qt.AlignCenter)
         row1.addWidget(self.lbl_icon)
 
-        # Nom éditable
+        # Nom éditable (rétrécit élégamment pour laisser la priorité absolue aux boutons de contrôle)
         self.txt_name = QLineEdit(self.track.name)
         self.txt_name.setStyleSheet("background: transparent; border: none; font-weight: bold; font-size: 11px; padding: 1px 2px;")
         self.txt_name.setCursorPosition(0)
+        self.txt_name.setMinimumWidth(30)
+        self.txt_name.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.txt_name.setToolTip(self.track.name)
         self.txt_name.editingFinished.connect(self._on_name_changed)
         row1.addWidget(self.txt_name, stretch=1)
@@ -141,10 +146,11 @@ class TrackHeaderWidget(QFrame):
         set_button_glow(self.btn_mute, self.track.muted, "#f59e0b", blur_radius=14, alpha=220)
         self.btn_mute.setToolTip("Mute (Couper le son de cette piste)")
         self.btn_mute.setFixedSize(22, 22)
+        self.btn_mute.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.btn_mute.toggled.connect(self._on_mute_toggled)
         row1.addWidget(self.btn_mute)
 
-        # Bouton Solo
+        # Bouton Solo (Toujours visible et accessible sans scroll)
         self.btn_solo = QPushButton("S")
         self.btn_solo.setObjectName("btn_track_solo")
         self.btn_solo.setCheckable(True)
@@ -152,6 +158,7 @@ class TrackHeaderWidget(QFrame):
         set_button_glow(self.btn_solo, self.track.soloed, "#facc15", blur_radius=14, alpha=220)
         self.btn_solo.setToolTip("Solo (Écouter cette piste uniquement)")
         self.btn_solo.setFixedSize(22, 22)
+        self.btn_solo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.btn_solo.toggled.connect(self._on_solo_toggled)
         row1.addWidget(self.btn_solo)
 
@@ -163,12 +170,14 @@ class TrackHeaderWidget(QFrame):
         set_button_glow(self.btn_rec, self.track.armed, "#ff2244", blur_radius=16, alpha=235)
         self.btn_rec.setToolTip("Armer pour l'enregistrement (R) - Cliquez pour enregistrer sur cette piste")
         self.btn_rec.setFixedSize(22, 22)
+        self.btn_rec.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.btn_rec.toggled.connect(self._on_rec_toggled)
         row1.addWidget(self.btn_rec)
 
         # Bouton Supprimer
         self.btn_delete = QPushButton("✕")
         self.btn_delete.setFixedSize(18, 18)
+        self.btn_delete.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.btn_delete.setStyleSheet("background: transparent; border: none; color: #64748b; font-size: 11px; padding: 0px;")
         self.btn_delete.setToolTip("Supprimer cette piste")
         self.btn_delete.clicked.connect(lambda: self.track_deleted.emit(self.track.id))
@@ -306,9 +315,9 @@ class TrackHeaderWidget(QFrame):
         self.setFixedHeight(h)
         self.track.height = h
         if hasattr(self, "row2_widget"):
-            self.row2_widget.setVisible(h >= 58)
+            self.row2_widget.setVisible(h >= 52)
         if hasattr(self, "row3_widget"):
-            self.row3_widget.setVisible(h >= 76)
+            self.row3_widget.setVisible(h >= 72)
 
     def mouseMoveEvent(self, event):
         if self._resizing_height:

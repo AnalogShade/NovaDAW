@@ -132,6 +132,7 @@ class TransportBar(QWidget):
     stop_clicked = Signal()
     record_toggled = Signal(bool)
     loop_toggled = Signal(bool)
+    autoscroll_toggled = Signal(bool)
     bpm_changed = Signal(float)
     master_volume_changed = Signal(float)
     master_clip_reset = Signal()
@@ -252,6 +253,19 @@ class TransportBar(QWidget):
         self.btn_loop.toggled.connect(self._on_loop)
         nav_layout.addWidget(self.btn_loop)
 
+        # 9. Défilement automatique (Follow Playhead)
+        self.btn_autoscroll = QPushButton("📜 Défilement")
+        self.btn_autoscroll.setObjectName("btn_autoscroll")
+        self.btn_autoscroll.setCheckable(True)
+        self.btn_autoscroll.setChecked(True)
+        set_button_glow(self.btn_autoscroll, True, "#10b981", blur_radius=15, alpha=210)
+        self.btn_autoscroll.setFixedHeight(32)
+        self.btn_autoscroll.setMinimumWidth(96)
+        self.btn_autoscroll.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.btn_autoscroll.setToolTip("Activer / Désactiver le défilement automatique lors de la lecture (Follow Playhead) [F]")
+        self.btn_autoscroll.toggled.connect(self._on_autoscroll)
+        nav_layout.addWidget(self.btn_autoscroll)
+
         main_layout.addWidget(nav_container)
 
         self._add_separator(main_layout)
@@ -368,6 +382,10 @@ class TransportBar(QWidget):
     def _on_loop(self, checked: bool):
         set_button_glow(self.btn_loop, checked, "#d97706", blur_radius=15, alpha=210)
         self.loop_toggled.emit(checked)
+
+    def _on_autoscroll(self, checked: bool):
+        set_button_glow(self.btn_autoscroll, checked, "#10b981", blur_radius=15, alpha=210)
+        self.autoscroll_toggled.emit(checked)
 
     def _on_stop(self):
         self.btn_play.blockSignals(True)
