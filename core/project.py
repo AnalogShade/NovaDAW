@@ -461,7 +461,7 @@ class Project:
             self.master_track = Track(
                 name="Master",
                 track_type="master",
-                color="#ef4444",
+                color="#f59e0b",
                 volume=1.0
             )
             try:

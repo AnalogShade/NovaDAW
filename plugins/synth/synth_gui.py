@@ -1072,8 +1072,11 @@ class NovaSynthGUI(QWidget):
         v_title.addWidget(lbl_sub)
         h_layout.addLayout(v_title)
 
-        # Sélecteur de Presets
-        v_preset = QVBoxLayout()
+        # Sélecteur de Presets (intégré dans un conteneur dédié)
+        self.preset_container = QWidget()
+        v_preset = QVBoxLayout(self.preset_container)
+        v_preset.setContentsMargins(0, 0, 0, 0)
+        v_preset.setSpacing(2)
         v_preset.addWidget(QLabel("Preset Sonore :"))
         h_preset_bar = QHBoxLayout()
         h_preset_bar.setSpacing(4)
@@ -1113,7 +1116,7 @@ class NovaSynthGUI(QWidget):
         h_preset_bar.addWidget(self.combo_presets, stretch=1)
         h_preset_bar.addWidget(self.btn_save_preset)
         v_preset.addLayout(h_preset_bar)
-        h_layout.addLayout(v_preset)
+        h_layout.addWidget(self.preset_container)
 
         self._populate_presets_combo()
         self.combo_presets.currentIndexChanged.connect(self._on_preset_selected)
@@ -1972,14 +1975,53 @@ class NovaSynthGUI(QWidget):
         self.combo_presets.blockSignals(False)
 
     def _save_current_preset(self):
-        name, ok = QInputDialog.getText(self, "Enregistrer Preset", "Nom du preset synthétiseur :")
+        from core.preset_manager import global_preset_manager
+        cur_name = getattr(self.plugin, "preset_name", "Mon Preset")
+        default_name = f"{cur_name} (User)" if global_preset_manager.is_factory_preset(self.plugin, cur_name) else cur_name
+
+        name, ok = QInputDialog.getText(self, "Enregistrer Preset", "Nom du preset synthétiseur :", text=default_name)
         if ok and name.strip():
             pname = name.strip()
+            # 1. Vérification stricte anti-écrasement des presets d'origine (usine)
+            if global_preset_manager.is_factory_preset(self.plugin, pname):
+                QMessageBox.warning(
+                    self,
+                    "Preset d'usine protégé",
+                    f"Le preset '{pname}' est un preset d'origine (usine) protégé et ne peut pas être écrasé.\n\n"
+                    f"Veuillez choisir un nom de preset utilisateur distinct (ex: '{pname} (User)' ou '{pname} Custom')."
+                )
+                return
+
+            # 2. Confirmation si un preset utilisateur existe déjà
+            p_id = getattr(self.plugin, "plugin_type_id", "novadaw.synth")
+            if global_preset_manager.preset_exists(p_id, pname):
+                reply = QMessageBox.question(
+                    self,
+                    "Remplacer le preset",
+                    f"Un preset utilisateur nommé '{pname}' existe déjà.\nVoulez-vous le remplacer ?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+
             try:
-                from core.preset_manager import global_preset_manager
-                global_preset_manager.save_preset(self.plugin.plugin_type_id, pname, self.plugin.to_dict())
+                global_preset_manager.save_preset(p_id, pname, self.plugin.to_dict())
                 self.plugin.preset_name = pname
                 self._populate_presets_combo()
+
+                # Notifier la fenêtre parente NativePluginDialog si intégrée
+                p = self.parent()
+                while p and not hasattr(p, "_populate_presets"):
+                    p = p.parent() if hasattr(p, "parent") else None
+                if p and hasattr(p, "_populate_presets"):
+                    p._populate_presets(select_name=pname)
+
+                QMessageBox.information(
+                    self,
+                    "Preset Enregistré",
+                    f"Le preset utilisateur '{pname}' a été enregistré avec succès."
+                )
             except Exception as e:
                 QMessageBox.warning(self, "Erreur", f"Impossible d'enregistrer le preset : {e}")
 
@@ -2004,6 +2046,20 @@ class NovaSynthGUI(QWidget):
             self.selected_layer = self.plugin.layers[0]
         self._invalidate_note_cache()
         self._sync_all()
+
+        # Synchroniser la fenêtre hôte NativePluginDialog si présente
+        p = self.parent()
+        while p and not hasattr(p, "combo_presets"):
+            p = p.parent() if hasattr(p, "parent") else None
+        if p and hasattr(p, "combo_presets") and hasattr(p, "_populate_presets"):
+            for idx in range(p.combo_presets.count()):
+                d = p.combo_presets.itemData(idx)
+                if d and d.get("name", "").lower() == pname.lower():
+                    if p.combo_presets.currentIndex() != idx:
+                        p.combo_presets.blockSignals(True)
+                        p.combo_presets.setCurrentIndex(idx)
+                        p.combo_presets.blockSignals(False)
+                    break
 
     def _on_delay_toggled(self, checked: bool):
         self.plugin.delay.enabled = checked

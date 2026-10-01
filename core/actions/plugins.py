@@ -402,8 +402,10 @@ def configure_mixer(
 
     if master_volume is not None:
         master_t.volume = max(0.0, min(1.5, float(master_volume)))
-        if hasattr(app, "transport_bar") and hasattr(app.transport_bar, "slider_vol"):
-            app.transport_bar.slider_vol.setValue(int(master_t.volume * 100))
+        if hasattr(app, "_on_master_vol_changed"):
+            app._on_master_vol_changed(master_t.volume)
+        elif hasattr(app, "transport_bar") and hasattr(app.transport_bar, "slider_master"):
+            app.transport_bar.slider_master.setValue(int(master_t.volume * 100))
 
     if master_pan is not None:
         master_t.pan = max(-1.0, min(1.0, float(master_pan)))

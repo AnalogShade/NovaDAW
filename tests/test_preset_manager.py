@@ -214,6 +214,49 @@ class TestPresetManager(unittest.TestCase):
 
         gui.close()
 
+    def test_09_factory_preset_protection_cannot_overwrite(self):
+        """Vérifie qu'un preset d'usine ne peut JAMAIS être écrasé ni supprimé."""
+        # 1. Vérifier la détection
+        self.assertTrue(self.pm.is_factory_preset(self.plugin, "Factory Clean"))
+        self.assertTrue(self.pm.is_factory_preset(self.plugin, "Factory Boost"))
+        self.assertFalse(self.pm.is_factory_preset(self.plugin, "Custom My Sound"))
+
+        # 2. Tentative d'écrasement via save_preset -> Doit lever ValueError
+        with self.assertRaises(ValueError) as ctx:
+            self.pm.save_preset(
+                plugin_or_type=self.plugin,
+                preset_name="Factory Clean",
+                state={"gain": 99.0}
+            )
+        self.assertIn("Impossible d'écraser le preset d'usine protégé", str(ctx.exception))
+
+        # 3. Tentative de suppression via delete_preset -> Doit échouer (False)
+        self.assertFalse(self.pm.delete_preset(self.plugin.plugin_type_id, "Factory Clean"))
+
+    def test_10_novasynth_factory_preset_protection(self):
+        """Vérifie la protection stricte des presets d'usine de NovaSynth (ex: Cyberpunk Acid Lead)"""
+        synth = NovaSynthPlugin()
+        self.assertTrue(self.pm.is_factory_preset(synth, "Cyberpunk Acid Lead"))
+        self.assertTrue(self.pm.is_factory_preset("novadaw.synth", "Cyberpunk Acid Lead"))
+
+        with self.assertRaises(ValueError):
+            self.pm.save_preset(synth, "Cyberpunk Acid Lead", synth.to_dict())
+
+    def test_11_native_plugin_dialog_deduplication(self):
+        """Vérifie que la boîte de dialogue native masque la barre de preset interne redondante"""
+        synth = NovaSynthPlugin()
+        dialog = NativePluginDialog(synth)
+        dialog.show()
+
+        # La barre de presets universelle du dialogue est présente
+        self.assertTrue(dialog.preset_bar.isVisible())
+        self.assertTrue(hasattr(dialog.editor, "preset_container"))
+        # Le conteneur interne de presets du synthétiseur est masqué pour éviter toute duplication
+        self.assertFalse(dialog.editor.preset_container.isVisible())
+
+        dialog.close()
+
 
 if __name__ == "__main__":
     unittest.main()
+

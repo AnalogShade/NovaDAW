@@ -408,6 +408,10 @@ class NativePluginDialog(QDialog):
         self.editor = plugin.create_editor(self)
         if self.editor:
             layout.addWidget(self.editor)
+            # Masquer tout conteneur interne de presets redondant (NovaSynth, etc.)
+            # pour n'avoir qu'une seule barre de presets claire, propre et officielle au sommet
+            if hasattr(self.editor, "preset_container"):
+                self.editor.preset_container.setVisible(False)
             p = parent
             while p and not hasattr(p, "_on_track_mixer_changed"):
                 p = p.parent() if hasattr(p, "parent") else None
@@ -470,7 +474,14 @@ class NativePluginDialog(QDialog):
                 self._sync_editor_gui()
 
     def _on_save_preset_clicked(self):
-        default_name = getattr(self.plugin, "preset_name", "Mon Preset")
+        cur_name = getattr(self.plugin, "preset_name", "Mon Preset")
+        p_id = getattr(self.plugin, "plugin_type_id", "")
+        # Si le preset actuel est un preset d'usine, suggérer un nom utilisateur non conflictuel
+        if global_preset_manager.is_factory_preset(self.plugin, cur_name):
+            default_name = f"{cur_name} (User)"
+        else:
+            default_name = cur_name
+
         name, ok = QInputDialog.getText(
             self,
             "Enregistrer le Preset",
@@ -479,9 +490,39 @@ class NativePluginDialog(QDialog):
         )
         if ok and name.strip():
             clean_name = name.strip()
-            global_preset_manager.save_preset(self.plugin, clean_name)
-            self._populate_presets(select_name=clean_name)
-            self._sync_editor_gui()
+            # 1. Vérification stricte anti-écrasement des presets d'origine
+            if global_preset_manager.is_factory_preset(self.plugin, clean_name):
+                QMessageBox.warning(
+                    self,
+                    "Preset d'usine protégé",
+                    f"Le preset '{clean_name}' est un preset d'origine (usine) protégé et ne peut pas être écrasé.\n\n"
+                    f"Veuillez choisir un autre nom pour votre preset utilisateur (ex: '{clean_name} (User)' ou '{clean_name} Custom')."
+                )
+                return
+
+            # 2. Confirmation si un preset utilisateur existe déjà
+            if global_preset_manager.preset_exists(p_id, clean_name):
+                reply = QMessageBox.question(
+                    self,
+                    "Remplacer le preset",
+                    f"Un preset utilisateur nommé '{clean_name}' existe déjà.\nVoulez-vous le remplacer ?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+
+            try:
+                global_preset_manager.save_preset(self.plugin, clean_name)
+                self._populate_presets(select_name=clean_name)
+                self._sync_editor_gui()
+                QMessageBox.information(
+                    self,
+                    "Preset Enregistré",
+                    f"Le preset utilisateur '{clean_name}' a été enregistré avec succès."
+                )
+            except Exception as e:
+                QMessageBox.warning(self, "Erreur d'enregistrement", f"Impossible d'enregistrer le preset : {e}")
 
     def _on_import_preset_clicked(self):
         file_path, _ = QFileDialog.getOpenFileName(

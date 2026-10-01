@@ -12,7 +12,7 @@ import numpy as np
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QSlider, QFrame, QScrollArea, QSizePolicy
+    QSlider, QFrame, QScrollArea, QSizePolicy, QMenu
 )
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QPainter, QBrush, QColor, QFont, QLinearGradient, QPen
@@ -316,6 +316,8 @@ class MixerConsoleWidget(QWidget):
     """Console de mixage principale regroupant toutes les tranches et le Master"""
     track_mixer_changed = Signal()
     track_selected = Signal(str)
+    master_volume_changed = Signal(float)
+    master_fx_requested = Signal()
 
     def __init__(self, mixer: MixerPlugin, parent=None):
         super().__init__(parent)
@@ -355,6 +357,10 @@ class MixerConsoleWidget(QWidget):
         self._selected_track_id = track_id
         for tid, strip in self.strips.items():
             strip.set_selected(tid == track_id)
+        if hasattr(self, "master_frame") and self.mixer.project:
+            master_t = self.mixer.project.ensure_master_track()
+            is_master = bool(master_t and track_id == master_t.id)
+            self._apply_master_style(is_master)
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -411,45 +417,93 @@ class MixerConsoleWidget(QWidget):
         # Construire les tranches des pistes actuelles
         self.refresh_tracks()
 
-    def _create_master_strip(self) -> QFrame:
-        frame = QFrame()
-        frame.setFixedWidth(95)
-        frame.setStyleSheet("""
-            QFrame {
-                background-color: #1a1622;
-                border: 1px solid #ef4444;
+    def _get_master_frame_style(self, selected: bool) -> str:
+        border_col = "#fbbf24" if selected else "#d97706"
+        border_px = "2px" if selected else "1px"
+        bg_col = "#241e17" if selected else "#171a22"
+        return f"""
+            QFrame#master_strip_frame {{
+                background-color: {bg_col};
+                border: {border_px} solid {border_col};
                 border-radius: 6px;
-            }
-            QLabel {
-                color: #fca5a5;
+            }}
+            QLabel {{
+                color: #fde68a;
                 font-size: 10px;
                 font-weight: bold;
-            }
-            QSlider::groove:vertical {
+            }}
+            QSlider::groove:vertical {{
                 width: 5px;
-                background: #0f1118;
+                background: #0b0d13;
                 border-radius: 2px;
-            }
-            QSlider::add-page:vertical {
-                background: #ef4444;
-            }
-            QSlider::handle:vertical {
+            }}
+            QSlider::sub-page:vertical {{
+                background: #0b0d13;
+            }}
+            QSlider::add-page:vertical {{
+                background: #f59e0b;
+            }}
+            QSlider::handle:vertical {{
                 background: #ffffff;
                 height: 16px;
                 margin: 0 -5px;
                 border-radius: 3px;
-            }
-        """)
+            }}
+        """
+
+    def _apply_master_style(self, selected: bool):
+        if hasattr(self, "master_frame"):
+            self.master_frame.setStyleSheet(self._get_master_frame_style(selected))
+
+    def _on_master_strip_clicked(self, event):
+        if self.mixer.project:
+            master_t = self.mixer.project.ensure_master_track()
+            if master_t:
+                self.set_selected_track(master_t.id)
+                self.track_selected.emit(master_t.id)
+
+    def _create_master_strip(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("master_strip_frame")
+        frame.setFixedWidth(98)
+        self.master_frame = frame
+        self._apply_master_style(False)
+        frame.mousePressEvent = self._on_master_strip_clicked
 
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
         layout.setAlignment(Qt.AlignCenter)
 
-        lbl_master = QLabel("MASTER")
+        # En-tête Master Gold avec badge
+        lbl_master = QLabel("👑 MASTER")
         lbl_master.setAlignment(Qt.AlignCenter)
-        lbl_master.setStyleSheet("color: #ef4444; font-size: 11px; font-weight: bold; letter-spacing: 1px;")
+        lbl_master.setStyleSheet("color: #f59e0b; font-size: 11px; font-weight: bold; letter-spacing: 1px;")
         layout.addWidget(lbl_master)
+
+        # Bouton Effets / FX sur la piste Master
+        self.btn_master_fx = QPushButton("⚡ FX")
+        self.btn_master_fx.setToolTip("Effets & Plugins sur le bus Master (Clic: Onglet Effets Master F6 | Clic-droit: Menu rapide)")
+        self.btn_master_fx.setFixedHeight(22)
+        self.btn_master_fx.setStyleSheet("""
+            QPushButton {
+                background-color: #1e2230;
+                color: #f59e0b;
+                border: 1px solid #d97706;
+                border-radius: 3px;
+                font-size: 10px;
+                font-weight: bold;
+                padding: 1px 4px;
+            }
+            QPushButton:hover {
+                background-color: #d97706;
+                color: #ffffff;
+            }
+        """)
+        self.btn_master_fx.clicked.connect(self._on_master_fx_clicked)
+        self.btn_master_fx.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.btn_master_fx.customContextMenuRequested.connect(lambda pos: self._show_master_fx_menu())
+        layout.addWidget(self.btn_master_fx)
 
         # Fader Master + VU-Mètre Stéréo
         fader_row = QHBoxLayout()
@@ -459,13 +513,13 @@ class MixerConsoleWidget(QWidget):
         self.slider_master = ResetableSlider(Qt.Vertical, default_value=100)
         self.slider_master.setRange(0, 150)
         self.slider_master.setValue(master_vol_val)
-        self.slider_master.setFixedHeight(140)
+        self.slider_master.setFixedHeight(130)
         self.slider_master.setToolTip(f"Volume Master : {master_vol_val}% (Double-clic: 100%)")
         self.slider_master.valueChanged.connect(self._on_master_fader_changed)
         fader_row.addWidget(self.slider_master)
 
         self.master_vu = VuMeterBar(self)
-        self.master_vu.setFixedHeight(140)
+        self.master_vu.setFixedHeight(130)
         self.master_vu.setFixedWidth(18)
         fader_row.addWidget(self.master_vu)
 
@@ -473,15 +527,167 @@ class MixerConsoleWidget(QWidget):
 
         self.lbl_master_db = QLabel(f"{master_vol_val}%")
         self.lbl_master_db.setAlignment(Qt.AlignCenter)
-        self.lbl_master_db.setStyleSheet("font-size: 10px; font-weight: bold; color: #ef4444;")
+        self.lbl_master_db.setStyleSheet("font-size: 10px; font-weight: bold; color: #fbbf24;")
         layout.addWidget(self.lbl_master_db)
 
+        self._update_master_fx_badges()
         return frame
 
+    def _on_master_fx_clicked(self):
+        """Bascule immédiatement vers l'onglet dédié Effets Master (Master FX Rack F6)."""
+        self.master_fx_requested.emit()
+
+    def _show_master_fx_menu(self):
+        """Affiche le menu contextuel rapide pour les plugins sur la piste Master."""
+        master_t = self.mixer.project.ensure_master_track() if self.mixer.project else None
+        if not master_t:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1a1e29;
+                color: #f1f5f9;
+                border: 1px solid #d97706;
+                font-size: 11px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 20px 6px 10px;
+                border-radius: 3px;
+            }
+            QMenu::item:selected {
+                background-color: #f59e0b;
+                color: #0b0d13;
+                font-weight: bold;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #334155;
+                margin: 4px 6px;
+            }
+        """)
+
+        # Option principale : Basculer vers l'onglet Effets Master
+        act_tab = menu.addAction("👑 Ouvrir le Rack Effets Master (F6)...")
+        act_tab.triggered.connect(self.master_fx_requested.emit)
+        menu.addSeparator()
+
+        # 1. Ouvrir / Éditer les plugins existants sur le Master (en excluant le mixeur lui-même)
+        from ui.plugin_dialogs import open_native_plugin_editor
+        plugins_found = False
+        if hasattr(master_t, "plugins") and master_t.plugins:
+            for p in master_t.plugins:
+                if getattr(p, "plugin_type_id", None) == "novadaw.mixer":
+                    continue
+                p_name = getattr(p, "name", "Plugin")
+                p_icon = getattr(p, "icon", "🎛️")
+                act_open = menu.addAction(f"{p_icon} Ouvrir {p_name}")
+                act_open.triggered.connect(lambda _, plug=p: open_native_plugin_editor(plug, self))
+                plugins_found = True
+
+        if plugins_found:
+            menu.addSeparator()
+
+        # 2. Ajouter un effet sur le Master
+        act_add_eq = menu.addAction("📊 Ajouter Égaliseur Paramétrique...")
+        act_add_eq.triggered.connect(self._add_master_equalizer)
+
+        act_add_comp = menu.addAction("🗜️ Ajouter Compresseur Dynamique...")
+        act_add_comp.triggered.connect(self._add_master_compressor)
+
+        menu.addSeparator()
+
+        # 3. Ouvrir l'inspecteur pour la piste Master
+        act_insp = menu.addAction("🔍 Inspecter Piste Master (Inspecteur complet)...")
+        act_insp.triggered.connect(lambda: self.track_selected.emit(master_t.id))
+
+        menu.exec(self.btn_master_fx.mapToGlobal(self.btn_master_fx.rect().bottomLeft()))
+
+    def _add_master_equalizer(self):
+        master_t = self.mixer.project.ensure_master_track() if self.mixer.project else None
+        if master_t:
+            from plugins.registry import plugin_registry, ensure_plugins_loaded
+            from ui.plugin_dialogs import open_native_plugin_editor
+            ensure_plugins_loaded()
+            eq = plugin_registry.create_plugin("novadaw.equalizer")
+            if eq:
+                master_t.add_plugin(eq)
+                self.track_mixer_changed.emit()
+                self._update_master_fx_badges()
+                open_native_plugin_editor(eq, self)
+
+    def _add_master_compressor(self):
+        master_t = self.mixer.project.ensure_master_track() if self.mixer.project else None
+        if master_t:
+            from plugins.registry import plugin_registry, ensure_plugins_loaded
+            from ui.plugin_dialogs import open_native_plugin_editor
+            ensure_plugins_loaded()
+            comp = plugin_registry.create_plugin("novadaw.compressor")
+            if comp:
+                master_t.add_plugin(comp)
+                self.track_mixer_changed.emit()
+                self._update_master_fx_badges()
+                open_native_plugin_editor(comp, self)
+
+    def _update_master_fx_badges(self):
+        if not hasattr(self, "btn_master_fx"):
+            return
+        master_t = self.mixer.project.ensure_master_track() if self.mixer.project else None
+        if master_t:
+            # Exclure le plugin mixeur lui-même du décompte d'effets insérés
+            fx_list = [p for p in getattr(master_t, "plugins", []) if getattr(p, "plugin_type_id", "") != "novadaw.mixer"]
+            vst_list = getattr(master_t, "insert_effects", [])
+            count = len(fx_list) + len(vst_list)
+            if count > 0:
+                self.btn_master_fx.setText(f"⚡ FX ({count})")
+                names = [getattr(p, "name", "Effet") for p in fx_list]
+                names += [os.path.basename(v) for v in vst_list]
+                names_str = ", ".join(names)
+                self.btn_master_fx.setToolTip(f"Effets Master actifs ({count}) : {names_str}\nClic : Ouvrir l'onglet Effets Master (F6)\nClic-droit : Menu rapide")
+                self.btn_master_fx.setStyleSheet("""
+                    QPushButton {
+                        background-color: #d97706;
+                        color: #ffffff;
+                        border: 1px solid #fbbf24;
+                        border-radius: 3px;
+                        font-size: 10px;
+                        font-weight: bold;
+                        padding: 1px 4px;
+                    }
+                    QPushButton:hover {
+                        background-color: #f59e0b;
+                    }
+                """)
+            else:
+                self.btn_master_fx.setText("⚡ FX")
+                self.btn_master_fx.setToolTip("Effets Master : Aucun effet inséré\nClic : Ouvrir l'onglet Effets Master (F6)\nClic-droit : Menu rapide")
+                self.btn_master_fx.setStyleSheet("""
+                    QPushButton {
+                        background-color: #1e2230;
+                        color: #f59e0b;
+                        border: 1px solid #d97706;
+                        border-radius: 3px;
+                        font-size: 10px;
+                        font-weight: bold;
+                        padding: 1px 4px;
+                    }
+                    QPushButton:hover {
+                        background-color: #d97706;
+                        color: #ffffff;
+                    }
+                """)
+        else:
+            self.btn_master_fx.setText("⚡ FX")
+
     def _on_master_fader_changed(self, val: int):
-        self.mixer.master_volume = val / 100.0
+        vol = val / 100.0
+        self.mixer.master_volume = vol
+        if self.mixer.project and hasattr(self.mixer.project, "master_track") and self.mixer.project.master_track:
+            self.mixer.project.master_track.volume = vol
         self.lbl_master_db.setText(f"{val}%")
         self.slider_master.setToolTip(f"Volume Master : {val}% (Double-clic: 100%)")
+        self.master_volume_changed.emit(vol)
+        self.track_mixer_changed.emit()
 
     def refresh_tracks(self):
         """Reconstruit les tranches selon les pistes du projet"""
@@ -521,12 +727,16 @@ class MixerConsoleWidget(QWidget):
 
         # Synchroniser la tranche Master
         if hasattr(self, "slider_master"):
-            m_val = int(round(self.mixer.master_volume * 100))
+            master_t = self.mixer.project.ensure_master_track() if self.mixer.project else None
+            vol = master_t.volume if master_t else self.mixer.master_volume
+            self.mixer.master_volume = vol
+            m_val = int(round(vol * 100))
             self.slider_master.blockSignals(True)
             self.slider_master.setValue(m_val)
             self.slider_master.blockSignals(False)
             self.lbl_master_db.setText(f"{m_val}%")
             self.slider_master.setToolTip(f"Volume Master : {m_val}% (Double-clic: 100%)")
+            self._update_master_fx_badges()
         if hasattr(self, "btn_mono"):
             self.btn_mono.blockSignals(True)
             self.btn_mono.setChecked(self.mixer.mono_switch)

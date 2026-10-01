@@ -600,8 +600,22 @@ class DeviceSettingsDialog(QDialog):
         host_api_idx = self.combo_host_api.currentData()
         devices = hardware_manager.get_audio_devices(host_api_idx)
 
+        # 1. Détection du périphérique de sortie par défaut
         self.combo_output.clear()
-        self.combo_output.addItem("Périphérique de sortie par défaut du système", -1)
+        def_out_name = "Système Windows"
+        try:
+            import sounddevice as sd
+            apis = sd.query_hostapis()
+            if host_api_idx is not None and 0 <= host_api_idx < len(apis):
+                api_def_out = apis[host_api_idx].get("default_output_device", -1)
+                if api_def_out >= 0:
+                    def_out_name = sd.query_devices(api_def_out).get("name", def_out_name)
+            if def_out_name == "Système Windows" and sd.default.device[1] >= 0:
+                def_out_name = sd.query_devices(sd.default.device[1]).get("name", def_out_name)
+        except Exception:
+            pass
+        self.combo_output.addItem(f"Périphérique de sortie par défaut du système ({def_out_name})", -1)
+
         cur_out_dev = getattr(self.audio_engine, "output_device", None)
         sel_out_idx = 0
 
@@ -612,14 +626,31 @@ class DeviceSettingsDialog(QDialog):
 
         self.combo_output.setCurrentIndex(sel_out_idx)
 
+        # 2. Détection du périphérique d'entrée par défaut (ex: Oculus Rift)
         self.combo_input.clear()
-        self.combo_input.addItem("Périphérique d'entrée par défaut", -1)
+        def_in_name = "Système Windows"
+        try:
+            import sounddevice as sd
+            apis = sd.query_hostapis()
+            if host_api_idx is not None and 0 <= host_api_idx < len(apis):
+                api_def_in = apis[host_api_idx].get("default_input_device", -1)
+                if api_def_in >= 0:
+                    def_in_name = sd.query_devices(api_def_in).get("name", def_in_name)
+            if def_in_name == "Système Windows" and sd.default.device[0] >= 0:
+                def_in_name = sd.query_devices(sd.default.device[0]).get("name", def_in_name)
+        except Exception:
+            pass
+        self.combo_input.addItem(f"Périphérique d'entrée par défaut ({def_in_name})", -1)
+
         cur_in_dev = getattr(self.audio_engine, "input_device", None)
+        saved_in_name = hardware_manager.settings.get("audio", {}).get("input_device_name", "")
         sel_in_idx = 0
 
         for idx, d in enumerate(devices["inputs"]):
             self.combo_input.addItem(f"{d['name']} ({d['max_inputs']} canaux)", d["index"])
             if cur_in_dev is not None and d["index"] == cur_in_dev:
+                sel_in_idx = idx + 1
+            elif sel_in_idx == 0 and saved_in_name and saved_in_name.lower() in d["name"].lower() and "défaut" not in saved_in_name.lower() and "default" not in saved_in_name.lower():
                 sel_in_idx = idx + 1
 
         self.combo_input.setCurrentIndex(sel_in_idx)

@@ -368,48 +368,69 @@ class AudioEngine:
         # Démarrage du flux de capture d'entrée physique
         try:
             in_dev = self.input_device
-            if in_dev is not None and in_dev < 0:
-                in_dev = None
+            if in_dev is None or in_dev < 0:
+                from core.hardware_manager import hardware_manager
+                in_dev = hardware_manager.get_default_input_device_index()
 
             # Identifier les caractéristiques du microphone
             dev_default_sr = self.sample_rate
-            in_channels = 2
+            in_channels = 1
             try:
                 dev_info = sd.query_devices(in_dev, kind="input") if in_dev is not None else sd.query_devices(kind="input")
-                max_in = dev_info.get("max_input_channels", 2)
+                max_in = dev_info.get("max_input_channels", 1)
                 in_channels = min(2, max(1, max_in))
                 dev_default_sr = int(dev_info.get("default_samplerate", self.sample_rate))
             except Exception:
                 pass
 
-            kwargs = {
-                "samplerate": self.sample_rate,
-                "blocksize": self.block_size,
-                "channels": in_channels,
-                "dtype": "float32",
-                "callback": self._record_callback
-            }
-            if in_dev is not None:
-                kwargs["device"] = in_dev
+            opened = False
+            # Ordre de test des fréquences : fréquence du projet, fréquence native du micro, 48k, 44.1k
+            candidate_srs = [self.sample_rate, dev_default_sr, 48000, 44100]
+            seen_srs = set()
+            candidate_srs = [x for x in candidate_srs if not (x in seen_srs or seen_srs.add(x))]
 
-            self._record_sample_rate = self.sample_rate
-            try:
-                self._input_stream = sd.InputStream(**kwargs)
-                self._input_stream.start()
-            except Exception as e_first:
-                # Si la fréquence projet (ex: 48kHz ou 44.1kHz) est refusée par le micro,
-                # tentative automatique avec la fréquence native du périphérique
-                if dev_default_sr != self.sample_rate:
+            channel_trials = [in_channels] if in_channels == 1 else [in_channels, 1]
+
+            for ch in channel_trials:
+                for sr in candidate_srs:
                     try:
-                        kwargs["samplerate"] = dev_default_sr
+                        kwargs = {
+                            "samplerate": sr,
+                            "blocksize": self.block_size,
+                            "channels": ch,
+                            "dtype": "float32",
+                            "callback": self._record_callback
+                        }
+                        if in_dev is not None and in_dev >= 0:
+                            kwargs["device"] = in_dev
+
                         self._input_stream = sd.InputStream(**kwargs)
                         self._input_stream.start()
-                        self._record_sample_rate = dev_default_sr
-                    except Exception as e_second:
-                        print(f"[AudioEngine] Échec capture micro (44.1k/48k fallback): {e_second}")
-                        self._input_stream = None
-                else:
-                    print(f"[AudioEngine] Avertissement flux de capture audio : {e_first}")
+                        self._record_sample_rate = sr
+                        opened = True
+                        print(f"[AudioEngine] Capture micro démarrée avec succès (device={in_dev}, sr={sr}, channels={ch})")
+                        break
+                    except Exception:
+                        continue
+                if opened:
+                    break
+
+            if not opened:
+                # Repli ultime : ouvrir l'entrée système par défaut sans device explicite
+                try:
+                    self._input_stream = sd.InputStream(
+                        samplerate=dev_default_sr,
+                        blocksize=self.block_size,
+                        channels=1,
+                        dtype="float32",
+                        callback=self._record_callback
+                    )
+                    self._input_stream.start()
+                    self._record_sample_rate = dev_default_sr
+                    opened = True
+                    print("[AudioEngine] Capture micro démarrée via repli système par défaut")
+                except Exception as e_final:
+                    print(f"[AudioEngine] Impossible d'ouvrir le flux de capture d'entrée : {e_final}")
                     self._input_stream = None
 
         except Exception as e:
@@ -883,13 +904,17 @@ class AudioEngine:
                 self.playhead_callback(self.current_beat)
 
         # 3. Traitement de la piste Master et de sa pile de plugins (Mixeur, EQ, Compresseur)
+        has_active_mixer = False
         if self.project and getattr(self.project, "master_track", None):
             master_t = self.project.master_track
+            has_active_mixer = any(getattr(p, "plugin_type_id", "") == "novadaw.mixer" and getattr(p, "enabled", True) for p in getattr(master_t, "plugins", []))
             if not master_t.muted:
-                vol = master_t.volume
-                pan = max(-1.0, min(1.0, master_t.pan))
-                out[:, 0] *= vol * (1.0 - max(0.0, pan))
-                out[:, 1] *= vol * (1.0 + min(0.0, pan))
+                # Si le Mixeur est actif, il gère déjà le volume, le pan, le mono et le dim
+                if not has_active_mixer:
+                    vol = master_t.volume
+                    pan = max(-1.0, min(1.0, master_t.pan))
+                    out[:, 0] *= vol * (1.0 - max(0.0, pan))
+                    out[:, 1] *= vol * (1.0 + min(0.0, pan))
             out = self._process_vst_effects(master_t, out)
             if hasattr(master_t, "plugins") and master_t.plugins:
                 for plugin in master_t.plugins:
@@ -899,8 +924,9 @@ class AudioEngine:
                         except Exception as e:
                             pass
 
-        # Application du volume Master et limitation douce (anti-saturation)
-        out *= self.master_volume
+        # Application du volume Master si non déjà appliqué par le plugin Mixeur
+        if not has_active_mixer:
+            out *= self.master_volume
 
         # Mesure des niveaux de crête et détection de distorsion / clipping (> 0 dBFS / > 1.0)
         if len(out) > 0:
@@ -1024,21 +1050,7 @@ class AudioEngine:
             except Exception:
                 pass
 
-        # 2. Inserts natifs
-        for p in getattr(track, "plugins", []):
-            if hasattr(p, "get_state"):
-                try:
-                    parts.append(str(p.get_state()))
-                except Exception:
-                    pass
-            elif hasattr(p, "plugin_type_id"):
-                parts.append(str(getattr(p, "plugin_type_id", "")))
-
-        # 3. Inserts VST externes
-        for fx in getattr(track, "insert_effects", []):
-            parts.append(str(fx))
-
-        # 4. Clips et notes MIDI / audio
+        # 2. Clips et notes MIDI / audio (génération de base)
         for c in track.clips:
             if isinstance(c, MidiClip):
                 parts.append(f"M:{c.id}:{c.start_beat:.3f}:{c.length_beats:.3f}:{len(c.notes)}")
@@ -1173,31 +1185,8 @@ class AudioEngine:
                     else:
                         buf[dest_start:dest_start + to_copy] += src_samples[:to_copy, :2] * clip.gain
 
-        # 3. Inserts de la piste (Égaliseur, Compresseur) avec état isolé
-        if hasattr(track, "plugins") and track.plugins:
-            for plugin in track.plugins:
-                if getattr(plugin, "is_instrument", False):
-                    continue
-                if getattr(plugin, "enabled", True) and hasattr(plugin, "process"):
-                    try:
-                        if hasattr(plugin, "get_state") and hasattr(plugin, "set_state"):
-                            iso_plugin = plugin.__class__()
-                            iso_plugin.set_state(plugin.get_state())
-                            buf = iso_plugin.process(buf, sample_rate)
-                        elif hasattr(plugin, "clone"):
-                            iso_plugin = plugin.clone()
-                            buf = iso_plugin.process(buf, sample_rate)
-                        else:
-                            buf = plugin.process(buf, sample_rate)
-                    except Exception:
-                        pass
-
-        # 4. Effets VST3 d'inserts (Pedalboard / VST)
-        if hasattr(track, "insert_effects") and track.insert_effects:
-            try:
-                buf = self._process_vst_effects(track, buf)
-            except Exception:
-                pass
+        # Les inserts de piste (Égaliseur, Compresseur, VST) sont traités en temps réel
+        # sur le buffer générateur pré-calculé, garantissant une réactivité immédiate sans re-rendu offline.
 
         if progress_callback:
             try:
@@ -1334,20 +1323,10 @@ class AudioEngine:
             else:
                 return np.zeros((frames, 2), dtype=np.float32)
 
-    def _render_track_slice(self, track: Track, start_b: float, end_b: float, frames: int, bpm: float) -> Optional[np.ndarray]:
-        # 0. ASIO-Guard Cache Hit: Si la piste n'est pas armée pour l'enregistrement et dispose d'un cache valide
-        if self._asio_guard_enabled and not getattr(track, "armed", False):
-            cached_signal = self._get_cached_track_slice(track, start_b, end_b, frames, bpm)
-            if cached_signal is not None:
-                mixer_plugin = self._get_active_mixer_plugin()
-                if mixer_plugin and len(cached_signal) > 0:
-                    pk_l = float(np.max(np.abs(cached_signal[:, 0])))
-                    pk_r = float(np.max(np.abs(cached_signal[:, 1])))
-                    mixer_plugin.update_track_peak(track.id, pk_l, pk_r)
-                return cached_signal
-
+    def _render_track_generator_slice(self, track: Track, start_b: float, end_b: float, frames: int, bpm: float) -> tuple[np.ndarray, Optional[Any]]:
         track_buf = np.zeros((frames, 2), dtype=np.float32)
         beats_per_sec = bpm / 60.0
+        native_inst = None
 
         if track.track_type == "midi":
             # 0. Si la piste est routée vers un instrument hébergé sur une autre piste (synth_route_track_id)
@@ -1529,6 +1508,26 @@ class AudioEngine:
                     else:
                         track_buf[buf_start:buf_start + to_copy] += samples[:, :2]
 
+        return track_buf, native_inst
+
+    def _render_track_slice(self, track: Track, start_b: float, end_b: float, frames: int, bpm: float) -> Optional[np.ndarray]:
+        track_buf = None
+        native_inst = None
+        # 0. ASIO-Guard Cache Hit: Si la piste n'est pas armée pour l'enregistrement et dispose d'un cache générateur valide
+        if self._asio_guard_enabled and not getattr(track, "armed", False):
+            track_buf = self._get_cached_track_slice(track, start_b, end_b, frames, bpm)
+
+        if track_buf is None:
+            track_buf, native_inst = self._render_track_generator_slice(track, start_b, end_b, frames, bpm)
+        elif track.track_type == "midi":
+            target_track = None
+            if getattr(track, "synth_route_track_id", None) and self.project:
+                target_track = self.project.get_track(track.synth_route_track_id)
+            native_inst = self.get_native_instrument(target_track) if target_track else self.get_native_instrument(track)
+
+        if track_buf is None:
+            track_buf = np.zeros((frames, 2), dtype=np.float32)
+
         track_buf = self._process_vst_effects(track, track_buf)
 
         # 4. Traitement de la pile de plugins modulaires de la piste (Égaliseur, Compresseur, etc.)
@@ -1589,13 +1588,16 @@ class AudioEngine:
                     out_chunk += sig
 
             # Traitement Master sur le mixage global
+            has_active_mixer = False
             if self.project and getattr(self.project, "master_track", None):
                 master_t = self.project.master_track
+                has_active_mixer = any(getattr(p, "plugin_type_id", "") == "novadaw.mixer" and getattr(p, "enabled", True) for p in getattr(master_t, "plugins", []))
                 if not master_t.muted:
-                    vol = master_t.volume
-                    pan = max(-1.0, min(1.0, master_t.pan))
-                    out_chunk[:, 0] *= vol * (1.0 - max(0.0, pan))
-                    out_chunk[:, 1] *= vol * (1.0 + min(0.0, pan))
+                    if not has_active_mixer:
+                        vol = master_t.volume
+                        pan = max(-1.0, min(1.0, master_t.pan))
+                        out_chunk[:, 0] *= vol * (1.0 - max(0.0, pan))
+                        out_chunk[:, 1] *= vol * (1.0 + min(0.0, pan))
                 out_chunk = self._process_vst_effects(master_t, out_chunk)
                 if hasattr(master_t, "plugins") and master_t.plugins:
                     for plugin in master_t.plugins:
@@ -1607,7 +1609,8 @@ class AudioEngine:
 
             rendered[start_sample:end_sample] = out_chunk
 
-        rendered *= self.master_volume
+        if not has_active_mixer:
+            rendered *= self.master_volume
         rendered = np.tanh(rendered)
         sf.write(file_path, rendered, self.sample_rate)
         return True

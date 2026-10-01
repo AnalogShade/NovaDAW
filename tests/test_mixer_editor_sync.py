@@ -228,3 +228,72 @@ def test_bidirectional_sync_in_main_window(qapp):
     assert strip1.is_selected is False
 
     win.close()
+
+
+def test_master_strip_and_volume_sync(qapp):
+    """Vérifie la synchronisation complète du volume Master entre Transport Bar et Console de Mixage, ainsi que la sélection."""
+    project = Project(name="Master Sync Project")
+    win = MainWindow()
+    win.project = project
+    win.refresh_project_ui()
+
+    master_t = project.ensure_master_track()
+    assert master_t is not None
+
+    # 1. Sélection de la piste Master en cliquant sur la tranche Master
+    win.mixer_widget.master_strip.mousePressEvent(
+        QMouseEvent(QMouseEvent.Type.MouseButtonPress, QPoint(5, 5), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    )
+    assert win.selected_track_id == master_t.id
+    assert win.inspector.current_track == master_t
+
+    # 2. Modification du volume Master depuis la Transport Bar
+    win.transport_bar.slider_master.setValue(75)
+    assert abs(win.audio_engine.master_volume - 0.75) < 1e-4
+    assert abs(master_t.volume - 0.75) < 1e-4
+    assert win.mixer_widget.slider_master.value() == 75
+    assert win.mixer_widget.lbl_master_db.text() == "75%"
+
+    # 3. Modification du volume Master depuis le fader de la Console de Mixage
+    win.mixer_widget.slider_master.setValue(115)
+    assert abs(win.audio_engine.master_volume - 1.15) < 1e-4
+    assert abs(master_t.volume - 1.15) < 1e-4
+    assert win.transport_bar.slider_master.value() == 115
+
+    win.close()
+
+
+def test_master_track_plugins(qapp):
+    """Vérifie l'ajout, la présence et le traitement d'effets audio sur la piste Master."""
+    project = Project(name="Master Plugins Project")
+    win = MainWindow()
+    win.project = project
+    win.refresh_project_ui()
+
+    master_t = project.ensure_master_track()
+    initial_plugin_count = len(master_t.plugins)
+
+    # 1. Ajouter un Égaliseur sur le Master
+    win.add_eq_to_master()
+    assert len(master_t.plugins) == initial_plugin_count + 1
+    assert any(getattr(p, "plugin_type_id", "") == "novadaw.equalizer" for p in master_t.plugins)
+
+    # 2. Ajouter un Compresseur sur le Master
+    win.add_comp_to_master()
+    assert len(master_t.plugins) == initial_plugin_count + 2
+    assert any(getattr(p, "plugin_type_id", "") == "novadaw.compressor" for p in master_t.plugins)
+
+    # 3. Vérifier le badge FX sur la tranche Master
+    win.mixer_widget._update_master_fx_badges()
+    assert "⚡ FX (2)" in win.mixer_widget.btn_master_fx.text()
+
+    # 4. Vérifier que le traitement audio engine s'exécute correctement avec les effets master
+    import numpy as np
+    audio = np.ones((1024, 2), dtype=np.float32) * 0.5
+    for p in master_t.plugins:
+        audio = p.process(audio, 44100)
+    assert audio.shape == (1024, 2)
+    assert not np.isnan(audio).any()
+
+    win.close()
+

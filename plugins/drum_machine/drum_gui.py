@@ -431,7 +431,11 @@ class DrumMachineWidget(QWidget):
         header.addStretch()
 
         # Sélecteur de preset
-        header.addWidget(QLabel("Preset :"))
+        self.preset_container = QWidget()
+        p_layout = QHBoxLayout(self.preset_container)
+        p_layout.setContentsMargins(0, 0, 0, 0)
+        p_layout.setSpacing(6)
+        p_layout.addWidget(QLabel("Preset :"))
         self.combo_preset = QComboBox()
         self.combo_preset.addItems([
             "Studio Acoustic",
@@ -442,7 +446,8 @@ class DrumMachineWidget(QWidget):
         ])
         self.combo_preset.setCurrentText(self.plugin.preset_name)
         self.combo_preset.currentTextChanged.connect(self._on_preset_changed)
-        header.addWidget(self.combo_preset)
+        p_layout.addWidget(self.combo_preset)
+        header.addWidget(self.preset_container)
 
         # Volume Master
         header.addSpacing(16)

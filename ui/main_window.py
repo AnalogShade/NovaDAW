@@ -31,6 +31,7 @@ from core.ipc import NovaIpcServer
 from core.plugin_manager import global_plugin_manager
 from ui.inspector import TrackInspector
 from ui.vst_rack import VstRackWidget
+from ui.master_fx_rack import MasterFxWidget
 from ui.floating_plugin_rack import FloatingPluginRackDialog
 from ui.plugin_dialogs import analyze_plugin_file, PluginManagerDialog, PluginFolderManagerDialog, open_plugin_editor_gui, open_native_plugin_editor
 from plugins.registry import plugin_registry, ensure_plugins_loaded
@@ -243,6 +244,12 @@ class MainWindow(QMainWindow):
         act_comp.triggered.connect(self.add_comp_to_selected_track)
         menu_plugins.addAction(act_comp)
 
+        menu_master_plugins = menu_plugins.addMenu("👑 &Effets sur le Bus Master...")
+        act_m_eq = menu_master_plugins.addAction("📊 Ajouter Égaliseur sur le Master")
+        act_m_eq.triggered.connect(self.add_eq_to_master)
+        act_m_comp = menu_master_plugins.addAction("🗜️ Ajouter Compresseur sur le Master")
+        act_m_comp.triggered.connect(self.add_comp_to_master)
+
         menu_plugins.addSeparator()
 
         act_rack = QAction("🎛️ &Rack de Plugins Flottant (F11)…", self)
@@ -316,6 +323,21 @@ class MainWindow(QMainWindow):
         act_toggle_zone.setShortcut("F3")
         act_toggle_zone.triggered.connect(self._toggle_lower_zone)
         menu_view.addAction(act_toggle_zone)
+
+        act_mixer = QAction("🎛️ Afficher Console de &Mixage", self)
+        act_mixer.setShortcut("F5")
+        act_mixer.triggered.connect(self.show_mixer_console)
+        menu_view.addAction(act_mixer)
+
+        act_master_fx = QAction("👑 Afficher &Effets Master (Master FX)", self)
+        act_master_fx.setShortcut("F6")
+        act_master_fx.triggered.connect(self.show_master_fx_rack)
+        menu_view.addAction(act_master_fx)
+
+        act_vst_rack = QAction("🎛️ Afficher Plugins du &Projet (Rack VST)", self)
+        act_vst_rack.setShortcut("F11")
+        act_vst_rack.triggered.connect(self.show_vst_rack)
+        menu_view.addAction(act_vst_rack)
 
         menu_view.addSeparator()
 
@@ -690,9 +712,19 @@ class MainWindow(QMainWindow):
             self.mixer_widget = mixer_p.create_editor(self)
             self.mixer_widget.track_mixer_changed.connect(self._on_track_mixer_changed)
             self.mixer_widget.track_selected.connect(self._on_track_selected)
+            if hasattr(self.mixer_widget, "master_volume_changed"):
+                self.mixer_widget.master_volume_changed.connect(lambda v: self._on_master_vol_changed(v, origin="mixer"))
             self.lower_zone.addTab(self.mixer_widget, "🎛️ Mixeur (F5)")
         else:
             self.mixer_widget = None
+
+        # Rack Effets Master (👑 Master FX Rack)
+        self.master_fx_widget = MasterFxWidget(self.project, self)
+        self.master_fx_widget.fx_changed.connect(self._on_project_modified)
+        self.lower_zone.addTab(self.master_fx_widget, "👑 Effets Master (F6)")
+
+        if self.mixer_widget and hasattr(self.mixer_widget, "master_fx_requested"):
+            self.mixer_widget.master_fx_requested.connect(self.show_master_fx_rack)
 
         self.vst_rack = VstRackWidget(self.project, self)
         self.vst_rack.rack_changed.connect(self._on_rack_changed)
@@ -725,6 +757,15 @@ class MainWindow(QMainWindow):
 
         self.shortcut_follow = QShortcut(QKeySequence("F"), self)
         self.shortcut_follow.activated.connect(self._toggle_autoscroll)
+
+        self.shortcut_f5 = QShortcut(QKeySequence("F5"), self)
+        self.shortcut_f5.activated.connect(self.show_mixer_console)
+
+        self.shortcut_f6 = QShortcut(QKeySequence("F6"), self)
+        self.shortcut_f6.activated.connect(self.show_master_fx_rack)
+
+        self.shortcut_f11 = QShortcut(QKeySequence("F11"), self)
+        self.shortcut_f11.activated.connect(self.show_vst_rack)
 
     def _init_status_bar(self):
         status = QStatusBar()
@@ -818,6 +859,8 @@ class MainWindow(QMainWindow):
             self.inspector.project = self.project
         if hasattr(self, "vst_rack"):
             self.vst_rack.set_project(self.project)
+        if hasattr(self, "master_fx_widget") and self.master_fx_widget:
+            self.master_fx_widget.set_project(self.project)
         if hasattr(self, "floating_vst_rack") and self.floating_vst_rack:
             self.floating_vst_rack.set_project(self.project)
         if hasattr(self, "mixer_widget") and self.mixer_widget:
@@ -829,6 +872,7 @@ class MainWindow(QMainWindow):
                         p.set_project(self.project)
                     break
             self.mixer_widget.refresh_tracks()
+            self.mixer_widget._update_master_fx_badges()
             if hasattr(self, "selected_track_id"):
                 self.mixer_widget.set_selected_track(self.selected_track_id)
 
@@ -951,17 +995,30 @@ class MainWindow(QMainWindow):
             self._expand_lower_zone()
         if hasattr(self, "mixer_widget") and self.mixer_widget:
             self.mixer_widget.sync_controls_from_tracks()
+            self.mixer_widget._update_master_fx_badges()
             if hasattr(self, "selected_track_id"):
                 self.mixer_widget.set_selected_track(self.selected_track_id)
             self.lower_zone.setCurrentWidget(self.mixer_widget)
             self.statusBar().showMessage("Console de Mixage affichée (F5)", 2000)
 
+    def show_master_fx_rack(self):
+        """Bascule immédiatement vers l'onglet des Effets Master (F6)"""
+        if self.is_lower_zone_minimized:
+            self._expand_lower_zone()
+        if hasattr(self, "master_fx_widget") and self.master_fx_widget:
+            self.master_fx_widget.refresh_rack()
+            self.lower_zone.setCurrentWidget(self.master_fx_widget)
+            self.statusBar().showMessage("👑 Effets Master affichés (F6)", 2000)
+
     def _on_lower_zone_tab_changed(self, index: int):
         current_w = self.lower_zone.widget(index)
         if current_w == getattr(self, "mixer_widget", None) and self.mixer_widget:
             self.mixer_widget.sync_controls_from_tracks()
+            self.mixer_widget._update_master_fx_badges()
             if hasattr(self, "selected_track_id"):
                 self.mixer_widget.set_selected_track(self.selected_track_id)
+        elif current_w == getattr(self, "master_fx_widget", None) and self.master_fx_widget:
+            self.master_fx_widget.refresh_rack()
 
     def select_master_track(self):
         """Sélectionne la piste Master dans l'inspecteur pour afficher sa pile de plugins"""
@@ -992,6 +1049,28 @@ class MainWindow(QMainWindow):
                 self.refresh_project_ui()
                 open_native_plugin_editor(comp, self)
                 self.statusBar().showMessage(f"Compresseur ajouté sur {track.name}", 2000)
+
+    def add_eq_to_master(self):
+        """Ajoute un Égaliseur Paramétrique directement sur la piste Master."""
+        master_t = self.project.ensure_master_track()
+        ensure_plugins_loaded()
+        eq = plugin_registry.create_plugin("novadaw.equalizer")
+        if eq:
+            master_t.add_plugin(eq)
+            self.refresh_project_ui()
+            open_native_plugin_editor(eq, self)
+            self.statusBar().showMessage("Égaliseur Paramétrique ajouté sur le Bus Master", 2500)
+
+    def add_comp_to_master(self):
+        """Ajoute un Compresseur Dynamique directement sur la piste Master."""
+        master_t = self.project.ensure_master_track()
+        ensure_plugins_loaded()
+        comp = plugin_registry.create_plugin("novadaw.compressor")
+        if comp:
+            master_t.add_plugin(comp)
+            self.refresh_project_ui()
+            open_native_plugin_editor(comp, self)
+            self.statusBar().showMessage("Compresseur Dynamique ajouté sur le Bus Master", 2500)
 
     def _on_track_height_changed(self, track_id: str, height: int, apply_all: bool):
         """Gère le redimensionnement fluide de la hauteur des pistes"""
@@ -1496,8 +1575,41 @@ class MainWindow(QMainWindow):
             self.project.bpm = bpm
             self.set_dirty(True)
 
-    def _on_master_vol_changed(self, vol: float):
-        self.audio_engine.master_volume = vol
+    def _on_master_vol_changed(self, vol: float, origin: str = "transport"):
+        """Synchronise le volume Master à travers tout NovaDAW (Moteur audio, Master track, Mixeur, Transport bar, Inspecteur)."""
+        vol = max(0.0, min(1.5, float(vol)))
+        if hasattr(self, "audio_engine"):
+            self.audio_engine.master_volume = vol
+
+        master_t = self.project.ensure_master_track()
+        if master_t:
+            master_t.volume = vol
+            for p in getattr(master_t, "plugins", []):
+                if hasattr(p, "master_volume"):
+                    p.master_volume = vol
+
+        # Synchroniser la Transport Bar
+        if origin != "transport" and hasattr(self, "transport_bar") and hasattr(self.transport_bar, "slider_master"):
+            pct = int(round(vol * 100))
+            self.transport_bar.slider_master.blockSignals(True)
+            self.transport_bar.slider_master.setValue(pct)
+            self.transport_bar.slider_master.setToolTip(f"Volume Master : {pct}% (Double-cliquer pour réinitialiser à 90%)")
+            self.transport_bar.slider_master.blockSignals(False)
+
+        # Synchroniser la Console de Mixage
+        if origin != "mixer" and hasattr(self, "mixer_widget") and self.mixer_widget:
+            if hasattr(self.mixer_widget, "slider_master"):
+                pct = int(round(vol * 100))
+                self.mixer_widget.slider_master.blockSignals(True)
+                self.mixer_widget.slider_master.setValue(pct)
+                self.mixer_widget.slider_master.setToolTip(f"Volume Master : {pct}% (Double-clic: 100%)")
+                self.mixer_widget.slider_master.blockSignals(False)
+            if hasattr(self.mixer_widget, "lbl_master_db"):
+                self.mixer_widget.lbl_master_db.setText(f"{pct}%")
+
+        # Synchroniser l'Inspecteur si la piste Master est actuellement sélectionnée
+        if origin != "inspector" and hasattr(self, "inspector") and self.inspector.current_track == master_t:
+            self.inspector.sync_controls_from_track()
 
     def _on_notes_updated(self):
         """Appelé lors de l'édition d'une note dans le Piano Roll."""
@@ -1530,6 +1642,15 @@ class MainWindow(QMainWindow):
         if hasattr(self, "mixer_widget") and self.mixer_widget:
             self.mixer_widget.sync_controls_from_tracks()
 
+        if hasattr(self, "transport_bar") and hasattr(self.transport_bar, "slider_master"):
+            master_t = self.project.ensure_master_track()
+            pct = int(round(master_t.volume * 100))
+            if self.transport_bar.slider_master.value() != pct:
+                self.transport_bar.slider_master.blockSignals(True)
+                self.transport_bar.slider_master.setValue(pct)
+                self.transport_bar.slider_master.setToolTip(f"Volume Master : {pct}% (Double-cliquer pour réinitialiser à 90%)")
+                self.transport_bar.slider_master.blockSignals(False)
+
     def _on_track_mixer_changed(self):
         """Mise à jour ultra-rapide des contrôles de mixage (Mute, Solo, Vol, Pan) sans invalider le cache audio."""
         self.set_dirty(True)
@@ -1543,6 +1664,14 @@ class MainWindow(QMainWindow):
                     item.widget().sync_controls_from_track()
         if hasattr(self, "mixer_widget") and self.mixer_widget:
             self.mixer_widget.sync_controls_from_tracks()
+        if hasattr(self, "transport_bar") and hasattr(self.transport_bar, "slider_master"):
+            master_t = self.project.ensure_master_track()
+            pct = int(round(master_t.volume * 100))
+            if self.transport_bar.slider_master.value() != pct:
+                self.transport_bar.slider_master.blockSignals(True)
+                self.transport_bar.slider_master.setValue(pct)
+                self.transport_bar.slider_master.setToolTip(f"Volume Master : {pct}% (Double-cliquer pour réinitialiser à 90%)")
+                self.transport_bar.slider_master.blockSignals(False)
         try:
             from ui.plugin_dialogs import _open_native_editors
             for dlg in list(_open_native_editors.values()):

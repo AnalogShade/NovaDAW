@@ -349,9 +349,9 @@ class TrackInspector(QFrame):
             type_desc = "Piste MIDI (Instrument Virtuel)"
             color_code = "#38bdf8;"
         elif track.track_type == "master":
-            icon = "🎛️"
+            icon = "👑"
             type_desc = "Piste Master (Bus Stéréo)"
-            color_code = "#ef4444;"
+            color_code = "#f59e0b;"
         else:
             icon = "🔊"
             type_desc = "Piste Audio (Enregistrement/Samples)"
@@ -701,20 +701,19 @@ class TrackInspector(QFrame):
         """)
 
         # 1. Plugins NovaDAW intégrés
-        act_synth = menu.addAction("⚡ NovaSynth (Synthétiseur Polyphonique)")
-        act_synth.triggered.connect(self._add_synth_plugin)
+        is_midi = getattr(self.current_track, "track_type", "") == "midi"
+        if is_midi:
+            act_synth = menu.addAction("⚡ NovaSynth (Synthétiseur Polyphonique)")
+            act_synth.triggered.connect(self._add_synth_plugin)
 
-        act_drums = menu.addAction("🥁 Nova Drums (Instrument VSTi Batterie)")
-        act_drums.triggered.connect(self._add_drum_plugin)
+            act_drums = menu.addAction("🥁 Nova Drums (Instrument VSTi Batterie)")
+            act_drums.triggered.connect(self._add_drum_plugin)
 
         act_eq = menu.addAction("📊 Égaliseur Paramétrique (3/10/12/24 bandes)")
         act_eq.triggered.connect(self._add_equalizer_plugin)
 
         act_comp = menu.addAction("🗜️ Compresseur Dynamique (Studio)")
         act_comp.triggered.connect(self._add_compressor_plugin)
-
-        act_mix = menu.addAction("🎛️ Mixeur de Pistes")
-        act_mix.triggered.connect(self._add_mixer_plugin)
 
         menu.addSeparator()
 
@@ -842,10 +841,15 @@ class TrackInspector(QFrame):
         if not hasattr(self.current_track, "plugins"):
             self.current_track.plugins = []
 
-        total_plugins = len(self.current_track.plugins)
+        is_master = (self.current_track.track_type == "master" or getattr(self.current_track, "id", "") == "master")
+        displayable_plugins = [
+            p for p in self.current_track.plugins
+            if not (is_master and getattr(p, "plugin_type_id", None) == "novadaw.mixer")
+        ]
+        total_plugins = len(displayable_plugins)
 
         # 1. Rendu des plugins natifs empilés
-        for p_idx, plugin in enumerate(self.current_track.plugins):
+        for p_idx, plugin in enumerate(displayable_plugins):
             card = QFrame()
             card.setStyleSheet("""
                 QFrame {
@@ -916,7 +920,7 @@ class TrackInspector(QFrame):
             btn_up.setFixedSize(18, 18)
             btn_up.setEnabled(p_idx > 0)
             btn_up.setStyleSheet("background: transparent; border: none; color: #94a3b8; font-size: 9px; padding: 0px;")
-            btn_up.clicked.connect(lambda _, idx=p_idx: self._move_plugin_up(idx))
+            btn_up.clicked.connect(lambda _, p=plugin: self._move_plugin_up(p))
             card_layout.addWidget(btn_up)
 
             # Bouton Descendre [▼]
@@ -924,7 +928,7 @@ class TrackInspector(QFrame):
             btn_down.setFixedSize(18, 18)
             btn_down.setEnabled(p_idx < total_plugins - 1)
             btn_down.setStyleSheet("background: transparent; border: none; color: #94a3b8; font-size: 9px; padding: 0px;")
-            btn_down.clicked.connect(lambda _, idx=p_idx: self._move_plugin_down(idx))
+            btn_down.clicked.connect(lambda _, p=plugin: self._move_plugin_down(p))
             card_layout.addWidget(btn_down)
 
             # Bouton Supprimer [✕]
@@ -976,15 +980,35 @@ class TrackInspector(QFrame):
         btn.setText("On" if chk else "Bypass")
         self.track_modified.emit()
 
-    def _move_plugin_up(self, idx: int):
-        if self.current_track and self.current_track.move_plugin(idx, idx - 1):
-            self._rebuild_plugin_stack()
-            self.track_modified.emit()
+    def _move_plugin_up(self, plugin: Any):
+        if not self.current_track or not hasattr(self.current_track, "plugins"):
+            return
+        is_master = (self.current_track.track_type == "master" or getattr(self.current_track, "id", "") == "master")
+        displayable = [p for p in self.current_track.plugins if not (is_master and getattr(p, "plugin_type_id", None) == "novadaw.mixer")]
+        if plugin in displayable:
+            idx = displayable.index(plugin)
+            if idx > 0:
+                prev_p = displayable[idx - 1]
+                idx1 = self.current_track.plugins.index(plugin)
+                idx2 = self.current_track.plugins.index(prev_p)
+                self.current_track.move_plugin(idx1, idx2)
+                self._rebuild_plugin_stack()
+                self.track_modified.emit()
 
-    def _move_plugin_down(self, idx: int):
-        if self.current_track and self.current_track.move_plugin(idx, idx + 1):
-            self._rebuild_plugin_stack()
-            self.track_modified.emit()
+    def _move_plugin_down(self, plugin: Any):
+        if not self.current_track or not hasattr(self.current_track, "plugins"):
+            return
+        is_master = (self.current_track.track_type == "master" or getattr(self.current_track, "id", "") == "master")
+        displayable = [p for p in self.current_track.plugins if not (is_master and getattr(p, "plugin_type_id", None) == "novadaw.mixer")]
+        if plugin in displayable:
+            idx = displayable.index(plugin)
+            if idx < len(displayable) - 1:
+                next_p = displayable[idx + 1]
+                idx1 = self.current_track.plugins.index(plugin)
+                idx2 = self.current_track.plugins.index(next_p)
+                self.current_track.move_plugin(idx1, idx2)
+                self._rebuild_plugin_stack()
+                self.track_modified.emit()
 
     def _remove_plugin(self, plugin: Any):
         if self.current_track:
@@ -1027,6 +1051,10 @@ class TrackInspector(QFrame):
     def _on_vol_changed(self, val: int):
         if self.current_track:
             self.current_track.volume = val / 100.0
+            if self.current_track.track_type == "master":
+                for p in getattr(self.current_track, "plugins", []):
+                    if hasattr(p, "master_volume"):
+                        p.master_volume = val / 100.0
             self.slider_vol.setToolTip(f"Volume : {val}% (Double-cliquer pour réinitialiser à 80%)")
             if hasattr(self, "txt_vol") and not self.txt_vol.hasFocus():
                 self.txt_vol.setText(f"{val}%")

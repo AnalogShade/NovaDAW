@@ -66,6 +66,57 @@ class PresetManager:
         clean = re.sub(r'[\\/*?:"<>|]', "", name).strip()
         return clean or "Preset"
 
+    def is_factory_preset(self, plugin_or_type: Any, preset_name: str) -> bool:
+        """
+        Vérifie si un preset donné est un preset d'origine (usine) protégé qui ne doit jamais être écrasé.
+        """
+        if not preset_name:
+            return False
+        clean = preset_name.strip().lower()
+
+        # 1. Vérifier si l'objet est une instance de plugin fournissant des presets d'usine
+        inst = plugin_or_type if not isinstance(plugin_or_type, str) else None
+        if inst and hasattr(inst, "get_factory_presets"):
+            try:
+                fact = inst.get_factory_presets()
+                if isinstance(fact, dict):
+                    for k in fact.keys():
+                        if k.strip().lower() == clean:
+                            return True
+            except Exception:
+                pass
+
+        # 2. Vérifier aussi si plugin_or_type est un plugin_type_id (ex: "novadaw.synth")
+        type_id = inst.plugin_type_id if inst and hasattr(inst, "plugin_type_id") else (plugin_or_type if isinstance(plugin_or_type, str) else "")
+        if type_id and not inst:
+            try:
+                from plugins.registry import plugin_registry, ensure_plugins_loaded
+                ensure_plugins_loaded()
+                temp_p = plugin_registry.create_plugin(type_id)
+                if temp_p and hasattr(temp_p, "get_factory_presets"):
+                    fact = temp_p.get_factory_presets()
+                    if isinstance(fact, dict):
+                        for k in fact.keys():
+                            if k.strip().lower() == clean:
+                                return True
+            except Exception:
+                pass
+
+        # 3. Vérifier dans le dossier presets/ si un fichier porte la mention d'auteur "NovaDAW Factory"
+        if type_id:
+            p_dir = self.get_plugin_preset_dir(type_id)
+            if p_dir.exists():
+                for f in p_dir.glob("*.json"):
+                    if f.stem.strip().lower() == clean:
+                        try:
+                            with open(f, "r", encoding="utf-8") as fp:
+                                data = json.load(fp)
+                            if "factory" in str(data.get("author", "")).lower() or data.get("is_factory", False):
+                                return True
+                        except Exception:
+                            pass
+        return False
+
     def preset_exists(self, plugin_type_id: str, preset_name: str) -> bool:
         """Vérifie si un preset utilisateur existe sur disque."""
         p_dir = self.get_plugin_preset_dir(plugin_type_id)
@@ -114,10 +165,11 @@ class PresetManager:
                     with open(f, "r", encoding="utf-8") as fp:
                         data = json.load(fp)
                     display_name = data.get("name") or data.get("preset_name") or p_name
+                    is_factory_file = "factory" in str(data.get("author", "")).lower() or data.get("is_factory", False)
                     results.append(PresetInfo({
                         "name": display_name,
                         "plugin_type_id": plugin_type_id,
-                        "is_factory": False,
+                        "is_factory": is_factory_file,
                         "file_path": str(f),
                         "created_at": data.get("created_at"),
                         "author": data.get("author", "Utilisateur")
@@ -151,6 +203,12 @@ class PresetManager:
 
         if not plugin_or_type:
             raise ValueError("Aucun plugin ou plugin_type_id spécifié.")
+
+        if self.is_factory_preset(plugin_or_type, preset_name):
+            raise ValueError(
+                f"Impossible d'écraser le preset d'usine protégé '{preset_name}'. "
+                f"Veuillez choisir un nom de preset utilisateur distinct (ex: '{preset_name} (User)')."
+            )
 
         if isinstance(plugin_or_type, str):
             actual_type_id = plugin_or_type
@@ -267,7 +325,9 @@ class PresetManager:
         return False
 
     def delete_preset(self, plugin_type_id: str, preset_name: str) -> bool:
-        """Supprime un preset utilisateur."""
+        """Supprime un preset utilisateur (les presets d'usine ne peuvent jamais être supprimés)."""
+        if self.is_factory_preset(plugin_type_id, preset_name):
+            return False
         p_dir = self.get_plugin_preset_dir(plugin_type_id)
         safe_name = self.sanitize_filename(preset_name)
         target_file = p_dir / f"{safe_name}.json"
