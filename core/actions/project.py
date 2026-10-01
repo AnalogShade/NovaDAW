@@ -144,6 +144,10 @@ def save_project_action(app, file_path: Optional[str] = None) -> Dict[str, Any]:
         app.set_dirty(False)
     if hasattr(app, "_saved_project_snapshot") and hasattr(app, "_capture_project_snapshot"):
         app._saved_project_snapshot = app._capture_project_snapshot()
+    if hasattr(app, "recent_projects_manager"):
+        app.recent_projects_manager.add_recent_project(target_path)
+    if hasattr(app, "_update_recent_projects_menu"):
+        app._update_recent_projects_menu()
     if hasattr(app, "statusBar"):
         app.statusBar().showMessage(f"Projet sauvegardé : {os.path.basename(target_path)}", 3000)
 

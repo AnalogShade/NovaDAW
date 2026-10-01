@@ -15,6 +15,7 @@ from PySide6.QtGui import QAction, QKeySequence, QIcon, QPixmap, QShortcut
 
 from core.project import Project, Track, MidiClip, AudioClip
 from core.serializer import save_project, load_project
+from core.recent_projects import recent_projects_manager, RecentProjectsManager
 from core.audio_engine import AudioEngine
 from core.audio_importer import load_audio_file, QT_FILE_DIALOG_FILTER
 from core.hardware_manager import hardware_manager
@@ -60,6 +61,8 @@ class MainWindow(QMainWindow):
         self._is_dirty: bool = False
         self._saved_project_snapshot: Optional[str] = None
         self._test_save_prompt_response: Optional[str] = None
+        self._test_recent_not_found_response: Optional[str] = None
+        self.recent_projects_manager: RecentProjectsManager = recent_projects_manager
 
         self.is_lower_zone_minimized = False
         self._saved_lower_height = 270
@@ -116,6 +119,13 @@ class MainWindow(QMainWindow):
         act_open.setShortcut(QKeySequence.Open)
         act_open.triggered.connect(self.open_project_dialog)
         menu_file.addAction(act_open)
+
+        # Sous-menu Projets récents
+        self.menu_recent_projects = menu_file.addMenu("🕒 &Projets récents")
+        self.menu_recent_projects.aboutToShow.connect(self._update_recent_projects_menu)
+        self._update_recent_projects_menu()
+
+        menu_file.addSeparator()
 
         act_save = QAction("&Enregistrer", self)
         act_save.setShortcut(QKeySequence.Save)
@@ -1961,6 +1971,111 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Projet de démonstration chargé.", 3000)
         return True
 
+    def _update_recent_projects_menu(self):
+        """Met à jour dynamiquement le sous-menu des projets récents."""
+        if not hasattr(self, "menu_recent_projects"):
+            return
+
+        self.menu_recent_projects.clear()
+        recent_files = self.recent_projects_manager.get_recent_projects()
+
+        if not recent_files:
+            act_empty = QAction("(Aucun projet récent)", self)
+            act_empty.setEnabled(False)
+            self.menu_recent_projects.addAction(act_empty)
+            return
+
+        for idx, file_path in enumerate(recent_files, start=1):
+            project_name = os.path.splitext(os.path.basename(file_path))[0]
+            prefix = f"&{idx}. " if idx < 10 else f"{idx}. "
+            act = QAction(f"{prefix}{project_name}", self)
+            act.setToolTip(file_path)
+            act.setStatusTip(f"Ouvrir le projet : {file_path}")
+            act.triggered.connect(lambda checked=False, p=file_path: self.open_recent_project(p))
+            self.menu_recent_projects.addAction(act)
+
+        self.menu_recent_projects.addSeparator()
+
+        act_clear = QAction("🗑️ Effacer la liste des projets récents", self)
+        act_clear.setStatusTip("Vider l'historique des projets récents")
+        act_clear.triggered.connect(self.clear_recent_projects)
+        self.menu_recent_projects.addAction(act_clear)
+
+    def open_recent_project(self, file_path: str) -> bool:
+        """
+        Ouvre un projet sélectionné depuis la liste des projets récents.
+        Si le fichier a été supprimé ou déplacé, propose de le retirer de la liste.
+        """
+        if not os.path.exists(file_path):
+            if getattr(self, "_test_recent_not_found_response", None) == "yes":
+                res = QMessageBox.Yes
+            elif getattr(self, "_test_recent_not_found_response", None) == "no":
+                res = QMessageBox.No
+            else:
+                res = QMessageBox.question(
+                    self,
+                    "Projet introuvable",
+                    f"Le fichier projet suivant est introuvable ou a été supprimé / déplacé :\n\n{file_path}\n\n"
+                    "Souhaitez-vous le retirer de la liste des projets récents ?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+            if res == QMessageBox.Yes:
+                self.recent_projects_manager.remove_recent_project(file_path)
+                self._update_recent_projects_menu()
+                self.statusBar().showMessage("Projet retiré de la liste des récents.", 3000)
+            return False
+
+        return self.open_project_file(file_path, prompt_save=True)
+
+    def clear_recent_projects(self):
+        """Efface tous les projets récents enregistrés."""
+        self.recent_projects_manager.clear_recent_projects()
+        self._update_recent_projects_menu()
+        self.statusBar().showMessage("Historique des projets récents effacé.", 3000)
+
+    def open_project_file(self, file_path: str, prompt_save: bool = True) -> bool:
+        """
+        Charge un projet NovaDAW (.ndaw) depuis le chemin spécifié.
+        Gère la vérification des modifications non enregistrées, l'arrêt du moteur audio,
+        la fermeture des éditeurs de plugins, la réinitialisation du cache et l'enregistrement
+        dans l'historique des projets récents.
+        """
+        if prompt_save and not self.maybe_save_changes(reason="open"):
+            return False
+
+        if not os.path.exists(file_path):
+            QMessageBox.critical(self, "Erreur d'ouverture", f"Le fichier projet est introuvable :\n{file_path}")
+            return False
+
+        try:
+            global_plugin_manager.close_all_editors()
+            self.audio_engine.stop()
+            if hasattr(self, "cache_progress_bar"):
+                self.cache_progress_bar.setValue(0)
+                self.cache_progress_bar.setVisible(True)
+            if hasattr(self, "lbl_cache_text"):
+                self.lbl_cache_text.setStyleSheet("color: #38bdf8; font-weight: 600; font-size: 11px;")
+                self.lbl_cache_text.setText("Chargement du cache audio...")
+
+            self.project = load_project(file_path)
+            self.audio_engine.set_project(self.project)
+            self.selected_track_id = None
+            self._on_seek(0.0)
+            self._saved_project_snapshot = self._capture_project_snapshot()
+            self.set_dirty(False)
+            self.refresh_project_ui()
+
+            # Mettre à jour l'historique des projets récents
+            self.recent_projects_manager.add_recent_project(file_path)
+            self._update_recent_projects_menu()
+
+            self.statusBar().showMessage(f"Projet chargé : {os.path.basename(file_path)}", 4000)
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "Erreur d'ouverture", f"Impossible d'ouvrir le projet :\n{e}")
+            return False
+
     def open_project_dialog(self) -> bool:
         if not self.maybe_save_changes(reason="open"):
             return False
@@ -1971,24 +2086,7 @@ class MainWindow(QMainWindow):
             "Fichiers NovaDAW (*.ndaw);;Tous les fichiers (*.*)"
         )
         if file_path:
-            try:
-                self.audio_engine.stop()
-                if hasattr(self, "cache_progress_bar"):
-                    self.cache_progress_bar.setValue(0)
-                    self.cache_progress_bar.setVisible(True)
-                if hasattr(self, "lbl_cache_text"):
-                    self.lbl_cache_text.setStyleSheet("color: #38bdf8; font-weight: 600; font-size: 11px;")
-                    self.lbl_cache_text.setText("Chargement du cache audio...")
-                self.project = load_project(file_path)
-                self.audio_engine.set_project(self.project)
-                self._saved_project_snapshot = self._capture_project_snapshot()
-                self.set_dirty(False)
-                self.refresh_project_ui()
-                self.statusBar().showMessage(f"Projet chargé : {os.path.basename(file_path)}", 4000)
-                return True
-            except Exception as e:
-                QMessageBox.critical(self, "Erreur d'ouverture", f"Impossible d'ouvrir le projet :\n{e}")
-                return False
+            return self.open_project_file(file_path, prompt_save=False)
         return False
 
     def save_project_action(self) -> bool:
@@ -1997,6 +2095,8 @@ class MainWindow(QMainWindow):
                 save_project(self.project, self.project.file_path)
                 self._saved_project_snapshot = self._capture_project_snapshot()
                 self.set_dirty(False)
+                self.recent_projects_manager.add_recent_project(self.project.file_path)
+                self._update_recent_projects_menu()
                 self.statusBar().showMessage("Projet enregistré avec succès.", 3000)
                 return True
             except Exception as e:
@@ -2021,6 +2121,8 @@ class MainWindow(QMainWindow):
                 self._saved_project_snapshot = self._capture_project_snapshot()
                 self.set_dirty(False)
                 self.refresh_project_ui()
+                self.recent_projects_manager.add_recent_project(file_path)
+                self._update_recent_projects_menu()
                 self.statusBar().showMessage(f"Projet enregistré sous {os.path.basename(file_path)}", 4000)
                 return True
             except Exception as e:

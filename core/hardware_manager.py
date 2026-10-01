@@ -59,14 +59,29 @@ class HardwareManager:
             try:
                 with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                     saved = json.load(f)
-                    default_settings["audio"].update(saved.get("audio", {}))
-                    default_settings["graphics"].update(saved.get("graphics", {}))
+                    if isinstance(saved, dict):
+                        for k, v in saved.items():
+                            if k in ("audio", "graphics") and isinstance(v, dict):
+                                default_settings[k].update(v)
+                            else:
+                                default_settings[k] = v
             except Exception as e:
                 print(f"[HardwareManager] Erreur lecture settings.json: {e}")
         return default_settings
 
     def save_settings(self) -> bool:
         try:
+            current_on_disk = {}
+            if os.path.exists(SETTINGS_FILE):
+                try:
+                    with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if isinstance(data, dict):
+                            current_on_disk = data
+                except Exception:
+                    pass
+            current_on_disk.update(self.settings)
+            self.settings = current_on_disk
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.settings, f, indent=2, ensure_ascii=False)
             return True
