@@ -36,8 +36,8 @@ class TrackInspector(QFrame):
         self.project = project
         self.current_track: Optional[Track] = None
 
-        self.setMinimumWidth(200)
-        self.setMaximumWidth(550)
+        self.setMinimumWidth(320)
+        self.setMaximumWidth(600)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.setObjectName("track_inspector")
         self.setStyleSheet("""
@@ -869,6 +869,7 @@ class TrackInspector(QFrame):
             lbl_title = QLabel(f"{p_idx + 1}. {plugin.icon} {plugin.name}")
             lbl_title.setStyleSheet("font-size: 10px; font-weight: bold; color: #f1f5f9;")
             lbl_title.setToolTip(getattr(plugin, "description", plugin.name))
+            lbl_title.setMinimumWidth(50)
             card_layout.addWidget(lbl_title, stretch=1)
 
             # Bouton On / Bypass
@@ -953,6 +954,7 @@ class TrackInspector(QFrame):
 
                 lbl = QLabel(f"VST: 🎛️ {fx_name}")
                 lbl.setStyleSheet("font-size: 10px; color: #c084fc; font-weight: bold;")
+                lbl.setMinimumWidth(50)
                 row.addWidget(lbl, stretch=1)
 
                 btn_e = QPushButton("e")

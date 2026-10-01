@@ -657,7 +657,7 @@ class MainWindow(QMainWindow):
         self.arranger_splitter.setCollapsible(0, True)
         self.arranger_splitter.setCollapsible(1, False)
         self.arranger_splitter.setCollapsible(2, False)
-        self.arranger_splitter.setSizes([200, 280, 800])
+        self.arranger_splitter.setSizes([325, 280, 675])
         self.arranger_splitter.setStretchFactor(0, 0)
         self.arranger_splitter.setStretchFactor(1, 0)
         self.arranger_splitter.setStretchFactor(2, 1)
@@ -901,14 +901,24 @@ class MainWindow(QMainWindow):
             header.track_height_changed.connect(self._on_track_height_changed)
             self.headers_layout.insertWidget(self.headers_layout.count() - 1, header)
 
-        # S'assurer que le panneau des en-têtes conserve une largeur confortable (>= 260px) sans boutons masqués
+        # S'assurer que l'inspecteur et le panneau des en-têtes conservent une largeur confortable
         cur_sizes = self.arranger_splitter.sizes()
-        if len(cur_sizes) >= 3 and cur_sizes[1] < 260:
-            diff = 280 - cur_sizes[1]
-            cur_sizes[1] = 280
-            if cur_sizes[2] > diff + 300:
-                cur_sizes[2] -= diff
-            self.arranger_splitter.setSizes(cur_sizes)
+        changed = False
+        if len(cur_sizes) >= 3:
+            if self.inspector.isVisible() and 0 < cur_sizes[0] < 310:
+                diff = 325 - cur_sizes[0]
+                cur_sizes[0] = 325
+                if cur_sizes[2] > diff + 300:
+                    cur_sizes[2] -= diff
+                changed = True
+            if cur_sizes[1] < 260:
+                diff = 280 - cur_sizes[1]
+                cur_sizes[1] = 280
+                if cur_sizes[2] > diff + 300:
+                    cur_sizes[2] -= diff
+                changed = True
+            if changed:
+                self.arranger_splitter.setSizes(cur_sizes)
 
         # Mettre à jour l'inspecteur avec la piste sélectionnée
         if self.project.tracks:
@@ -1129,6 +1139,14 @@ class MainWindow(QMainWindow):
         if hasattr(self, "btn_toggle_insp_top"):
             self.btn_toggle_insp_top.setText("◀" if vis else "▶")
             self.btn_toggle_insp_top.setToolTip("Masquer l'Inspecteur (F2)" if vis else "Afficher l'Inspecteur (F2)")
+        if vis:
+            cur_sizes = self.arranger_splitter.sizes()
+            if len(cur_sizes) >= 3 and cur_sizes[0] < 310:
+                diff = 325 - cur_sizes[0]
+                cur_sizes[0] = 325
+                if cur_sizes[2] > diff + 300:
+                    cur_sizes[2] -= diff
+                self.arranger_splitter.setSizes(cur_sizes)
         self.statusBar().showMessage(f"Inspecteur de piste {'affiché' if vis else 'masqué'} (F2)", 2000)
 
     def show_add_track_dialog(self):
