@@ -105,7 +105,11 @@ Positionnée au centre de la fenêtre principale, au-dessus des onglets de la zo
 ## 4. Exportation Mixdown Hors-Ligne (Offline WAV Render)
 
 La fonction d'exportation (`novadaw_export_wav` / `Ctrl+E`) réalise un rendu haute fidélité du projet complet :
-1. **Calcul de la Durée Totale** : Analyse de la fin du dernier clip audio ou MIDI.
+1. **Bornes explicites** : `end_bar` indique le nombre de mesures exportées, depuis le début absolu du morceau. La boucle de lecture ne replie jamais la timeline exportée.
 2. **Traitement par Blocs Sans Contrainte Temps Réel** : Rendu à vitesse maximale (non limité à la vitesse 1x de la carte son).
 3. **Application Complète des Chaînes de Plugins** : Rendu des instruments virtuels, traitement par chaque effet d'insert, sommation dans le bus Master et passage par les effets de mastering.
-4. **Écriture WAV FP32 ou PCM 24-bit** via `soundfile.write`.
+4. **Écriture WAV PCM 24-bit stéréo** via `soundfile.write`.
+5. **Contexte natif isolé** : `export_wav` copie les pistes, leurs notes, réglages et plugins natifs, puis réinitialise leur état DSP. Le rendu se fait avec le cache ASIO-Guard désactivé; il ne partage ni filtres, ni délais, ni réverbérations des instruments natifs avec la lecture en cours. Le transport, la boucle et la session originale restent inchangés. Les exports d'un même moteur sont sérialisés.
+6. **Accès MCP** : le pont IPC attend jusqu'à 300 secondes pour l'export (5 secondes pour les autres actions par défaut). Un délai explicitement fourni reste prioritaire. Le calcul reste synchrone dans l'application; cela ne constitue pas encore une interface d'export asynchrone avec progression.
+
+Les instruments et effets VST externes continuent d'utiliser le gestionnaire de plugins existant : leur état DSP n'est pas cloné par ce correctif ciblé sur les plugins natifs. Ils nécessitent une validation séparée, notamment si un export est lancé pendant leur lecture. Les tests de non-régression spécifiques se trouvent dans `tests/test_mixdown_isolation.py`.

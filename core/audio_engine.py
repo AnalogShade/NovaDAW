@@ -124,6 +124,7 @@ class AudioEngine:
         self._cache_force_requested = False
         self._cache_generation = 0
         self._cache_closed = False
+        self._export_lock = threading.Lock()
 
         # Enregistrement audio et MIDI
         self.is_recording = False
@@ -1631,7 +1632,9 @@ class AudioEngine:
             # Position dans les samples du clip avec prise en compte du décalage de source
             clip_samples_len = len(clip.audio_data)
             offset_beats = float(getattr(clip, "source_offset_beats", 0.0))
-            sample_offset = int(((start_b - clip_start + offset_beats) / beats_per_sec) * self.sample_rate)
+            # Beat conversion can produce 4095.999999999 instead of frame 4096.
+            # Rounding avoids repeating one sample at offline block boundaries.
+            sample_offset = round(((start_b - clip_start + offset_beats) / beats_per_sec) * self.sample_rate)
 
             buf_start = 0
             clip_read_start = sample_offset
@@ -1639,7 +1642,7 @@ class AudioEngine:
                 buf_start = -clip_read_start
                 clip_read_start = 0
 
-            max_clip_samples = int(((offset_beats + clip.length_beats) / beats_per_sec) * self.sample_rate)
+            max_clip_samples = round(((offset_beats + clip.length_beats) / beats_per_sec) * self.sample_rate)
             readable_end = min(clip_samples_len, max_clip_samples)
 
             if clip_read_start < readable_end and buf_start < frames:
@@ -1695,7 +1698,39 @@ class AudioEngine:
         return track_buf
 
     def export_wav(self, file_path: str, end_bar: int = 8) -> bool:
-        """Exporte l'arrangement complet dans un fichier WAV haute qualité"""
+        """Render from fresh native DSP state, never from the live playback cache."""
+        if not self.project:
+            return False
+        with self._export_lock:
+            renderer = copy.copy(self)
+            project = copy.copy(self.project)
+
+            def clone_track(track):
+                clone = Track.from_dict(copy.deepcopy(track.to_dict()))
+                for source, dest in zip(track.clips, clone.clips):
+                    if isinstance(source, AudioClip):
+                        dest.audio_data = source.audio_data
+                for plugin in clone.plugins:
+                    if hasattr(plugin, "set_project"):
+                        plugin.set_project(project)
+                return clone
+
+            project.tracks = [clone_track(track) for track in self.project.tracks]
+            project.master_track = clone_track(self.project.master_track) if self.project.master_track else None
+            # An export is a linear timeline, including any requested release tail.
+            project.loop_enabled = False
+            project._rack_native_plugins = {}
+            renderer.project = project
+            renderer._asio_guard_enabled = False
+            renderer._track_audio_caches = {}
+            renderer.track_plugins = {}
+            renderer._master_peak_lock = threading.Lock()
+            renderer.is_playing = False
+            renderer._reset_all_plugins()
+            return renderer._render_mixdown_wav(file_path, end_bar)
+
+    def _render_mixdown_wav(self, file_path: str, end_bar: int) -> bool:
+        """Offline mixdown, called only on the isolated rendering context."""
         if not self.project:
             return False
         bpm = max(20.0, self.project.bpm)
@@ -1756,5 +1791,5 @@ class AudioEngine:
         if not has_active_mixer:
             rendered *= self.master_volume
         rendered = np.tanh(rendered)
-        sf.write(file_path, rendered, self.sample_rate)
+        sf.write(file_path, rendered, self.sample_rate, subtype="PCM_24")
         return True

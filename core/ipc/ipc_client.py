@@ -40,11 +40,13 @@ class NovaIpcClient:
         except (socket.error, ConnectionRefusedError, TimeoutError):
             return False
 
-    def send_action(self, action: str, params: Optional[Dict[str, Any]] = None, timeout: float = 5.0) -> Any:
+    def send_action(self, action: str, params: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None) -> Any:
         """
         Envoie une action à NovaDAW et attend la réponse.
         Lève une exception explicite si NovaDAW n'est pas démarré ou si l'action échoue.
         """
+        if timeout is None:
+            timeout = 300.0 if action == "novadaw_export_wav" else 5.0
         host, port = self.get_server_coords()
         req_id = str(uuid.uuid4())[:8]
         payload = {
