@@ -4,9 +4,10 @@ ui/track_header.py - En-tête de piste individuel (Mute, Solo, Arm, Volume, Pan,
 from typing import Optional
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
-    QSlider, QLineEdit, QFrame, QMenu, QComboBox, QSizePolicy
+    QSlider, QLineEdit, QFrame, QMenu, QComboBox, QSizePolicy, QColorDialog
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QEvent, QRectF
+from PySide6.QtGui import QPainter, QColor, QPen, QBrush
 from core.project import Track
 from core.plugin_manager import global_plugin_manager
 from ui.glow_effects import set_button_glow
@@ -63,12 +64,108 @@ class CompactNumEdit(QLineEdit):
         self.selectAll()
 
 
+class TrackColorGrip(QFrame):
+    """
+    Bande verticale de couleur identifiant visuellement la piste et servant de poignée
+    de glisser-déposer (curseur petite main) pour réordonner les pistes.
+    """
+    def __init__(self, header: "TrackHeaderWidget"):
+        super().__init__(header)
+        self._header = header
+        self._hovered = False
+        self.setObjectName("track_color_bar")
+        self.setFixedWidth(8)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.OpenHandCursor)
+        self.setToolTip(
+            "Glisser-déposer (⇅) pour réordonner cette piste vers le haut ou le bas\n"
+            "• Clic droit : Menu de la piste"
+        )
+
+    def enterEvent(self, event):
+        self._hovered = True
+        if getattr(self._header, "_reordering_track", False):
+            self.setCursor(Qt.ClosedHandCursor)
+        else:
+            self.setCursor(Qt.OpenHandCursor)
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        if not getattr(self._header, "_reordering_track", False):
+            self.setCursor(Qt.OpenHandCursor)
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._header._start_reorder_drag(int(event.globalPosition().y()))
+            event.accept()
+            return
+        elif event.button() == Qt.RightButton:
+            self._header._show_track_context_menu(event.globalPosition().toPoint())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if getattr(self._header, "_reordering_track", False):
+            self._header._update_reorder_drag(int(event.globalPosition().y()))
+            event.accept()
+            return
+        self.setCursor(Qt.OpenHandCursor)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if getattr(self._header, "_reordering_track", False) and event.button() == Qt.LeftButton:
+            self._header._finish_reorder_drag()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event):
+        self._header._show_track_context_menu(event.globalPos())
+        event.accept()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        w = self.width()
+        h = self.height()
+
+        base_col = QColor(getattr(self._header.track, "color", "#38bdf8") or "#38bdf8")
+        if getattr(self._header, "_reordering_track", False):
+            fill_col = base_col.lighter(135)
+        elif self._hovered or getattr(self._header, "is_selected", False):
+            fill_col = base_col.lighter(115)
+        else:
+            fill_col = base_col
+
+        painter.fillRect(0, 0, w, h, fill_col)
+
+        # Points de préhension (grip dots) subtils au centre pour indiquer que la bande est déplaçable
+        dot_alpha = 230 if (self._hovered or getattr(self._header, "_reordering_track", False)) else 130
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(255, 255, 255, dot_alpha)))
+        cy = h // 2
+        for dy in (-6, 0, 6):
+            y = cy + dy
+            if 4 <= y <= h - 4:
+                painter.drawEllipse(QRectF(2.0, float(y) - 1.0, 1.8, 1.8))
+                painter.drawEllipse(QRectF(4.5, float(y) - 1.0, 1.8, 1.8))
+
+
 class TrackHeaderWidget(QFrame):
     track_modified = Signal()
     track_mixer_changed = Signal()
     track_selected = Signal(str)  # track_id
     track_deleted = Signal(str)   # track_id
     track_height_changed = Signal(str, int, bool)  # (track_id, height, apply_all)
+    track_reorder_dragged = Signal(str, int)  # (track_id, global_y)
+    track_reorder_finished = Signal(str)      # track_id
+    track_moved = Signal(str, int)            # (track_id, delta: -1 or +1)
+    track_duplicated = Signal(str)            # track_id
 
     RESIZE_MARGIN = 6
 
@@ -78,8 +175,11 @@ class TrackHeaderWidget(QFrame):
         self._project_override = project
         self.is_selected = False
         self._resizing_height = False
+        self._reordering_track = False
+        self._reorder_start_global_y = 0
         self._drag_start_y = 0
         self._drag_start_h = getattr(track, "height", 76)
+        self._last_context_menu: Optional[QMenu] = None
 
         initial_h = getattr(self.track, "height", 76)
         self.setFixedHeight(initial_h)
@@ -98,10 +198,8 @@ class TrackHeaderWidget(QFrame):
         main_layout.setContentsMargins(0, 0, 4, 0)
         main_layout.setSpacing(4)
 
-        # 1. Bande latérale de couleur
-        self.color_bar = QFrame()
-        self.color_bar.setFixedWidth(5)
-        self.color_bar.setStyleSheet(f"background-color: {self.track.color}; border-top-left-radius: 4px; border-bottom-left-radius: 4px;")
+        # 1. Bande latérale de couleur (poignée de réordonnancement avec curseur petite main)
+        self.color_bar = TrackColorGrip(self)
         main_layout.addWidget(self.color_bar)
 
         # Contenu principal
@@ -132,9 +230,13 @@ class TrackHeaderWidget(QFrame):
         self.txt_name = QLineEdit(self.track.name)
         self.txt_name.setStyleSheet("background: transparent; border: none; font-weight: bold; font-size: 11px; padding: 1px 2px;")
         self.txt_name.setCursorPosition(0)
-        self.txt_name.setMinimumWidth(30)
+        self.txt_name.setMinimumWidth(24)
         self.txt_name.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.txt_name.setToolTip(self.track.name)
+        self.txt_name.setToolTip(f"{self.track.name} (Clic droit : Options / Supprimer la piste)")
+        self.txt_name.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.txt_name.customContextMenuRequested.connect(
+            lambda pos: self._show_track_context_menu(self.txt_name.mapToGlobal(pos))
+        )
         self.txt_name.editingFinished.connect(self._on_name_changed)
         row1.addWidget(self.txt_name, stretch=1)
 
@@ -176,10 +278,26 @@ class TrackHeaderWidget(QFrame):
 
         # Bouton Supprimer
         self.btn_delete = QPushButton("✕")
+        self.btn_delete.setObjectName("btn_track_delete")
         self.btn_delete.setFixedSize(18, 18)
         self.btn_delete.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.btn_delete.setStyleSheet("background: transparent; border: none; color: #64748b; font-size: 11px; padding: 0px;")
-        self.btn_delete.setToolTip("Supprimer cette piste")
+        self.btn_delete.setCursor(Qt.PointingHandCursor)
+        self.btn_delete.setStyleSheet("""
+            QPushButton#btn_track_delete {
+                background: transparent;
+                border: none;
+                border-radius: 3px;
+                color: #94a3b8;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton#btn_track_delete:hover {
+                background-color: #ef4444;
+                color: #ffffff;
+            }
+        """)
+        self.btn_delete.setToolTip(f"Supprimer la piste « {self.track.name} »")
         self.btn_delete.clicked.connect(lambda: self.track_deleted.emit(self.track.id))
         row1.addWidget(self.btn_delete)
 
@@ -300,6 +418,8 @@ class TrackHeaderWidget(QFrame):
             """)
             self.btn_edit_plugin.setEnabled(bool(self.track.plugin_path))
             self.btn_edit_plugin.clicked.connect(self._on_open_plugin_editor)
+            self.btn_edit_plugin.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.btn_edit_plugin.customContextMenuRequested.connect(self._show_track_plugins_menu)
             global_plugin_manager.editor_opened.connect(self._on_editor_state_changed)
             global_plugin_manager.editor_closed.connect(self._on_editor_state_changed)
             row3.addWidget(self.btn_edit_plugin)
@@ -310,6 +430,24 @@ class TrackHeaderWidget(QFrame):
 
         main_layout.addLayout(content_layout)
 
+        # Sélectionner automatiquement la piste dès que l'utilisateur clique sur l'un de ses contrôles enfants
+        watched_children = [
+            self.lbl_icon, self.txt_name, self.btn_mute, self.btn_solo, self.btn_rec,
+            self.slider_vol, self.txt_vol, self.slider_pan, self.txt_pan
+        ]
+        if hasattr(self, "combo_plugin"):
+            watched_children.append(self.combo_plugin)
+        if hasattr(self, "btn_edit_plugin"):
+            watched_children.append(self.btn_edit_plugin)
+        for child in watched_children:
+            child.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.MouseButtonPress:
+            if not self.is_selected:
+                self.track_selected.emit(self.track.id)
+        return super().eventFilter(watched, event)
+
     def set_track_height(self, h: int):
         h = max(46, min(320, int(h)))
         self.setFixedHeight(h)
@@ -319,7 +457,40 @@ class TrackHeaderWidget(QFrame):
         if hasattr(self, "row3_widget"):
             self.row3_widget.setVisible(h >= 72)
 
+    def _start_reorder_drag(self, global_y: int):
+        self._reordering_track = True
+        self._reorder_start_global_y = int(global_y)
+        self.track_selected.emit(self.track.id)
+        self.setCursor(Qt.ClosedHandCursor)
+        self.color_bar.setCursor(Qt.ClosedHandCursor)
+        self.grabMouse()
+        self.update_style()
+        self.color_bar.update()
+
+    def _update_reorder_drag(self, global_y: int):
+        if not self._reordering_track:
+            return
+        self.setCursor(Qt.ClosedHandCursor)
+        self.color_bar.setCursor(Qt.ClosedHandCursor)
+        self.track_reorder_dragged.emit(self.track.id, int(global_y))
+
+    def _finish_reorder_drag(self):
+        if not self._reordering_track:
+            return
+        self._reordering_track = False
+        self.releaseMouse()
+        self.unsetCursor()
+        self.color_bar.setCursor(Qt.OpenHandCursor)
+        self.update_style()
+        self.color_bar.update()
+        self.track_reorder_finished.emit(self.track.id)
+
     def mouseMoveEvent(self, event):
+        if self._reordering_track:
+            self._update_reorder_drag(int(event.globalPosition().y()))
+            event.accept()
+            return
+
         if self._resizing_height:
             dy = int(event.globalPosition().y() - self._drag_start_y)
             new_h = max(46, min(320, self._drag_start_h + dy))
@@ -331,22 +502,33 @@ class TrackHeaderWidget(QFrame):
 
         if event.position().y() >= self.height() - self.RESIZE_MARGIN:
             self.setCursor(Qt.SizeVerCursor)
+        elif event.position().x() <= self.color_bar.width() + 2:
+            self.setCursor(Qt.OpenHandCursor)
         else:
             self.unsetCursor()
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and event.position().y() >= self.height() - self.RESIZE_MARGIN:
-            self._resizing_height = True
-            self._drag_start_y = event.globalPosition().y()
-            self._drag_start_h = self.height()
-            self.grabMouse()
-            event.accept()
-            return
+        if event.button() == Qt.LeftButton:
+            if event.position().y() >= self.height() - self.RESIZE_MARGIN:
+                self._resizing_height = True
+                self._drag_start_y = event.globalPosition().y()
+                self._drag_start_h = self.height()
+                self.grabMouse()
+                event.accept()
+                return
+            if event.position().x() <= self.color_bar.width() + 2:
+                self._start_reorder_drag(int(event.globalPosition().y()))
+                event.accept()
+                return
         self.track_selected.emit(self.track.id)
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._reordering_track and event.button() == Qt.LeftButton:
+            self._finish_reorder_drag()
+            event.accept()
+            return
         if self._resizing_height:
             self._resizing_height = False
             self.releaseMouse()
@@ -357,26 +539,145 @@ class TrackHeaderWidget(QFrame):
             return
         super().mouseReleaseEvent(event)
 
+    def contextMenuEvent(self, event):
+        self._show_track_context_menu(event.globalPos())
+        event.accept()
+
+    def _build_track_context_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #181b26;
+                color: #f1f5f9;
+                border: 1px solid #38bdf8;
+                border-radius: 4px;
+                padding: 4px;
+                font-size: 11px;
+            }
+            QMenu::item {
+                padding: 5px 18px 5px 10px;
+                border-radius: 3px;
+            }
+            QMenu::item:selected {
+                background-color: #0284c7;
+                color: #ffffff;
+                font-weight: bold;
+            }
+            QMenu::item:disabled {
+                color: #64748b;
+                font-weight: bold;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #2b3042;
+                margin: 4px 6px;
+            }
+        """)
+
+        # En-tête identifiant clairement la piste ciblée
+        act_header = menu.addAction(f"🎵 Piste : « {self.track.name} »")
+        act_header.setEnabled(False)
+        menu.addSeparator()
+
+        act_rename = menu.addAction(f"✏️ Renommer « {self.track.name} »...")
+        act_rename.triggered.connect(self._focus_rename_track)
+
+        act_color = menu.addAction("🎨 Changer la couleur de la piste...")
+        act_color.triggered.connect(self._pick_track_color)
+
+        act_dup = menu.addAction(f"📑 Dupliquer la piste « {self.track.name} »")
+        act_dup.triggered.connect(lambda: self.track_duplicated.emit(self.track.id))
+
+        menu.addSeparator()
+
+        proj = self.project
+        track_idx = -1
+        num_tracks = 0
+        if proj and hasattr(proj, "tracks"):
+            num_tracks = len(proj.tracks)
+            track_idx = next((i for i, t in enumerate(proj.tracks) if t.id == self.track.id), -1)
+
+        act_up = menu.addAction("⬆️ Monter la piste (Déplacer vers le haut)")
+        act_up.setEnabled(track_idx > 0)
+        act_up.triggered.connect(lambda: self.track_moved.emit(self.track.id, -1))
+
+        act_down = menu.addAction("⬇️ Descendre la piste (Déplacer vers le bas)")
+        act_down.setEnabled(0 <= track_idx < num_tracks - 1)
+        act_down.triggered.connect(lambda: self.track_moved.emit(self.track.id, 1))
+
+        menu.addSeparator()
+
+        act_delete = menu.addAction(f"🗑️ Supprimer la piste « {self.track.name} » (Delete)")
+        act_delete.setObjectName("action_delete_track")
+        act_delete.triggered.connect(lambda: self.track_deleted.emit(self.track.id))
+
+        return menu
+
+    def _show_track_context_menu(self, global_pos):
+        self.track_selected.emit(self.track.id)
+        menu = self._build_track_context_menu()
+        self._last_context_menu = menu
+        menu.exec(global_pos)
+
+    def _focus_rename_track(self):
+        self.txt_name.setFocus()
+        self.txt_name.selectAll()
+
+    def _pick_track_color(self):
+        old_color = self.track.color
+        col = QColorDialog.getColor(QColor(old_color), self, f"Couleur de la piste « {self.track.name} »")
+        if col.isValid():
+            new_hex = col.name()
+            for clip in getattr(self.track, "clips", []):
+                if getattr(clip, "color", None) == old_color:
+                    clip.color = new_hex
+            self.track.color = new_hex
+            self.update_style()
+            self.track_modified.emit()
+            self.track_mixer_changed.emit()
+
     def set_selected(self, selected: bool):
         self.is_selected = selected
         self.update_style()
 
     def update_style(self):
-        border_color = "#38bdf8" if self.is_selected else "#282a36"
-        bg_color = "#20232e" if self.is_selected else "#181920"
+        if self._reordering_track:
+            border_color = "#38bdf8"
+            bg_color = "#283248"
+            top_bottom_border = "1px solid #38bdf8"
+        elif self.is_selected:
+            border_color = "#38bdf8"
+            bg_color = "#22293a"
+            top_bottom_border = "1px solid #2e4768"
+        else:
+            border_color = "#282a36"
+            bg_color = "#181920"
+            top_bottom_border = "1px solid #252834"
+
         self.setStyleSheet(f"""
             QFrame#track_header {{
                 background-color: {bg_color};
-                border-bottom: 1px solid #252834;
+                border-top: {top_bottom_border};
+                border-bottom: {top_bottom_border};
+                border-right: {top_bottom_border};
                 border-left: 2px solid {border_color};
             }}
         """)
-        self.color_bar.setStyleSheet(f"background-color: {self.track.color};")
+        if hasattr(self, "txt_name"):
+            name_col = "#38bdf8" if self.is_selected else "#f1f5f9"
+            self.txt_name.setStyleSheet(
+                f"background: transparent; border: none; font-weight: bold; font-size: 11px; color: {name_col}; padding: 1px 2px;"
+            )
+        if hasattr(self, "color_bar"):
+            self.color_bar.update()
 
     def _on_name_changed(self):
         new_name = self.txt_name.text().strip()
         if new_name:
             self.track.name = new_name
+            self.txt_name.setToolTip(f"{self.track.name} (Clic droit : Options / Supprimer la piste)")
+            if hasattr(self, "btn_delete"):
+                self.btn_delete.setToolTip(f"Supprimer la piste « {self.track.name} »")
             self.track_mixer_changed.emit()
 
     def _on_mute_toggled(self, checked: bool):
@@ -437,6 +738,11 @@ class TrackHeaderWidget(QFrame):
             self.txt_pan.setText(self._format_pan(int(round(self.track.pan * 100))))
         if hasattr(self, "txt_name") and not self.txt_name.hasFocus():
             self.txt_name.setText(self.track.name)
+            self.txt_name.setToolTip(f"{self.track.name} (Clic droit : Options / Supprimer la piste)")
+        if hasattr(self, "btn_delete"):
+            self.btn_delete.setToolTip(f"Supprimer la piste « {self.track.name} »")
+        if hasattr(self, "color_bar"):
+            self.color_bar.update()
         self._populate_plugin_combo()
 
     @staticmethod
@@ -689,3 +995,30 @@ class TrackHeaderWidget(QFrame):
         elif self.track.plugin_path:
             from ui.plugin_dialogs import open_plugin_editor_gui
             open_plugin_editor_gui(self.track.plugin_path, self, f"track:{self.track.id}:instrument:{self.track.plugin_path}")
+
+    def _show_track_plugins_menu(self, pos):
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background-color: #1a1c26; color: #ffffff; border: 1px solid #33384a; }
+            QMenu::item:selected { background-color: #0284c7; }
+        """)
+        plugins = getattr(self.track, "plugins", [])
+        insert_effects = getattr(self.track, "insert_effects", [])
+
+        if not plugins and not insert_effects:
+            return
+
+        from ui.plugin_dialogs import open_native_plugin_editor, open_plugin_editor_gui
+        for p in plugins:
+            p_name = getattr(p, "name", "Plugin")
+            p_icon = getattr(p, "icon", "🎛️")
+            act = menu.addAction(f"{p_icon} Éditer : {p_name}")
+            act.triggered.connect(lambda _, inst=p: open_native_plugin_editor(inst, self))
+
+        for fx_path in insert_effects:
+            fx_name = os.path.splitext(os.path.basename(fx_path))[0]
+            act = menu.addAction(f"🎛️ Éditer VST : {fx_name}")
+            act.triggered.connect(lambda _, p=fx_path: open_plugin_editor_gui(p, self, f"track:{self.track.id}:effect:{p}"))
+
+        menu.exec(self.btn_edit_plugin.mapToGlobal(pos))

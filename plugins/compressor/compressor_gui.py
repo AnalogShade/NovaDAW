@@ -200,6 +200,8 @@ class StudioVUMeters(QFrame):
         # 3. Barre Réduction de Gain (0 à -24 dB) vers le bas
         gr_db = abs(min(0.0, self.comp.current_gain_reduction_db))
         self._gr_peak = max(self._gr_peak * 0.94, gr_db)
+        if gr_db < 0.1 and self._gr_peak < 0.4:
+            self._gr_peak = 0.0
         gr_norm = min(1.0, gr_db / 24.0)
         gr_bar_h = int(meter_h * gr_norm)
 
@@ -592,6 +594,7 @@ class CompressorPluginWidget(QWidget):
 
     def _on_timer_tick(self):
         """Met à jour l'animation fluide temps réel (Courbe, VU-Mètres, GR)"""
+        self.comp.decay_meters()
         gr = self.comp.current_gain_reduction_db
         self.lbl_gr_val.setText(f"GR: {gr:.1f} dB")
         self.meters.update()

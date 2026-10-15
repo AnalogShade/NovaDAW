@@ -68,6 +68,7 @@ class MixerChannelStrip(QFrame):
     """Tranche de console pour une piste individuelle"""
     track_modified = Signal()
     track_selected = Signal(str)
+    track_deleted = Signal(str)
 
     def __init__(self, track: Track, parent=None):
         super().__init__(parent)
@@ -117,6 +118,40 @@ class MixerChannelStrip(QFrame):
     def mousePressEvent(self, event):
         self.track_selected.emit(self.track.id)
         super().mousePressEvent(event)
+
+    def contextMenuEvent(self, event):
+        self.track_selected.emit(self.track.id)
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #181b26;
+                color: #f1f5f9;
+                border: 1px solid #38bdf8;
+                border-radius: 4px;
+                padding: 4px;
+                font-size: 11px;
+            }
+            QMenu::item {
+                padding: 5px 18px 5px 10px;
+                border-radius: 3px;
+            }
+            QMenu::item:selected {
+                background-color: #0284c7;
+                color: #ffffff;
+                font-weight: bold;
+            }
+            QMenu::item:disabled {
+                color: #64748b;
+                font-weight: bold;
+            }
+        """)
+        act_hdr = menu.addAction(f"🎵 Piste : « {self.track.name} »")
+        act_hdr.setEnabled(False)
+        menu.addSeparator()
+        act_del = menu.addAction(f"🗑️ Supprimer la piste « {self.track.name} » (Delete)")
+        act_del.triggered.connect(lambda: self.track_deleted.emit(self.track.id))
+        menu.exec(event.globalPos())
+        event.accept()
 
     def _get_track_icon(self) -> str:
         p_name = (self.track.plugin_name or "").lower()
@@ -316,6 +351,7 @@ class MixerConsoleWidget(QWidget):
     """Console de mixage principale regroupant toutes les tranches et le Master"""
     track_mixer_changed = Signal()
     track_selected = Signal(str)
+    track_deleted = Signal(str)
     master_volume_changed = Signal(float)
     master_fx_requested = Signal()
 
@@ -703,6 +739,7 @@ class MixerConsoleWidget(QWidget):
                 strip = MixerChannelStrip(track, self)
                 strip.track_modified.connect(self._on_strip_track_modified)
                 strip.track_selected.connect(self._on_strip_track_selected)
+                strip.track_deleted.connect(self.track_deleted.emit)
                 if self._selected_track_id:
                     strip.set_selected(track.id == self._selected_track_id)
                 self.strips[track.id] = strip

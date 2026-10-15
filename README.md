@@ -36,7 +36,7 @@ Il intègre une architecture avancée de plugins DSP, un importateur audio unive
 
 ### 3. 🤖 Orchestration Complète par Agent IA (Protocole MCP & Pont TCP IPC)
 NovaDAW transforme la station de travail audio numérique en un environnement collaboratif où l'utilisateur dialogue avec un agent de codage / composition IA :
-- **Serveur Officiel FastMCP** (`core/mcp/server.py`) : 31 outils d'automatisation audio exposés via le protocole standard Model Context Protocol.
+- **Serveur Officiel FastMCP** (`core/mcp/server.py`) : 44 outils d'automatisation audio exposés via le protocole standard Model Context Protocol.
 - **Pont TCP IPC non-bloquant** : L'interface utilisateur graphique PySide6 reste ultra-fluide pendant que l'agent manipule les pistes et les paramètres sonores en arrière-plan.
 - **Outils MCP Intégrés** :
   - **Plugins & Mixage** :
@@ -142,48 +142,71 @@ NovaDAW est déjà configuré comme serveur MCP. Pour l'ajouter manuellement dan
 
 ---
 
+## 📚 Documentation & Spécifications Techniques (`doc/`)
+
+L'architecture complète du logiciel et les contrats d'ingénierie destinés aux développeurs et aux agents IA sont documentés dans [**`AGENT.md`**](AGENT.md) et dans le dossier [**`doc/`**](doc/README.md) :
+- [**Guide Opérationnel des Agents IA (`AGENT.md`)**](AGENT.md)
+- [**Index Complet des Spécifications (`doc/README.md`)**](doc/README.md)
+
+---
+
 ## 🎹 Architecture du Codebase
 
-```
+```text
 music software/
 ├── main.py                         # Point d'entrée de NovaDAW avec ID d'application Windows
-├── README.md                       # Documentation complète
+├── AGENT.md                        # Guide maître d'architecture et de comportement pour Agents IA
+├── GEMINI.md                       # Directives d'autonomie et pilotage MCP NovaDAW
+├── README.md                       # Présentation générale et guide de démarrage
 ├── assets/
 │   ├── nova_icon.ico               # Icône officielle multi-résolution Windows (16 à 256px)
 │   ├── nova_icon.png               # Icône Supernova haute résolution (512x512)
 │   ├── nova_logo_full.png          # Logo complet NovaDAW
-│   └── style.qss                   # Thème sombre professionnel inspiré de Cubase
+│   └── style.qss                   # Thème sombre professionnel inspiré de Cubase Pro
 ├── core/
-│   ├── audio_engine.py             # Moteur audio sounddevice, routage, test tone, latence
-│   ├── audio_importer.py           # Importateur universel (WAV, MP3, FLAC, OGG, AIFF, M4A...)
-│   ├── hardware_manager.py         # Détection GPU, VRAM, pilotes audio hôtes (WASAPI, ASIO...)
-│   ├── project.py                  # Modèle de données (Pistes, Master, Clips, Plugins)
-│   ├── serializer.py               # Persistance de projet au format .ndaw
-│   ├── actions/                    # Handlers d'actions (pistes, transport, plugins, hardware)
+│   ├── action_registry.py          # Registre déclaratif central des actions (@action_registry)
+│   ├── audio_engine.py             # Moteur audio FP32 temps réel, cache ASIO-Guard, enregistrement
+│   ├── audio_importer.py           # Importateur universel (WAV, MP3, FLAC, OGG, AIFF, M4A) & crêtes 1:1
+│   ├── hardware_manager.py         # Auto-config ASIO/WASAPI, latence RTL, panneaux pilotes, GPU
+│   ├── plugin_manager.py           # Scanner VST3/VST2 incrémental, watcher temps réel, instances
+│   ├── preset_manager.py           # Gestionnaire universel de presets & protection Factory Presets
+│   ├── project.py                  # Modèle de données (Project, Track, Master, MidiClip, AudioClip)
+│   ├── recent_projects.py          # Historique MRU des projets récents
+│   ├── serializer.py               # Sérialisation & rétrocompatibilité au format .ndaw (v1.1)
+│   ├── vst_host.py                 # Wrapper d'hébergement sécurisé des plugins VST3 (IsolatedPlugin)
+│   ├── actions/                    # 44 handlers d'actions (transport, midi, project, plugins, synth)
+│   ├── ipc/                        # Serveur et client TCP IPC JSON non-bloquant (port 8765)
 │   └── mcp/
-│       ├── server.py               # Serveur FastMCP (31 outils d'automatisation IA)
-│       └── tcp_ipc.py              # Pont client/serveur TCP IPC temps réel
+│       └── server.py               # Serveur officiel FastMCP (auto-exposition des 44 outils IA)
+├── doc/                            # Spécifications techniques complètes (14 fichiers thématiques)
 ├── plugins/
-│   ├── base.py                     # Classe de base BasePlugin
-│   ├── registry.py                 # Registre dynamique des plugins
-│   ├── equalizer/                  # Égaliseur paramétrique modulaire 3/10/12/24 bandes
-│   ├── compressor/                 # Compresseur dynamique de studio avec VU-mètre GR
-│   └── mixer/                      # Table de mixage console avec VU-mètres crête L/R
-├── scripts/
-│   └── update_desktop_shortcut.py  # Script de mise à jour du raccourci Bureau Windows
-├── tests/
-│   ├── test_plugins.py             # Tests unitaires des plugins DSP
-│   ├── test_project.py             # Tests du modèle de données et sérialisation
-│   ├── test_tcp_ipc.py             # Tests du protocole IPC temps réel
-│   └── test_v1_1_features.py       # Tests de l'importateur, du hardware manager et des actions MCP
+│   ├── base.py                     # Contrat abstrait BasePlugin
+│   ├── registry.py                 # Registre dynamique des plugins internes (PluginRegistry)
+│   ├── synth/                      # NovaSynth : Synthétiseur polyphonique multi-couches & multi-sorties
+│   ├── drum_machine/               # Nova Drums VSTi : Boîte à rythmes 16 pads, synthèse & samples
+│   ├── equalizer/                  # NovaEQ : Égaliseur paramétrique biquad IIR 3/10/12/24 bandes
+│   ├── compressor/                 # NovaCompressor : Compresseur dynamique de studio avec GR meter
+│   └── mixer/                      # NovaMixer : Console de mixage multi-pistes & bus Master
+├── presets/                        # Bibliothèque de presets JSON par type de plugin
+├── tests/                          # Suite complète de tests unitaires et de stress (pytest)
 └── ui/
-    ├── main_window.py              # Fenêtre principale avec logo Supernova et menus
-    ├── device_settings_dialog.py   # Boîte de dialogue Configuration Matériel, Audio & IA
-    ├── transport_bar.py            # Barre de transport (Play, Stop, BPM, Loop)
-    ├── track_header.py             # En-têtes de pistes (Volume, Pan, Mute, Solo, Rec)
-    ├── timeline_view.py            # Grille d'arrangement et clips audio/MIDI
-    ├── piano_roll.py               # Séquenceur de notes avec clavier interactif
-    └── audio_editor.py             # Visualiseur de waveform et import audio
+    ├── main_window.py              # Fenêtre principale Cubase Pro, gestion Dirty State & menus
+    ├── transport_bar.py            # Barre de transport (Play, Stop, Rec, BPM, Loop, Master VU)
+    ├── editing_toolbar.py          # Barre d'outils (Select, Split, Erase, Snap, Grille, Zoom)
+    ├── track_header.py             # En-têtes de pistes (ResetableSlider, CompactNumEdit, Drag & Resize)
+    ├── inspector.py                # Inspecteur latéral de piste et routage multi-sorties
+    ├── timeline_view.py            # Règle temporelle, grille d'arrangement et clips
+    ├── piano_roll.py               # Séquenceur MIDI interactif avec clavier vertical
+    ├── audio_editor.py             # Éditeur de forme d'onde audio et trimming non-destructif
+    ├── vst_rack.py                 # Onglet Rack de plugins du projet
+    ├── floating_plugin_rack.py     # Fenêtre flottante du Rack VST (F11)
+    ├── master_fx_rack.py           # Onglet Master FX avec réorganisation DSP et Bypass Global A/B
+    ├── plugin_dialogs.py           # NativePluginDialog (barre universelle de presets) & gestionnaire VST
+    ├── project_plugin_dialog.py    # Sélecteur de plugins avec diagnostic VST2 Legacy
+    ├── device_settings_dialog.py   # Configuration Audio ASIO/WASAPI, Latence RTL, GPU & MCP
+    ├── glow_effects.py             # Effets de lueur néon 360° (Mute, Solo, Record Arm)
+    ├── dialogs.py                  # Boîtes de dialogue de création de piste
+    └── help_dialog.py              # Guide interactif et aide intégrée
 ```
 
 ---

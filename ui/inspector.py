@@ -17,7 +17,12 @@ from PySide6.QtGui import QColor
 
 from core.project import Track, Project
 from core.plugin_manager import global_plugin_manager
-from ui.plugin_dialogs import analyze_plugin_file, open_plugin_editor_gui, open_native_plugin_editor
+from ui.plugin_dialogs import (
+    analyze_plugin_file,
+    open_plugin_editor_gui,
+    open_native_plugin_editor,
+    is_native_plugin_editor_open,
+)
 from plugins.registry import plugin_registry, ensure_plugins_loaded
 from ui.track_header import ResetableSlider, CompactNumEdit, TrackHeaderWidget
 from ui.glow_effects import set_button_glow
@@ -30,13 +35,14 @@ class TrackInspector(QFrame):
     """
     track_modified = Signal()
     track_mixer_changed = Signal()
+    track_deleted = Signal(str)
 
     def __init__(self, project: Project, parent=None):
         super().__init__(parent)
         self.project = project
         self.current_track: Optional[Track] = None
 
-        self.setMinimumWidth(320)
+        self.setMinimumWidth(340)
         self.setMaximumWidth(600)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.setObjectName("track_inspector")
@@ -158,8 +164,34 @@ class TrackInspector(QFrame):
 
         self.txt_name = QLineEdit("Synth Lead")
         self.txt_name.setStyleSheet("background: transparent; border: none; font-weight: bold; font-size: 12px; color: #ffffff;")
+        self.txt_name.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.txt_name.customContextMenuRequested.connect(self._show_inspector_track_menu)
         self.txt_name.editingFinished.connect(self._on_name_changed)
         row_name.addWidget(self.txt_name, stretch=1)
+
+        self.btn_delete_track = QPushButton("🗑️")
+        self.btn_delete_track.setObjectName("btn_inspector_delete_track")
+        self.btn_delete_track.setFixedSize(24, 22)
+        self.btn_delete_track.setCursor(Qt.PointingHandCursor)
+        self.btn_delete_track.setStyleSheet("""
+            QPushButton#btn_inspector_delete_track {
+                background-color: #261a22;
+                border: 1px solid #4c2334;
+                border-radius: 4px;
+                color: #f87171;
+                font-size: 11px;
+                padding: 0px;
+            }
+            QPushButton#btn_inspector_delete_track:hover {
+                background-color: #ef4444;
+                border-color: #f87171;
+                color: #ffffff;
+            }
+        """)
+        self.btn_delete_track.setToolTip("Supprimer la piste sélectionnée")
+        self.btn_delete_track.clicked.connect(self._on_delete_current_track)
+        row_name.addWidget(self.btn_delete_track)
+
         ci_layout.addLayout(row_name)
 
         self.lbl_type = QLabel("Piste MIDI (Instrument Virtuel)")
@@ -189,9 +221,9 @@ class TrackInspector(QFrame):
         self.combo_instrument.currentIndexChanged.connect(self._on_instrument_changed)
         fm_layout.addWidget(self.combo_instrument)
 
-        self.btn_edit_instrument = QPushButton("🎹 Ouvrir Interface [e]")
+        self.btn_edit_instrument = QPushButton("🎹 Ouvrir l'instrument [e]")
         self.btn_edit_instrument.setObjectName("btn_edit_plugin")
-        self.btn_edit_instrument.setToolTip("Ouvrir l'interface graphique de l'instrument virtuel [e]")
+        self.btn_edit_instrument.setToolTip("Ouvrir l'interface graphique de l'instrument virtuel sélectionné [e]")
         self.btn_edit_instrument.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_edit_instrument.clicked.connect(self._on_open_instrument_editor)
         fm_layout.addWidget(self.btn_edit_instrument)
@@ -326,6 +358,48 @@ class TrackInspector(QFrame):
         self.lbl_no_track.setStyleSheet("color: #64748b; font-style: italic; padding: 20px 10px;")
         self.content_layout.addWidget(self.lbl_no_track)
 
+    def _on_delete_current_track(self):
+        if self.current_track and self.current_track.track_type != "master":
+            self.track_deleted.emit(self.current_track.id)
+
+    def _show_inspector_track_menu(self, pos):
+        if not self.current_track:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #181b26;
+                color: #f1f5f9;
+                border: 1px solid #38bdf8;
+                border-radius: 4px;
+                padding: 4px;
+                font-size: 11px;
+            }
+            QMenu::item {
+                padding: 5px 18px 5px 10px;
+                border-radius: 3px;
+            }
+            QMenu::item:selected {
+                background-color: #0284c7;
+                color: #ffffff;
+                font-weight: bold;
+            }
+            QMenu::item:disabled {
+                color: #64748b;
+                font-weight: bold;
+            }
+        """)
+        act_hdr = menu.addAction(f"🎵 Piste : « {self.current_track.name} »")
+        act_hdr.setEnabled(False)
+        menu.addSeparator()
+        act_ren = menu.addAction(f"✏️ Renommer « {self.current_track.name} »...")
+        act_ren.triggered.connect(lambda: (self.txt_name.setFocus(), self.txt_name.selectAll()))
+        if self.current_track.track_type != "master":
+            menu.addSeparator()
+            act_del = menu.addAction(f"🗑️ Supprimer la piste « {self.current_track.name} » (Delete)")
+            act_del.triggered.connect(self._on_delete_current_track)
+        menu.exec(self.txt_name.mapToGlobal(pos))
+
     def set_track(self, track: Optional[Track]):
         self.current_track = track
 
@@ -361,6 +435,10 @@ class TrackInspector(QFrame):
         self.txt_name.setText(track.name)
         self.lbl_type.setText(type_desc)
         self.lbl_type.setStyleSheet("font-size: 10px; color: " + color_code)
+        if hasattr(self, "btn_delete_track"):
+            is_regular = (track.track_type != "master")
+            self.btn_delete_track.setVisible(is_regular)
+            self.btn_delete_track.setToolTip(f"Supprimer la piste « {track.name} »")
 
         # 2. Affichage conditionnel MIDI vs Plugins
         self.frame_plugins.setVisible(True)
@@ -621,18 +699,16 @@ class TrackInspector(QFrame):
         if self.current_track and self.current_track.track_type == "midi":
             is_open = False
             if self.current_track.plugin_path in ("novadaw.synth", "novadaw.drum_machine"):
-                from ui.plugin_dialogs import _open_native_editors
                 for p in self.current_track.plugins:
                     if getattr(p, "plugin_type_id", None) == self.current_track.plugin_path:
-                        inst_id = getattr(p, "instance_id", None)
-                        if inst_id and inst_id in _open_native_editors:
-                            is_open = _open_native_editors[inst_id].isVisible()
+                        is_open = is_native_plugin_editor_open(p)
                         break
             elif self.current_track.plugin_path:
                 is_open = global_plugin_manager.is_editor_open(f"track:{self.current_track.id}:instrument:{self.current_track.plugin_path}")
             
+            inst_name = self.current_track.plugin_name or "Instrument"
             if is_open:
-                self.btn_edit_instrument.setText("🎹 Fermer Interface Plugin [e]")
+                self.btn_edit_instrument.setText(f"🎹 Fermer {inst_name} [e]")
                 self.btn_edit_instrument.setStyleSheet("""
                     QPushButton {
                         background-color: #0284c7;
@@ -646,11 +722,19 @@ class TrackInspector(QFrame):
                 """)
                 self.btn_edit_instrument.setToolTip("L'interface du plugin est ouverte (Cliquer pour fermer)")
             else:
-                self.btn_edit_instrument.setText("🎹 Ouvrir Interface Plugin [e]")
+                self.btn_edit_instrument.setText(f"🎹 Ouvrir {inst_name} [e]")
                 self.btn_edit_instrument.setStyleSheet("")
                 self.btn_edit_instrument.setToolTip("Éditer l'instrument (Ouvrir l'interface)")
-        else:
-            self._rebuild_plugin_stack()
+
+        # Toujours actualiser les boutons de chaque plugin dans la pile
+        self._rebuild_plugin_stack()
+
+    def _on_open_specific_plugin(self, plugin: Any):
+        """Ouvre ou bascule l'interface d'un plugin spécifique de la pile"""
+        if not plugin:
+            return
+        open_native_plugin_editor(plugin, self)
+        self._rebuild_plugin_stack()
 
     def _on_open_instrument_editor(self):
         if not self.current_track:
@@ -738,6 +822,7 @@ class TrackInspector(QFrame):
         synth = plugin_registry.create_plugin("novadaw.synth")
         if synth:
             self.current_track.add_plugin(synth)
+            self.project.add_rack_plugin("novadaw.synth", "NovaSynth", "instrument")
             if self.current_track.track_type == "midi":
                 self.current_track.plugin_path = "novadaw.synth"
                 self.current_track.plugin_name = "NovaSynth"
@@ -753,6 +838,7 @@ class TrackInspector(QFrame):
         drums = plugin_registry.create_plugin("novadaw.drum_machine")
         if drums:
             self.current_track.add_plugin(drums)
+            self.project.add_rack_plugin("novadaw.drum_machine", "Nova Drums VSTi", "instrument")
             if self.current_track.track_type == "midi":
                 self.current_track.plugin_path = "novadaw.drum_machine"
                 self.current_track.plugin_name = "Nova Drums VSTi"
@@ -768,6 +854,7 @@ class TrackInspector(QFrame):
         eq = plugin_registry.create_plugin("novadaw.equalizer")
         if eq:
             self.current_track.add_plugin(eq)
+            self.project.add_rack_plugin("novadaw.equalizer", "Égaliseur Paramétrique", "effect")
             self._rebuild_plugin_stack()
             self.track_modified.emit()
             open_native_plugin_editor(eq, self)
@@ -779,6 +866,7 @@ class TrackInspector(QFrame):
         comp = plugin_registry.create_plugin("novadaw.compressor")
         if comp:
             self.current_track.add_plugin(comp)
+            self.project.add_rack_plugin("novadaw.compressor", "Compresseur Dynamique", "effect")
             self._rebuild_plugin_stack()
             self.track_modified.emit()
             open_native_plugin_editor(comp, self)
@@ -792,6 +880,7 @@ class TrackInspector(QFrame):
             if hasattr(mixer, "set_project"):
                 mixer.set_project(self.project)
             self.current_track.add_plugin(mixer)
+            self.project.add_rack_plugin("novadaw.mixer", "Mixeur de Pistes", "effect")
             self._rebuild_plugin_stack()
             self.track_modified.emit()
             open_native_plugin_editor(mixer, self)
@@ -851,24 +940,25 @@ class TrackInspector(QFrame):
         # 1. Rendu des plugins natifs empilés
         for p_idx, plugin in enumerate(displayable_plugins):
             card = QFrame()
+            card.setObjectName("plugin_stack_card")
             card.setStyleSheet("""
-                QFrame {
+                QFrame#plugin_stack_card {
                     background-color: #1a1d29;
                     border: 1px solid #2b3044;
                     border-radius: 4px;
                 }
-                QFrame:hover {
+                QFrame#plugin_stack_card:hover {
                     border-color: #38bdf8;
                 }
             """)
             card_layout = QHBoxLayout(card)
-            card_layout.setContentsMargins(5, 3, 5, 3)
-            card_layout.setSpacing(3)
+            card_layout.setContentsMargins(6, 4, 6, 4)
+            card_layout.setSpacing(4)
 
             # Numéro et Nom du plugin
             lbl_title = QLabel(f"{p_idx + 1}. {plugin.icon} {plugin.name}")
-            lbl_title.setStyleSheet("font-size: 10px; font-weight: bold; color: #f1f5f9;")
-            lbl_title.setToolTip(getattr(plugin, "description", plugin.name))
+            lbl_title.setStyleSheet("font-size: 11px; font-weight: bold; color: #f1f5f9;")
+            lbl_title.setToolTip(f"{plugin.name}\nDouble-cliquer pour ouvrir l'interface")
             lbl_title.setMinimumWidth(50)
             card_layout.addWidget(lbl_title, stretch=1)
 
@@ -876,7 +966,7 @@ class TrackInspector(QFrame):
             btn_bypass = QPushButton("On" if plugin.enabled else "Bypass")
             btn_bypass.setCheckable(True)
             btn_bypass.setChecked(plugin.enabled)
-            btn_bypass.setFixedSize(36, 18)
+            btn_bypass.setFixedSize(38, 20)
             btn_bypass.setStyleSheet("""
                 QPushButton {
                     background-color: #064e3b;
@@ -895,30 +985,52 @@ class TrackInspector(QFrame):
             btn_bypass.toggled.connect(lambda chk, p=plugin, b=btn_bypass: self._on_plugin_bypass_toggled(chk, p, b))
             card_layout.addWidget(btn_bypass)
 
-            # Bouton [e] d'ouverture d'interface graphique
-            btn_e = QPushButton("e")
-            btn_e.setFixedSize(18, 18)
-            btn_e.setToolTip("Ouvrir l'interface graphique [e]")
-            btn_e.setStyleSheet("""
-                QPushButton {
-                    background-color: #1e293b;
-                    color: #38bdf8;
-                    font-weight: bold;
-                    font-size: 11px;
-                    border: 1px solid #0284c7;
-                    border-radius: 3px;
-                }
-                QPushButton:hover {
-                    background-color: #0284c7;
-                    color: #ffffff;
-                }
-            """)
-            btn_e.clicked.connect(lambda _, p=plugin: open_native_plugin_editor(p, self))
-            card_layout.addWidget(btn_e)
+            # Bouton Ouvrir l'interface sur la même ligne que le plugin
+            is_open = is_native_plugin_editor_open(plugin)
+            btn_open = QPushButton("Fermer l'interface" if is_open else "Ouvrir l'interface")
+            btn_open.setFixedHeight(20)
+            if is_open:
+                btn_open.setStyleSheet("""
+                    QPushButton {
+                        background-color: #0284c7;
+                        color: #ffffff;
+                        font-weight: bold;
+                        font-size: 10px;
+                        border: 1px solid #38bdf8;
+                        border-radius: 3px;
+                        padding: 1px 6px;
+                    }
+                    QPushButton:hover { background-color: #0369a1; }
+                """)
+                btn_open.setToolTip(f"L'interface de '{plugin.name}' est ouverte. Cliquer pour fermer [e]")
+            else:
+                btn_open.setStyleSheet("""
+                    QPushButton {
+                        background-color: #1e293b;
+                        color: #38bdf8;
+                        font-weight: bold;
+                        font-size: 10px;
+                        border: 1px solid #0284c7;
+                        border-radius: 3px;
+                        padding: 1px 6px;
+                    }
+                    QPushButton:hover {
+                        background-color: #0284c7;
+                        color: #ffffff;
+                    }
+                """)
+                btn_open.setToolTip(f"Ouvrir l'interface graphique de '{plugin.name}' [e]")
+            btn_open.clicked.connect(lambda _, p=plugin: self._on_open_specific_plugin(p))
+            card.btn_e = btn_open
+            card.btn_open = btn_open
+            card_layout.addWidget(btn_open)
+
+            # Double-clic sur la carte pour ouvrir/fermer l'éditeur
+            card.mouseDoubleClickEvent = lambda _, p=plugin: self._on_open_specific_plugin(p)
 
             # Bouton Monter [▲]
             btn_up = QPushButton("▲")
-            btn_up.setFixedSize(18, 18)
+            btn_up.setFixedSize(16, 20)
             btn_up.setEnabled(p_idx > 0)
             btn_up.setStyleSheet("background: transparent; border: none; color: #94a3b8; font-size: 9px; padding: 0px;")
             btn_up.clicked.connect(lambda _, p=plugin: self._move_plugin_up(p))
@@ -926,7 +1038,7 @@ class TrackInspector(QFrame):
 
             # Bouton Descendre [▼]
             btn_down = QPushButton("▼")
-            btn_down.setFixedSize(18, 18)
+            btn_down.setFixedSize(16, 20)
             btn_down.setEnabled(p_idx < total_plugins - 1)
             btn_down.setStyleSheet("background: transparent; border: none; color: #94a3b8; font-size: 9px; padding: 0px;")
             btn_down.clicked.connect(lambda _, p=plugin: self._move_plugin_down(p))
@@ -934,7 +1046,7 @@ class TrackInspector(QFrame):
 
             # Bouton Supprimer [✕]
             btn_del = QPushButton("✕")
-            btn_del.setFixedSize(18, 18)
+            btn_del.setFixedSize(16, 20)
             btn_del.setStyleSheet("background: transparent; border: none; color: #f87171; font-size: 11px; padding: 0px;")
             btn_del.setToolTip("Supprimer ce plugin de la pile")
             btn_del.clicked.connect(lambda _, p=plugin: self._remove_plugin(p))
@@ -947,25 +1059,63 @@ class TrackInspector(QFrame):
             for s_idx, fx_path in enumerate(self.current_track.insert_effects):
                 fx_name = os.path.splitext(os.path.basename(fx_path))[0]
                 card = QFrame()
+                card.setObjectName("vst_stack_card")
                 card.setStyleSheet("background-color: #161822; border: 1px solid #3b3054; border-radius: 4px;")
                 row = QHBoxLayout(card)
-                row.setContentsMargins(5, 3, 5, 3)
-                row.setSpacing(3)
+                row.setContentsMargins(6, 4, 6, 4)
+                row.setSpacing(4)
 
                 lbl = QLabel(f"VST: 🎛️ {fx_name}")
-                lbl.setStyleSheet("font-size: 10px; color: #c084fc; font-weight: bold;")
+                lbl.setStyleSheet("font-size: 11px; color: #c084fc; font-weight: bold;")
+                lbl.setToolTip(f"Effet VST : {fx_name}\nDouble-cliquer pour ouvrir l'interface")
                 lbl.setMinimumWidth(50)
                 row.addWidget(lbl, stretch=1)
 
-                btn_e = QPushButton("e")
-                btn_e.setFixedSize(18, 18)
-                btn_e.setStyleSheet("background-color: #2e1065; color: #c084fc; font-weight: bold; border: 1px solid #7e22ce; border-radius: 3px;")
-                btn_e.clicked.connect(lambda _, p=fx_path, key=f"track:{self.current_track.id}:effect:{fx_path}": open_plugin_editor_gui(p, self, key))
-                row.addWidget(btn_e)
+                is_vst_open = global_plugin_manager.is_editor_open(f"track:{self.current_track.id}:effect:{fx_path}") or global_plugin_manager.is_editor_open(fx_path)
+                btn_open = QPushButton("Fermer l'interface" if is_vst_open else "Ouvrir l'interface")
+                btn_open.setFixedHeight(20)
+                if is_vst_open:
+                    btn_open.setStyleSheet("""
+                        QPushButton {
+                            background-color: #7e22ce;
+                            color: #ffffff;
+                            font-weight: bold;
+                            font-size: 10px;
+                            border: 1px solid #a855f7;
+                            border-radius: 3px;
+                            padding: 1px 6px;
+                        }
+                        QPushButton:hover { background-color: #6b21a8; }
+                    """)
+                    btn_open.setToolTip(f"L'interface de '{fx_name}' est ouverte. Cliquer pour fermer [e]")
+                else:
+                    btn_open.setStyleSheet("""
+                        QPushButton {
+                            background-color: #2e1065;
+                            color: #c084fc;
+                            font-weight: bold;
+                            font-size: 10px;
+                            border: 1px solid #7e22ce;
+                            border-radius: 3px;
+                            padding: 1px 6px;
+                        }
+                        QPushButton:hover {
+                            background-color: #7e22ce;
+                            color: #ffffff;
+                        }
+                    """)
+                    btn_open.setToolTip(f"Ouvrir l'interface graphique VST de '{fx_name}' [e]")
+                btn_open.clicked.connect(lambda _, p=fx_path, key=f"track:{self.current_track.id}:effect:{fx_path}": open_plugin_editor_gui(p, self, key))
+                card.btn_e = btn_open
+                card.btn_open = btn_open
+                row.addWidget(btn_open)
+
+                card.mouseDoubleClickEvent = lambda _, p=fx_path, key=f"track:{self.current_track.id}:effect:{fx_path}": open_plugin_editor_gui(p, self, key)
 
                 btn_del = QPushButton("✕")
-                btn_del.setFixedSize(16, 18)
-                btn_del.setStyleSheet("background: transparent; border: none; color: #64748b; font-size: 10px;")
+                btn_del.setFixedSize(16, 20)
+                btn_del.setStyleSheet("background: transparent; border: none; color: #64748b; font-size: 11px;")
+                btn_del.setToolTip("Retirer cet effet VST")
                 btn_del.clicked.connect(lambda _, idx=s_idx: self._remove_vst_slot(idx))
                 row.addWidget(btn_del)
 

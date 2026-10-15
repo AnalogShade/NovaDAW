@@ -225,3 +225,98 @@ def test_compressor_gui_and_presets_sync(qapp):
     assert widget.btn_hpf.isChecked()
 
     widget.close()
+
+
+def test_compressor_meter_decay_and_no_freeze(qapp):
+    """
+    Vérifie que les vu-mètres du compresseur redescendent naturellement et ne restent
+    pas figés après qu'une note a été jouée ou lorsque le son s'arrête.
+    """
+    comp = CompressorPlugin(threshold_db=-24.0, ratio=4.0)
+    widget = comp.create_editor()
+
+    # Simuler le traitement d'une note puissante
+    sr = 44100
+    t = np.linspace(0, 0.35, int(sr * 0.35), endpoint=False)
+    loud_sig = (0.8 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+    loud_audio = np.column_stack((loud_sig, loud_sig))
+
+    comp.process(loud_audio, sr)
+
+    # Vérifier que les crêtes et le GR ont été capturés
+    assert comp.current_input_peak_db > -10.0
+    assert comp.current_gain_reduction_db < -2.0
+    assert comp.current_output_peak_db > -20.0
+
+    # Simuler plusieurs ticks d'animation GUI en silence (30 FPS)
+    for _ in range(60):
+        widget._on_timer_tick()
+
+    # Les vu-mètres doivent être redescendus et non pas figés
+    assert comp.current_input_peak_db < -50.0
+    assert comp.current_output_peak_db < -50.0
+    assert abs(comp.current_gain_reduction_db) < 0.1
+    assert abs(widget.meters._gr_peak) < 0.1
+
+    widget.close()
+
+
+def test_compressor_on_midi_track_with_default_synth():
+    """
+    Vérifie qu'un compresseur (plugin audio) placé sur une piste MIDI sans synthétiseur explicite :
+    1. Reçoit le signal généré par le synthétiseur par défaut (SynthVoice).
+    2. Compresse efficacement le signal audio en temps réel pendant la lecture.
+    3. Fonctionne parfaitement avec le cache ASIO-Guard.
+    """
+    from core.project import MidiClip, MidiNote
+
+    project = Project(name="MidiCompressorTest", bpm=120.0)
+    midi_track = Track(name="Synth Default MIDI", track_type="midi")
+    project.add_track(midi_track)
+
+    # Créer un clip MIDI avec plusieurs notes fortes
+    clip = MidiClip(name="Chords", start_beat=0.0, length_beats=4.0)
+    clip.notes.append(MidiNote(pitch=60, start_beat=0.0, duration=2.0, velocity=110))
+    clip.notes.append(MidiNote(pitch=64, start_beat=0.0, duration=2.0, velocity=110))
+    clip.notes.append(MidiNote(pitch=67, start_beat=0.0, duration=2.0, velocity=110))
+    midi_track.clips.append(clip)
+
+    # Ajouter le compresseur sur la piste MIDI
+    comp = CompressorPlugin(threshold_db=-20.0, ratio=4.0, attack_ms=5.0, release_ms=50.0)
+    midi_track.add_plugin(comp)
+
+    sr = 44100
+    engine = AudioEngine(sample_rate=sr, block_size=512)
+    engine.set_project(project)
+
+    # 1. Vérifier le rendu offline ASIO-Guard
+    engine._ensure_tracks_cached(force=True)
+    cache = engine._track_audio_caches.get(midi_track.id)
+    assert cache is not None
+    assert cache["is_valid"] is True
+    assert cache["audio"] is not None
+    # Le cache générateur doit contenir le signal rendu par SynthVoice (non silencieux)
+    max_cached = float(np.max(np.abs(cache["audio"])))
+    assert max_cached > 0.1, f"Le cache de la piste MIDI doit contenir de l'audio (trouvé: {max_cached})"
+
+    # 2. Vérifier la lecture temps réel
+    engine.is_playing = True
+    frames = 512
+    out_buf = np.zeros((frames, 2), dtype=np.float32)
+
+    for _ in range(10):
+        engine._audio_callback(out_buf, frames, None, None)
+
+    # Le compresseur doit avoir réagi sur le signal MIDI rendu
+    assert comp.current_gain_reduction_db < -1.0, f"Le compresseur doit compresser les notes MIDI (GR: {comp.current_gain_reduction_db})"
+    assert comp.current_input_peak_db > -15.0
+    assert float(np.max(np.abs(out_buf))) > 0.05
+
+    # 3. Vérifier le preview note immédiat
+    comp.reset()
+    engine.preview_note(60, duration_sec=0.3, velocity=120, track=midi_track)
+    # preview_note a traité l'effet de la piste
+    assert comp.current_input_peak_db > -20.0
+
+    engine.close()
+

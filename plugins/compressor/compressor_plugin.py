@@ -138,6 +138,19 @@ class CompressorPlugin(BasePlugin):
         self.current_input_peak_db = -60.0
         self.current_output_peak_db = -60.0
 
+    def decay_meters(self, rate_db: float = 1.8, gr_rate_db: float = 1.2) -> None:
+        """
+        Décroissance balistique douce des indicateurs de crête et de réduction de gain.
+        Appelée à chaque rafraîchissement d'interface graphique (30 FPS) pour éviter que les
+        vu-mètres ne restent figés après une note ou en l'absence de signal continu.
+        """
+        if self.current_input_peak_db > -60.0:
+            self.current_input_peak_db = max(-60.0, self.current_input_peak_db - rate_db)
+        if self.current_output_peak_db > -60.0:
+            self.current_output_peak_db = max(-60.0, self.current_output_peak_db - rate_db)
+        if self.current_gain_reduction_db < 0.0:
+            self.current_gain_reduction_db = min(0.0, self.current_gain_reduction_db + gr_rate_db)
+
     def _get_hpf_coeffs(self, freq: float, sr: int):
         """Coefficients biquad Butterworth High-Pass de 2e ordre pour le sidechain."""
         if self._cached_hpf_freq == freq and self._cached_hpf_sr == sr and self._cached_hpf_b is not None:

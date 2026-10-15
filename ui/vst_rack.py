@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QFrame, QScrollArea, QMenu, QFileDialog, QMessageBox, QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QCursor
 
 from core.project import Project
 from core.plugin_manager import global_plugin_manager
@@ -131,6 +131,10 @@ class VstRackWidget(QWidget):
         self.refresh_rack()
 
     def refresh_rack(self):
+        # Synchroniser le rack avec les instruments et effets des pistes du projet
+        if hasattr(self.project, "sync_rack_plugins"):
+            self.project.sync_rack_plugins()
+
         # Nettoyer les slots existants
         while self.stack_layout.count() > 1:
             item = self.stack_layout.takeAt(0)
@@ -242,7 +246,20 @@ class VstRackWidget(QWidget):
 
         # Icône et Type
         is_inst = rack_item.get("plugin_type") == "instrument"
-        lbl_icon = QLabel("🎹" if is_inst else "🎛️")
+        path = rack_item.get("file_path", "")
+        icon_char = "🎹" if is_inst else "🎛️"
+        if path == "novadaw.synth":
+            icon_char = "⚡"
+        elif path == "novadaw.drum_machine":
+            icon_char = "🥁"
+        elif path == "novadaw.equalizer":
+            icon_char = "📊"
+        elif path == "novadaw.compressor":
+            icon_char = "🗜️"
+        elif path == "novadaw.mixer":
+            icon_char = "🎚️"
+
+        lbl_icon = QLabel(icon_char)
         lbl_icon.setStyleSheet("font-size: 16px;")
         c_layout.addWidget(lbl_icon)
 
@@ -250,26 +267,35 @@ class VstRackWidget(QWidget):
         info_layout = QVBoxLayout()
         info_layout.setSpacing(1)
 
-        path = rack_item.get("file_path", "")
         fmt = "Natif" if path.startswith("novadaw.") else ("VST2" if path.lower().endswith(".dll") else "VST3")
         lbl_name = QLabel(f"{rack_item.get('name', 'Plugin')} <span style='font-size: 10px; color: #64748b;'>[{fmt}]</span>")
         lbl_name.setTextFormat(Qt.RichText)
         lbl_name.setStyleSheet("font-weight: bold; font-size: 13px; color: #ffffff;")
         info_layout.addWidget(lbl_name)
 
-        # Compter les pistes utilisant ce plugin
+        # Compter les pistes utilisant ce plugin (y compris master track et plugins empilés)
         used_by = []
-        for t in self.project.tracks:
-            if t.plugin_path == path:
-                used_by.append(t.name)
-            if hasattr(t, "insert_effects") and path in t.insert_effects:
-                used_by.append(t.name)
+        all_tracks = list(self.project.tracks)
+        if self.project.master_track:
+            all_tracks.append(self.project.master_track)
+
+        for t in all_tracks:
+            t_name = t.name or "Piste"
+            if t.plugin_path == path and t_name not in used_by:
+                used_by.append(t_name)
+            if hasattr(t, "insert_effects") and path in t.insert_effects and t_name not in used_by:
+                used_by.append(t_name)
+            if hasattr(t, "plugins"):
+                for p in t.plugins:
+                    p_type = getattr(p, "plugin_type_id", None) or getattr(p, "id", None)
+                    if p_type == path and t_name not in used_by:
+                        used_by.append(t_name)
 
         if used_by:
-            usage_str = f"Sortie pour : {', '.join(used_by)}"
+            usage_str = f"Utilisé sur : {', '.join(used_by)}"
             usage_color = "#10b981"
         else:
-            usage_str = "Prêt dans le projet (sélectionnable comme sortie)"
+            usage_str = "Prêt dans le projet (sélectionnable sur une piste)"
             usage_color = "#64748b"
 
         lbl_used = QLabel(usage_str)
@@ -279,8 +305,34 @@ class VstRackWidget(QWidget):
         c_layout.addLayout(info_layout, stretch=1)
 
         # Bouton [e] Interface
-        is_open = global_plugin_manager.is_editor_open(path)
-        btn_text = "🎹 Fermer Interface [e]" if is_open else "🎹 Ouvrir Interface [e]"
+        is_open = False
+        if path.startswith("novadaw."):
+            from ui.plugin_dialogs import _open_native_editors
+            # Vérifier si l'éditeur du rack est ouvert
+            rack_p = getattr(self.project, "_rack_native_plugins", {}).get(path)
+            if rack_p and getattr(rack_p, "instance_id", None) in _open_native_editors:
+                is_open = _open_native_editors[rack_p.instance_id].isVisible()
+            # Ou si une instance de piste est ouverte
+            if not is_open:
+                for t in all_tracks:
+                    for p in getattr(t, "plugins", []):
+                        if getattr(p, "plugin_type_id", None) == path:
+                            p_id = getattr(p, "instance_id", None)
+                            if p_id and p_id in _open_native_editors and _open_native_editors[p_id].isVisible():
+                                is_open = True
+                                break
+                    if is_open:
+                        break
+        else:
+            is_open = global_plugin_manager.is_editor_open(path)
+            if not is_open:
+                for t in all_tracks:
+                    if global_plugin_manager.is_editor_open(f"track:{t.id}:instrument:{path}") or \
+                       global_plugin_manager.is_editor_open(f"track:{t.id}:effect:{path}"):
+                        is_open = True
+                        break
+
+        btn_text = f"{icon_char} Fermer Interface [e]" if is_open else f"{icon_char} Ouvrir Interface [e]"
         btn_e = QPushButton(btn_text)
         btn_e.setMinimumWidth(150)
         if is_open:
@@ -331,8 +383,37 @@ class VstRackWidget(QWidget):
 
     def open_editor(self, path):
         if path.startswith("novadaw."):
-            plugin = self.project.get_rack_native_plugin(path)
-            open_native_plugin_editor(plugin, self)
+            # Chercher les instances de ce plugin sur les pistes du projet
+            track_instances = []
+            all_tracks = list(self.project.tracks)
+            if self.project.master_track:
+                all_tracks.append(self.project.master_track)
+
+            for t in all_tracks:
+                for p in getattr(t, "plugins", []):
+                    if getattr(p, "plugin_type_id", None) == path:
+                        track_instances.append((t, p))
+
+            if len(track_instances) == 1:
+                # Une seule piste utilise ce plugin : ouvrir directement son instance !
+                open_native_plugin_editor(track_instances[0][1], self)
+            elif len(track_instances) > 1:
+                # Plusieurs pistes utilisent ce plugin : afficher un menu pour choisir
+                menu = QMenu(self)
+                menu.setStyleSheet("""
+                    QMenu { background-color: #1a1c26; color: #ffffff; border: 1px solid #33384a; }
+                    QMenu::item:selected { background-color: #0284c7; }
+                """)
+                for t, p in track_instances:
+                    act = menu.addAction(f"🎛️ Éditer sur : {t.name}")
+                    act.triggered.connect(lambda _, inst=p: open_native_plugin_editor(inst, self))
+                menu.addSeparator()
+                act_tmpl = menu.addAction("⚙️ Éditer les réglages par défaut du Rack")
+                act_tmpl.triggered.connect(lambda: open_native_plugin_editor(self.project.get_rack_native_plugin(path), self))
+                menu.exec(QCursor.pos())
+            else:
+                plugin = self.project.get_rack_native_plugin(path)
+                open_native_plugin_editor(plugin, self)
         else:
             open_plugin_editor_gui(path, self)
 
@@ -408,10 +489,16 @@ class VstRackWidget(QWidget):
 
     def _remove_plugin(self, rack_id: str):
         item = next((p for p in self.project.plugin_rack if p["id"] == rack_id), None)
-        if item and any(t.plugin_path == item["file_path"] or item["file_path"] in t.insert_effects
-                        for t in self.project.tracks):
-            QMessageBox.information(self, "Plugin utilisé", "Changez la sortie MIDI ou retirez les inserts des pistes avant de retirer ce plugin du projet.")
-            return
+        if item:
+            path = item["file_path"]
+            all_tracks = list(self.project.tracks)
+            if self.project.master_track:
+                all_tracks.append(self.project.master_track)
+            used = any(t.plugin_path == path or path in getattr(t, "insert_effects", []) or any(getattr(p, "plugin_type_id", None) == path for p in getattr(t, "plugins", []))
+                       for t in all_tracks)
+            if used:
+                QMessageBox.information(self, "Plugin utilisé", "Changez la sortie MIDI ou retirez ce plugin des pistes avant de le retirer du projet.")
+                return
         self.project.remove_rack_plugin(rack_id)
         self.refresh_rack()
         self.rack_changed.emit()

@@ -495,6 +495,38 @@ class Project:
         self.plugin_rack.append(item)
         return item
 
+    def sync_rack_plugins(self):
+        """Synchronise le rack global du projet avec tous les instruments et effets présents sur les pistes."""
+        all_tracks = list(self.tracks)
+        if self.master_track:
+            all_tracks.append(self.master_track)
+
+        for track in all_tracks:
+            # 1. Instrument de sortie MIDI
+            if getattr(track, "plugin_path", None):
+                p_path = track.plugin_path
+                p_name = getattr(track, "plugin_name", None) or (
+                    "NovaSynth" if p_path == "novadaw.synth"
+                    else "Nova Drums VSTi" if p_path == "novadaw.drum_machine"
+                    else os.path.splitext(os.path.basename(p_path))[0]
+                )
+                self.add_rack_plugin(p_path, p_name, "instrument")
+
+            # 2. Plugins natifs dans la pile de la piste (ignorer le mixeur interne automatique du master)
+            for p in getattr(track, "plugins", []):
+                p_type = getattr(p, "plugin_type_id", None)
+                if p_type:
+                    if p_type == "novadaw.mixer" and getattr(track, "track_type", "") == "master":
+                        continue
+                    p_name = getattr(p, "name", p_type)
+                    is_inst = getattr(p, "is_instrument", False) or getattr(p, "category", "") == "instrument"
+                    self.add_rack_plugin(p_type, p_name, "instrument" if is_inst else "effect")
+
+            # 3. Effets VST3 externes insérés
+            for fx_path in getattr(track, "insert_effects", []):
+                fx_name = os.path.splitext(os.path.basename(fx_path))[0]
+                self.add_rack_plugin(fx_path, fx_name, "effect")
+
     def get_rack_native_plugin(self, path):
         from plugins.registry import plugin_registry, ensure_plugins_loaded
         ensure_plugins_loaded()
@@ -515,8 +547,57 @@ class Project:
     def add_track(self, track: Track) -> None:
         self.tracks.append(track)
 
-    def remove_track(self, track_id: str) -> None:
+    def remove_track(self, track_id: str) -> Optional[Track]:
+        removed = next((t for t in self.tracks if t.id == track_id), None)
         self.tracks = [t for t in self.tracks if t.id != track_id]
+        for t in self.tracks:
+            if getattr(t, "synth_route_track_id", None) == track_id:
+                t.synth_route_track_id = None
+                t.synth_output_bus = None
+        return removed
+
+    def move_track(self, from_index: int, to_index: int) -> bool:
+        """Déplace une piste de from_index vers to_index en conservant toutes ses données."""
+        n = len(self.tracks)
+        if not (0 <= from_index < n and 0 <= to_index < n):
+            return False
+        if from_index == to_index:
+            return False
+        track = self.tracks.pop(from_index)
+        self.tracks.insert(to_index, track)
+        return True
+
+    def move_track_by_id(self, track_id: str, to_index: int) -> bool:
+        """Déplace une piste identifiée par son ID vers la position to_index."""
+        if not self.tracks:
+            return False
+        from_index = next((i for i, t in enumerate(self.tracks) if t.id == track_id), -1)
+        if from_index < 0:
+            return False
+        clamped_to = max(0, min(len(self.tracks) - 1, int(to_index)))
+        return self.move_track(from_index, clamped_to)
+
+    def duplicate_track(self, track_id: str) -> Optional[Track]:
+        """Duplique intégralement une piste (clips, notes, audio, effets, réglages) juste en dessous."""
+        idx = next((i for i, t in enumerate(self.tracks) if t.id == track_id), -1)
+        if idx < 0:
+            return None
+        orig = self.tracks[idx]
+        dup = Track.from_dict(orig.to_dict())
+        dup.id = str(uuid.uuid4())[:8]
+        dup.name = f"{orig.name} (Copie)"
+        dup.armed = False
+        for orig_clip, dup_clip in zip(orig.clips, dup.clips):
+            dup_clip.id = str(uuid.uuid4())[:8]
+            if isinstance(orig_clip, AudioClip) and isinstance(dup_clip, AudioClip):
+                if orig_clip.audio_data is not None:
+                    dup_clip.audio_data = orig_clip.audio_data.copy()
+                dup_clip.sample_rate = orig_clip.sample_rate
+        for p in getattr(dup, "plugins", []):
+            if hasattr(p, "instance_id"):
+                p.instance_id = str(uuid.uuid4())[:8]
+        self.tracks.insert(idx + 1, dup)
+        return dup
 
     def get_track(self, track_id: str) -> Optional[Track]:
         if not track_id:

@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QTabWidget, QFileDialog, QMessageBox, QStatusBar,
     QFrame, QLabel, QPushButton, QSizePolicy, QProgressBar
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QEvent
+from PySide6.QtCore import Qt, QTimer, Signal, QEvent, QPoint
 from PySide6.QtGui import QAction, QKeySequence, QIcon, QPixmap, QShortcut
 
 from core.project import Project, Track, MidiClip, AudioClip
@@ -228,6 +228,30 @@ class MainWindow(QMainWindow):
         act_add_track.setShortcut("Ctrl+T")
         act_add_track.triggered.connect(self.show_add_track_dialog)
         menu_track.addAction(act_add_track)
+
+        act_dup_track = QAction("📑 &Dupliquer la piste sélectionnée", self)
+        act_dup_track.setShortcut("Ctrl+Shift+D")
+        act_dup_track.triggered.connect(self.duplicate_selected_track)
+        menu_track.addAction(act_dup_track)
+
+        act_del_track = QAction("🗑️ &Supprimer la piste sélectionnée", self)
+        act_del_track.setShortcut("Ctrl+Shift+Delete")
+        act_del_track.triggered.connect(self.delete_selected_track)
+        menu_track.addAction(act_del_track)
+
+        menu_track.addSeparator()
+
+        act_move_track_up = QAction("⬆️ &Monter la piste (Déplacer vers le haut)", self)
+        act_move_track_up.setShortcut("Alt+Up")
+        act_move_track_up.triggered.connect(self.move_selected_track_up)
+        menu_track.addAction(act_move_track_up)
+
+        act_move_track_down = QAction("⬇️ &Descendre la piste (Déplacer vers le bas)", self)
+        act_move_track_down.setShortcut("Alt+Down")
+        act_move_track_down.triggered.connect(self.move_selected_track_down)
+        menu_track.addAction(act_move_track_down)
+
+        menu_track.addSeparator()
 
         act_master = QAction("🔴 &Inspecter Piste Master", self)
         act_master.setShortcut("Ctrl+M")
@@ -529,6 +553,7 @@ class MainWindow(QMainWindow):
         self.inspector.track_modified.connect(self._on_project_modified)
         self.inspector.track_modified.connect(self.refresh_project_ui)
         self.inspector.track_mixer_changed.connect(self._on_track_mixer_changed)
+        self.inspector.track_deleted.connect(self._on_track_deleted)
         self.arranger_splitter.addWidget(self.inspector)
 
         # Panneau central-gauche : En-têtes de pistes (redimensionnable, largeur minimale garantie pour voir tous les boutons)
@@ -612,6 +637,10 @@ class MainWindow(QMainWindow):
         self.timeline_grid.clip_double_clicked.connect(self._on_clip_double_clicked)
         self.timeline_grid.project_modified.connect(self._on_project_modified)
         self.timeline_grid.track_height_changed.connect(self._on_track_height_changed)
+        self.timeline_grid.track_selected.connect(self._on_track_selected)
+        self.timeline_grid.track_deleted.connect(self._on_track_deleted)
+        self.timeline_grid.track_moved.connect(self._on_track_moved_step)
+        self.timeline_grid.track_duplicated.connect(self._on_track_duplicated)
         self.timeline_grid.status_message.connect(self.statusBar().showMessage)
 
         # Connexions de la barre d'outils d'édition
@@ -722,6 +751,8 @@ class MainWindow(QMainWindow):
             self.mixer_widget = mixer_p.create_editor(self)
             self.mixer_widget.track_mixer_changed.connect(self._on_track_mixer_changed)
             self.mixer_widget.track_selected.connect(self._on_track_selected)
+            if hasattr(self.mixer_widget, "track_deleted"):
+                self.mixer_widget.track_deleted.connect(self._on_track_deleted)
             if hasattr(self.mixer_widget, "master_volume_changed"):
                 self.mixer_widget.master_volume_changed.connect(lambda v: self._on_master_vol_changed(v, origin="mixer"))
             self.lower_zone.addTab(self.mixer_widget, "🎛️ Mixeur (F5)")
@@ -899,6 +930,10 @@ class MainWindow(QMainWindow):
             header.track_deleted.connect(self._on_track_deleted)
             header.track_selected.connect(self._on_track_selected)
             header.track_height_changed.connect(self._on_track_height_changed)
+            header.track_reorder_dragged.connect(self._on_track_reorder_dragged)
+            header.track_reorder_finished.connect(self._on_track_reorder_finished)
+            header.track_moved.connect(self._on_track_moved_step)
+            header.track_duplicated.connect(self._on_track_duplicated)
             self.headers_layout.insertWidget(self.headers_layout.count() - 1, header)
 
         # S'assurer que l'inspecteur et le panneau des en-têtes conservent une largeur confortable
@@ -940,6 +975,7 @@ class MainWindow(QMainWindow):
             if hasattr(self, "timeline_grid"):
                 self.timeline_grid.selected_clip = None
                 self.timeline_grid.time_selection = None
+                self.timeline_grid.set_selected_track_id(None)
 
         self.transport_bar.spin_bpm.setValue(self.project.bpm)
         self.transport_bar.btn_loop.setChecked(self.project.loop_enabled)
@@ -958,6 +994,9 @@ class MainWindow(QMainWindow):
             if hasattr(self, "piano_roll"):
                 self.piano_roll.set_active_track(track)
 
+            if hasattr(self, "timeline_grid"):
+                self.timeline_grid.set_selected_track_id(track.id)
+
             # Mise en surbrillance de l'en-tête actif
             for i in range(self.headers_layout.count() - 1):
                 item = self.headers_layout.itemAt(i)
@@ -972,6 +1011,8 @@ class MainWindow(QMainWindow):
                 self.inspector.set_track(None)
             if hasattr(self, "piano_roll"):
                 self.piano_roll.clear()
+            if hasattr(self, "timeline_grid"):
+                self.timeline_grid.set_selected_track_id(None)
             for i in range(self.headers_layout.count() - 1):
                 item = self.headers_layout.itemAt(i)
                 if item and item.widget() and isinstance(item.widget(), TrackHeaderWidget):
@@ -1171,10 +1212,209 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Piste '{new_track.name}'{inst_info} ajoutée.", 3000)
 
     def _on_track_deleted(self, track_id: str):
+        if not track_id:
+            return
+        old_idx = next((i for i, t in enumerate(self.project.tracks) if t.id == track_id), -1)
+        track = self.project.tracks[old_idx] if old_idx >= 0 else None
+        if not track or getattr(track, "track_type", "") == "master":
+            return
+
+        track_name = track.name
+
+        # Fermer proprement les éventuels éditeurs de plugins natifs ouverts pour cette piste
+        try:
+            from ui.plugin_dialogs import _open_native_editors
+            for p in getattr(track, "plugins", []):
+                inst_id = getattr(p, "instance_id", None)
+                if inst_id and inst_id in _open_native_editors:
+                    dlg = _open_native_editors.pop(inst_id, None)
+                    if dlg:
+                        dlg.close()
+        except Exception:
+            pass
+
+        # Nettoyer les caches audio et plugins dans le moteur audio
+        if hasattr(self, "audio_engine") and self.audio_engine:
+            if hasattr(self.audio_engine, "_cache_lock"):
+                with self.audio_engine._cache_lock:
+                    if hasattr(self.audio_engine, "_track_audio_caches"):
+                        self.audio_engine._track_audio_caches.pop(track_id, None)
+            if hasattr(self.audio_engine, "track_plugins"):
+                self.audio_engine.track_plugins.pop(track_id, None)
+            if hasattr(self.audio_engine, "plugin_errors"):
+                self.audio_engine.plugin_errors.pop(track_id, None)
+        if hasattr(self, "mixer_widget") and self.mixer_widget and hasattr(self.mixer_widget, "mixer"):
+            if hasattr(self.mixer_widget.mixer, "track_peaks"):
+                self.mixer_widget.mixer.track_peaks.pop(track_id, None)
+
+        # Nettoyer la sélection de bloc / éditeurs si liés à la piste supprimée
+        if hasattr(self, "timeline_grid") and self.timeline_grid.selected_clip:
+            if self.timeline_grid.selected_clip[0].id == track_id:
+                self.timeline_grid.selected_clip = None
+        if hasattr(self, "piano_roll") and getattr(self.piano_roll, "current_track", None):
+            if self.piano_roll.current_track.id == track_id:
+                self.piano_roll.clear()
+        if hasattr(self, "audio_editor") and getattr(self.audio_editor, "current_track", None):
+            if self.audio_editor.current_track.id == track_id:
+                self.audio_editor.clear()
+
         self.project.remove_track(track_id)
+
+        # Sélectionner la piste voisine restante pour un retour visuel continu
+        if getattr(self, "selected_track_id", None) == track_id:
+            if self.project.tracks:
+                next_idx = min(old_idx, len(self.project.tracks) - 1)
+                self.selected_track_id = self.project.tracks[next_idx].id
+            else:
+                self.selected_track_id = None
+
         self.refresh_project_ui()
+        self._on_project_modified()
+        self.statusBar().showMessage(f"🗑️ Piste '{track_name}' supprimée.", 4000)
+
+    def delete_selected_track(self) -> bool:
+        """Supprime la piste actuellement sélectionnée (sauf Master)."""
+        sel_id = getattr(self, "selected_track_id", None)
+        if not sel_id:
+            self.statusBar().showMessage("Aucune piste sélectionnée à supprimer.", 2500)
+            return False
+        track = self.project.get_track(sel_id)
+        if not track or getattr(track, "track_type", "") == "master":
+            self.statusBar().showMessage("La piste Master ne peut pas être supprimée.", 2500)
+            return False
+        self._on_track_deleted(track.id)
+        return True
+
+    def _on_track_duplicated(self, track_id: str) -> Optional[Track]:
+        dup = self.project.duplicate_track(track_id)
+        if dup:
+            self.selected_track_id = dup.id
+            self.refresh_project_ui()
+            self._on_track_selected(dup.id)
+            self._on_project_modified()
+            self.statusBar().showMessage(f"📑 Piste '{dup.name}' dupliquée.", 3500)
+        return dup
+
+    def duplicate_selected_track(self) -> Optional[Track]:
+        sel_id = getattr(self, "selected_track_id", None)
+        if not sel_id:
+            self.statusBar().showMessage("Aucune piste sélectionnée à dupliquer.", 2500)
+            return None
+        return self._on_track_duplicated(sel_id)
+
+    def move_track(self, from_index: int, to_index: int) -> bool:
+        """
+        Déplace une piste de from_index vers to_index en temps réel sans détruire
+        les widgets d'en-tête (compatible avec le glisser-déposer actif) et en conservant
+        intégralement toutes les données de la piste (clips, notes, audio, effets, mixage).
+        """
+        if not self.project.move_track(from_index, to_index):
+            return False
+
+        # Réordonner le TrackHeaderWidget en place dans headers_layout sans deleteLater()
+        header_count = self.headers_layout.count() - 1  # exclut le stretch final
+        if 0 <= from_index < header_count and 0 <= to_index < header_count:
+            item = self.headers_layout.takeAt(from_index)
+            if item and item.widget():
+                self.headers_layout.insertWidget(to_index, item.widget())
+            self.headers_layout.activate()
+            self.headers_container.updateGeometry()
+            self.headers_container.update()
+
+        self.timeline_grid.update_dimensions()
+        self.timeline_grid.update()
+
+        if hasattr(self, "mixer_widget") and self.mixer_widget:
+            self.mixer_widget.refresh_tracks()
+            if hasattr(self, "selected_track_id"):
+                self.mixer_widget.set_selected_track(self.selected_track_id)
+
         self.set_dirty(True)
-        self.statusBar().showMessage("Piste supprimée.", 3000)
+        moved_track = self.project.tracks[to_index]
+        self.statusBar().showMessage(
+            f"⇅ Piste '{moved_track.name}' déplacée en position #{to_index + 1}/{len(self.project.tracks)}.",
+            3000,
+        )
+        return True
+
+    def _get_tracks_vertical_bounds(self) -> list:
+        """Retourne [(track, top_y, height)] pour calculer les échanges lors du glisser-déposer."""
+        bounds = []
+        curr_y = 0
+        for t in self.project.tracks:
+            h = max(46, int(getattr(t, "height", 76)))
+            bounds.append((t, curr_y, h))
+            curr_y += h
+        return bounds
+
+    def _on_track_reorder_dragged(self, track_id: str, global_y: int):
+        """Gère le glisser-déposer vertical d'une piste via sa bande de couleur."""
+        n = len(self.project.tracks)
+        if n < 2:
+            return
+        curr_idx = next((i for i, t in enumerate(self.project.tracks) if t.id == track_id), -1)
+        if curr_idx < 0:
+            return
+
+        local_y = self.headers_container.mapFromGlobal(QPoint(0, int(global_y))).y()
+
+        # Déplacement vers le haut si le curseur franchit le milieu de la piste supérieure
+        while curr_idx > 0:
+            bounds = self._get_tracks_vertical_bounds()
+            _, prev_top, prev_h = bounds[curr_idx - 1]
+            if local_y < prev_top + prev_h * 0.5:
+                if not self.move_track(curr_idx, curr_idx - 1):
+                    break
+                curr_idx -= 1
+            else:
+                break
+
+        # Déplacement vers le bas si le curseur franchit le milieu de la piste inférieure
+        while curr_idx < n - 1:
+            bounds = self._get_tracks_vertical_bounds()
+            _, next_top, next_h = bounds[curr_idx + 1]
+            if local_y > next_top + next_h * 0.5:
+                if not self.move_track(curr_idx, curr_idx + 1):
+                    break
+                curr_idx += 1
+            else:
+                break
+
+    def _on_track_reorder_finished(self, track_id: str):
+        """Appelé à la fin du glisser-déposer d'une piste."""
+        idx = next((i for i, t in enumerate(self.project.tracks) if t.id == track_id), -1)
+        if idx >= 0:
+            track = self.project.tracks[idx]
+            self._on_project_modified()
+            self.timeline_grid.update()
+            self.statusBar().showMessage(
+                f"✅ Ordre des pistes mis à jour : '{track.name}' est en position #{idx + 1}/{len(self.project.tracks)}.",
+                3500,
+            )
+
+    def _on_track_moved_step(self, track_id: str, delta: int) -> bool:
+        idx = next((i for i, t in enumerate(self.project.tracks) if t.id == track_id), -1)
+        if idx < 0:
+            return False
+        target_idx = idx + int(delta)
+        if not (0 <= target_idx < len(self.project.tracks)):
+            return False
+        moved = self.move_track(idx, target_idx)
+        if moved:
+            self._on_project_modified()
+        return moved
+
+    def move_selected_track_up(self) -> bool:
+        sel_id = getattr(self, "selected_track_id", None)
+        if not sel_id:
+            return False
+        return self._on_track_moved_step(sel_id, -1)
+
+    def move_selected_track_down(self) -> bool:
+        sel_id = getattr(self, "selected_track_id", None)
+        if not sel_id:
+            return False
+        return self._on_track_moved_step(sel_id, 1)
 
     def _on_clip_selected(self, track: Track, clip):
         """Appelé lors d'un clic de sélection sur un bloc"""

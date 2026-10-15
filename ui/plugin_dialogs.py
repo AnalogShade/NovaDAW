@@ -600,31 +600,48 @@ class NativePluginDialog(QDialog):
 
     def closeEvent(self, event):
         _open_native_editors.pop(self.plugin.instance_id, None)
+        p_id = getattr(self.plugin, "plugin_type_id", "native")
+        global_plugin_manager.editor_closed.emit(p_id)
         super().closeEvent(event)
 
 
+def is_native_plugin_editor_open(plugin) -> bool:
+    """Indique si l'interface d'une instance de plugin natif est actuellement ouverte."""
+    if not plugin:
+        return False
+    instance_id = getattr(plugin, "instance_id", None)
+    if not instance_id:
+        return False
+    dlg = _open_native_editors.get(instance_id)
+    return bool(dlg and dlg.isVisible())
+
+
 def open_native_plugin_editor(plugin, parent=None):
-    """Ouvre ou bascule l'interface d'un plugin natif NovaDAW (Égaliseur, Compresseur, Mixeur)"""
+    """Ouvre ou bascule l'interface d'un plugin natif NovaDAW (Égaliseur, Compresseur, Mixeur, NovaSynth)"""
     if not plugin:
         return None
     instance_id = getattr(plugin, "instance_id", None)
     if not instance_id:
         return None
 
+    p_id = getattr(plugin, "plugin_type_id", "native")
+
     existing = _open_native_editors.get(instance_id)
     if existing:
-        if existing.isVisible() and existing.isActiveWindow():
+        if existing.isVisible():
             existing.close()
             return None
         else:
             existing.show()
             existing.raise_()
             existing.activateWindow()
+            global_plugin_manager.editor_opened.emit(p_id)
             return existing
 
     dlg = NativePluginDialog(plugin, parent)
     _open_native_editors[instance_id] = dlg
     dlg.show()
+    global_plugin_manager.editor_opened.emit(p_id)
     return dlg
 
 

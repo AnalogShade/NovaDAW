@@ -1167,6 +1167,30 @@ class AudioEngine:
                         except Exception as e:
                             print(f"[AudioEngine] Erreur pré-rendu tranche {track.name}: {e}")
 
+            elif not track.plugin_path:
+                # Synthétiseur polyphonique par défaut de NovaDAW (SynthVoice)
+                for clip in track.clips:
+                    if not isinstance(clip, MidiClip):
+                        continue
+                    cs_b = clip.start_beat
+                    for note in clip.notes:
+                        abs_start_b = cs_b + note.start_beat
+                        if abs_start_b >= end_beat:
+                            continue
+                        note_dur_sec = note.duration / beats_per_sec
+                        wave = SynthVoice.generate_note(note.pitch, note_dur_sec, sample_rate, note.velocity)
+                        abs_start_sec = abs_start_b / beats_per_sec
+                        start_sample = int(abs_start_sec * sample_rate)
+                        wave_offset = 0
+                        buf_start = start_sample
+                        if buf_start < 0:
+                            wave_offset = -buf_start
+                            buf_start = 0
+                        if buf_start < total_frames and wave_offset < len(wave):
+                            to_copy = min(len(wave) - wave_offset, total_frames - buf_start)
+                            if to_copy > 0:
+                                buf[buf_start:buf_start + to_copy] += wave[wave_offset:wave_offset + to_copy]
+
         # 2. Rendu des clips Audio
         for clip in track.clips:
             if not isinstance(clip, AudioClip) or clip.audio_data is None:

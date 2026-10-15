@@ -459,6 +459,10 @@ class TimelineGrid(QWidget):
     seek_requested = Signal(float)
     time_range_selected = Signal(float, float)
     track_height_changed = Signal(str, int, bool)  # (track_id, height, apply_all)
+    track_selected = Signal(str)    # track_id
+    track_deleted = Signal(str)     # track_id
+    track_moved = Signal(str, int)  # (track_id, delta)
+    track_duplicated = Signal(str)  # track_id
     status_message = Signal(str, int)  # (message, duration_ms)
     zoom_in_requested = Signal()
     zoom_out_requested = Signal()
@@ -471,6 +475,8 @@ class TimelineGrid(QWidget):
         self.project = project
         self.pixels_per_beat = 40.0
         self.playhead_beat = 0.0
+        self.selected_track_id: Optional[str] = None
+        self._last_track_context_menu: Optional[QMenu] = None
 
         # Outils d'édition & Grille
         self.active_tool: str = "select"  # "select", "split", "erase"
@@ -507,6 +513,11 @@ class TimelineGrid(QWidget):
 
         self.setMouseTracking(True)
         self.update_dimensions()
+
+    def set_selected_track_id(self, track_id: Optional[str]):
+        if self.selected_track_id != track_id:
+            self.selected_track_id = track_id
+            self.update()
 
     def get_scissors_cursor(self) -> QCursor:
         """Retourne le curseur personnalisé en forme de ciseaux (mis en cache)."""
@@ -852,6 +863,7 @@ class TimelineGrid(QWidget):
             # 4. Outil Pointeur normal (Sélection, déplacement, redimensionnement)
             if clip and track:
                 self.selected_clip = (track, clip)
+                self.selected_track_id = track.id
                 self.time_selection = None
                 self._drag_start_x = x
                 self._drag_start_beat = clip.start_beat
@@ -862,8 +874,11 @@ class TimelineGrid(QWidget):
                     self._dragging_clip = True
                 self.clip_selected.emit(track, clip)
             else:
-                # Clic sur une zone vide : initie la sélection temporelle
+                # Clic sur une zone vide : sélectionne la piste sous le curseur et initie la sélection temporelle
                 self.selected_clip = None
+                if track:
+                    self.selected_track_id = track.id
+                    self.track_selected.emit(track.id)
                 self._is_selecting_range = True
                 click_beat = max(0.0, x / self.pixels_per_beat)
                 snapped_click = self.snap_beat(click_beat)
@@ -875,9 +890,15 @@ class TimelineGrid(QWidget):
         elif event.button() == Qt.RightButton:
             if clip and track:
                 self.selected_clip = (track, clip)
+                self.selected_track_id = track.id
                 self.clip_selected.emit(track, clip)
                 self.update()
                 self._show_clip_context_menu(event.globalPosition().toPoint(), track, clip)
+            elif track:
+                self.selected_track_id = track.id
+                self.track_selected.emit(track.id)
+                self.update()
+                self._show_track_lane_context_menu(event.globalPosition().toPoint(), track, x)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         x = event.position().x()
@@ -1129,6 +1150,8 @@ class TimelineGrid(QWidget):
         action_rename = menu.addAction("Renommer...")
         menu.addSeparator()
         action_delete = menu.addAction("🗑 Supprimer le bloc (Suppr)")
+        menu.addSeparator()
+        action_delete_track = menu.addAction(f"🗑️ Supprimer la piste « {track.name} »")
 
         action = menu.exec(pos)
         if action == action_edit:
@@ -1153,6 +1176,104 @@ class TimelineGrid(QWidget):
                 self.update()
         elif action == action_delete:
             self.delete_selected_clip()
+        elif action == action_delete_track:
+            self.track_deleted.emit(track.id)
+
+    def _create_clip_on_track_at(self, track: Track, x: float):
+        click_beat = max(0.0, x / self.pixels_per_beat)
+        snapped_beat = self.snap_beat(click_beat)
+        length = max(1.0, 4.0 if self.grid_resolution <= 1.0 else self.grid_resolution)
+        if track.track_type == "midi":
+            new_clip = MidiClip(
+                name=f"{track.name} Clip",
+                start_beat=snapped_beat,
+                length_beats=length,
+                color=track.color,
+            )
+        else:
+            new_clip = AudioClip(
+                name=f"{track.name} Audio",
+                start_beat=snapped_beat,
+                length_beats=length,
+                color=track.color,
+            )
+        track.clips.append(new_clip)
+        self.selected_clip = (track, new_clip)
+        self.selected_track_id = track.id
+        self.project_modified.emit()
+        self.update()
+        self.clip_selected.emit(track, new_clip)
+
+    def _build_track_lane_context_menu(self, track: Track, x: float) -> QMenu:
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #181b26;
+                color: #f1f5f9;
+                border: 1px solid #38bdf8;
+                border-radius: 4px;
+                padding: 4px;
+                font-size: 11px;
+            }
+            QMenu::item {
+                padding: 5px 18px 5px 10px;
+                border-radius: 3px;
+            }
+            QMenu::item:selected {
+                background-color: #0284c7;
+                color: #ffffff;
+                font-weight: bold;
+            }
+            QMenu::item:disabled {
+                color: #64748b;
+                font-weight: bold;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #2b3042;
+                margin: 4px 6px;
+            }
+        """)
+
+        act_header = menu.addAction(f"🎵 Piste : « {track.name} »")
+        act_header.setEnabled(False)
+        menu.addSeparator()
+
+        act_create_clip = menu.addAction("➕ Créer un nouveau bloc ici")
+        act_create_clip.triggered.connect(lambda: self._create_clip_on_track_at(track, x))
+
+        act_paste = menu.addAction("📥 Coller le bloc à la tête de lecture (Ctrl+V)")
+        act_paste.setEnabled(self._clip_clipboard is not None)
+        act_paste.triggered.connect(lambda: self.paste_clip_at_playhead(track))
+
+        menu.addSeparator()
+
+        track_idx = next((i for i, t in enumerate(self.project.tracks) if t.id == track.id), -1)
+        num_tracks = len(self.project.tracks)
+
+        act_up = menu.addAction("⬆️ Monter la piste (Déplacer vers le haut)")
+        act_up.setEnabled(track_idx > 0)
+        act_up.triggered.connect(lambda: self.track_moved.emit(track.id, -1))
+
+        act_down = menu.addAction("⬇️ Descendre la piste (Déplacer vers le bas)")
+        act_down.setEnabled(0 <= track_idx < num_tracks - 1)
+        act_down.triggered.connect(lambda: self.track_moved.emit(track.id, 1))
+
+        act_dup = menu.addAction(f"📑 Dupliquer la piste « {track.name} »")
+        act_dup.triggered.connect(lambda: self.track_duplicated.emit(track.id))
+
+        menu.addSeparator()
+
+        act_del = menu.addAction(f"🗑️ Supprimer la piste « {track.name} » (Delete)")
+        act_del.setObjectName("action_delete_track")
+        act_del.triggered.connect(lambda: self.track_deleted.emit(track.id))
+
+        return menu
+
+    def _show_track_lane_context_menu(self, pos, track: Track, x: float):
+        menu = self._build_track_lane_context_menu(track, x)
+        self._last_track_context_menu = menu
+        menu.exec(pos)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -1175,8 +1296,16 @@ class TimelineGrid(QWidget):
                 "Projet vide — Cliquez sur '+ Piste' ou [Ctrl+T] pour ajouter votre première piste"
             )
         for i, (track, top_y, track_h) in enumerate(track_layout):
-            bg_col = QColor("#171821") if i % 2 == 0 else QColor("#14151c")
+            is_sel_track = (self.selected_track_id and track.id == self.selected_track_id)
+            if is_sel_track:
+                bg_col = QColor("#1c2233")
+            else:
+                bg_col = QColor("#171821") if i % 2 == 0 else QColor("#14151c")
             painter.fillRect(0, top_y, width, track_h, bg_col)
+            if is_sel_track:
+                painter.setPen(QPen(QColor(56, 189, 248, 90), 1))
+                painter.drawLine(0, top_y, width, top_y)
+                painter.drawLine(0, top_y + track_h - 1, width, top_y + track_h - 1)
             painter.setPen(QPen(QColor("#232634"), 1))
             painter.drawLine(0, top_y + track_h, width, top_y + track_h)
 
