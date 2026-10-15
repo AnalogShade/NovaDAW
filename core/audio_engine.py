@@ -2,9 +2,10 @@
 core/audio_engine.py - Moteur audio temps réel, synthétiseur polyphonique et mixeur
 """
 import os
+import copy
 import threading
 import time
-from typing import Optional, List, Dict, Callable, Any
+from typing import Optional, List, Dict, Callable, Any, Iterator
 import numpy as np
 try:
     import sounddevice as sd
@@ -115,6 +116,14 @@ class AudioEngine:
         self._track_audio_caches: Dict[str, Dict[str, Any]] = {}
         self._track_cache_lock = threading.Lock()
         self._asio_guard_enabled: bool = True
+        # One producer for all tracks; invalidation makes in-flight buffers obsolete.
+        self._cache_job_lock = threading.Lock()
+        self._cache_render_lock = threading.Lock()
+        self._cache_worker = None
+        self._cache_request_pending = False
+        self._cache_force_requested = False
+        self._cache_generation = 0
+        self._cache_closed = False
 
         # Enregistrement audio et MIDI
         self.is_recording = False
@@ -223,6 +232,7 @@ class AudioEngine:
         return None
 
     def set_project(self, project: Project):
+        self._cache_closed = False
         self.is_playing = False
         from core.plugin_manager import global_plugin_manager
         global_plugin_manager.restore_states(project.plugin_states)
@@ -236,6 +246,7 @@ class AudioEngine:
         self._ensure_tracks_cached_async()
 
     def _start_stream(self):
+        self._cache_closed = False
         if os.environ.get("NOVADAW_SILENT_TESTS") == "1":
             self._stream = None
             return
@@ -315,6 +326,13 @@ class AudioEngine:
             self._stream = None
 
     def close(self):
+        with self._cache_job_lock:
+            self._cache_closed = True
+            self._cache_request_pending = False
+        self._cache_generation += 1
+        timer = getattr(self, "_debounce_timer", None)
+        if timer is not None:
+            timer.cancel()
         global _global_audio_engine
         if _global_audio_engine is self:
             _global_audio_engine = None
@@ -999,8 +1017,13 @@ class AudioEngine:
     def invalidate_track_cache(self, track_id: Optional[str] = None, trigger_async: bool = True):
         """Invalide le cache audio d'une piste ou de toutes les pistes lors d'une modification de note ou plugin."""
         with self._track_cache_lock:
+            self._cache_generation += 1
             if track_id:
                 self._track_audio_caches.pop(track_id, None)
+                # MIDI tracks routed to this instrument share its sound settings.
+                for track in self.project.tracks if self.project else []:
+                    if getattr(track, "synth_route_track_id", None) == track_id:
+                        self._track_audio_caches.pop(track.id, None)
             else:
                 self._track_audio_caches.clear()
         if trigger_async:
@@ -1009,6 +1032,7 @@ class AudioEngine:
     def invalidate_all_track_caches(self, trigger_async: bool = False):
         """Vide l'intégralité du cache RAM ASIO-Guard."""
         with self._track_cache_lock:
+            self._cache_generation += 1
             self._track_audio_caches.clear()
         if trigger_async:
             self._schedule_debounce_caching()
@@ -1025,15 +1049,35 @@ class AudioEngine:
         self._debounce_timer.start()
 
     def _ensure_tracks_cached_async(self, force: bool = False):
-        """Lance le pré-calcul des caches de pistes en arrière-plan sans bloquer l'interface."""
+        """Coalesce requests onto one background producer, including during playback."""
         if not self._asio_guard_enabled or not self.project:
             return
-        threading.Thread(
-            target=self._ensure_tracks_cached,
-            args=(force,),
-            daemon=True,
-            name="NovaDAW-AsioGuard-PreRender"
-        ).start()
+        with self._cache_job_lock:
+            if self._cache_closed:
+                return
+            self._cache_request_pending = True
+            self._cache_force_requested |= force
+            if self._cache_worker is not None:
+                return
+            self._cache_worker = threading.Thread(
+                target=self._run_cache_worker, daemon=True,
+                name="NovaDAW-AsioGuard-PreRender"
+            )
+            self._cache_worker.start()
+
+    def _run_cache_worker(self):
+        while True:
+            with self._cache_job_lock:
+                if self._cache_closed or not self._cache_request_pending:
+                    self._cache_worker = None
+                    return
+                self._cache_request_pending = False
+                force = self._cache_force_requested
+                self._cache_force_requested = False
+            try:
+                self._ensure_tracks_cached(force=force)
+            except Exception as exc:
+                print(f"[AudioEngine] Erreur pré-rendu: {exc}")
 
     def _compute_track_hash(self, track: Track, bpm: float, sample_rate: int) -> str:
         """Calcule une empreinte rapide des notes, clips et état d'instrument pour valider le cache ASIO-Guard."""
@@ -1063,6 +1107,13 @@ class AudioEngine:
         return hashlib.md5("".join(parts).encode("utf-8")).hexdigest()
 
     def _render_track_offline(self, track: Track, bpm: float, sample_rate: int, end_beat: float, progress_callback: Optional[Callable[[float], None]] = None) -> Optional[np.ndarray]:
+        """Synchronous compatibility entry point; the worker consumes the same blocks."""
+        buf = None
+        for buf, _ready_frames in self._iter_track_offline(track, bpm, sample_rate, end_beat, progress_callback):
+            pass
+        return buf
+
+    def _iter_track_offline(self, track: Track, bpm: float, sample_rate: int, end_beat: float, progress_callback: Optional[Callable[[float], None]] = None) -> Iterator[tuple[np.ndarray, int]]:
         """
         Rendu offline haute vitesse d'une piste complète en mémoire RAM (ASIO-Guard).
         Élimine tout calcul d'oscillateur ou de filtre lors de la lecture continue.
@@ -1125,8 +1176,10 @@ class AudioEngine:
                     except Exception:
                         iso_delay = None
 
-                # Traitement par blocs optimisés de 16384 échantillons (continuité fluide et rendu ultra-rapide)
-                chunk_frames = 16384
+                # Small blocks retain DSP history and let other tracks prepare their start.
+                chunk_frames = 4096
+                # Mixed MIDI/audio tracks are published only after audio has been added.
+                progressive = not any(isinstance(c, AudioClip) for c in track.clips)
                 for f_idx in range(0, total_frames, chunk_frames):
                     n = min(chunk_frames, total_frames - f_idx)
                     sb = (f_idx / sample_rate) * beats_per_sec
@@ -1166,6 +1219,9 @@ class AudioEngine:
                                 buf[f_idx:f_idx + n] = rendered[:n]
                         except Exception as e:
                             print(f"[AudioEngine] Erreur pré-rendu tranche {track.name}: {e}")
+                            raise
+                    if progressive:
+                        yield buf, f_idx + n
 
             elif not track.plugin_path:
                 # Synthétiseur polyphonique par défaut de NovaDAW (SynthVoice)
@@ -1218,7 +1274,7 @@ class AudioEngine:
             except Exception:
                 pass
 
-        return buf
+        yield buf, total_frames
 
     def _report_caching_progress(self, current: int, total: int, track_name: str, progress: float = 0.0):
         cb = self.caching_progress_callback
@@ -1234,64 +1290,117 @@ class AudioEngine:
         except Exception:
             pass
 
+    def _snapshot_cache_track(self, track: Track) -> Optional[Track]:
+        """Freeze notes and native instrument settings without touching live DSP state."""
+        snapshot = copy.copy(track)
+        snapshot.clips = [MidiClip.from_dict(c.to_dict()) if isinstance(c, MidiClip)
+                          else copy.copy(c) for c in list(track.clips)]
+        target = None
+        if getattr(track, "synth_route_track_id", None) and self.project:
+            target = self.project.get_track(track.synth_route_track_id)
+        native = self.get_native_instrument(target or track)
+        snapshot.plugins = []  # Inserts stay in the live path.
+        if native is not None:
+            from plugins.registry import plugin_registry
+            isolated = plugin_registry.create_plugin(native.plugin_type_id)
+            if isolated is None:
+                return None
+            isolated.set_state(copy.deepcopy(native.get_state()))
+            isolated.enabled = native.enabled
+            snapshot.plugins = [isolated]
+            snapshot.plugin_path = native.plugin_type_id
+            snapshot.synth_route_track_id = None
+        elif track.track_type == "midi" and (target or track).plugin_path:
+            # A silent cache must never replace an external instrument's live output.
+            return None
+        return snapshot
+
     def _ensure_tracks_cached(self, force: bool = False):
-        """Vérifie et pré-calcule le cache audio de toutes les pistes inactives pour la lecture (ASIO-Guard)."""
-        if not self.project:
-            return
-
-        bpm = max(20.0, self.project.bpm)
-        sample_rate = self.sample_rate
-
-        max_beat = 16.0
-        if self.project.loop_enabled and self.project.loop_end_beat > 0:
-            max_beat = max(max_beat, self.project.loop_end_beat)
-        for t in self.project.tracks:
-            for c in t.clips:
-                max_beat = max(max_beat, c.start_beat + c.length_beats)
-        end_beat = max_beat + 4.0
-
-        # Priorité de rendu : pistes en solo d'abord, puis pistes actives non muettes
-        sorted_tracks = sorted(
-            self.project.tracks,
-            key=lambda t: (not t.soloed, t.muted)
-        )
-        total_tracks = max(1, len(sorted_tracks))
-
-        for i, track in enumerate(sorted_tracks):
-            # Ne pas pré-calculer les pistes armées pour l'enregistrement (faible latence temps réel)
-            if getattr(track, "armed", False):
-                continue
-            thash = self._compute_track_hash(track, bpm, sample_rate)
-            with self._track_cache_lock:
-                cache = self._track_audio_caches.get(track.id)
-                if (not force and cache is not None and cache.get("is_valid", False)
-                    and cache.get("fully_rendered", False)
-                    and cache.get("version_hash") == thash and cache.get("audio") is not None):
-                    self._report_caching_progress(i + 1, total_tracks, track.name, (i + 1) / total_tracks)
+        """Publish prefixes round-robin so every track becomes usable immediately."""
+        with self._cache_render_lock:
+            project = self.project
+            if project is None or self._cache_closed:
+                return
+            generation = self._cache_generation
+            bpm = max(20.0, project.bpm)
+            sample_rate = self.sample_rate
+            max_beat = max(16.0, project.loop_end_beat if project.loop_enabled else 0.0)
+            for track in project.tracks:
+                for clip in track.clips:
+                    max_beat = max(max_beat, clip.start_beat + clip.length_beats)
+            end_beat = max_beat + 4.0
+            total_frames = max(1024, int(end_beat / (bpm / 60.0) * sample_rate))
+            jobs = []
+            for track in sorted(list(project.tracks), key=lambda t: (not t.soloed, t.muted)):
+                if track.armed:
                     continue
-
-            self._report_caching_progress(i, total_tracks, track.name, i / total_tracks)
-
-            def _track_subprogress(sub_pct: float, track_idx=i, track_name=track.name):
-                overall = (track_idx + sub_pct) / total_tracks
-                self._report_caching_progress(track_idx, total_tracks, track_name, overall)
-
-            rendered = self._render_track_offline(track, bpm, sample_rate, end_beat, progress_callback=_track_subprogress)
-            if rendered is not None:
+                thash = self._compute_track_hash(track, bpm, sample_rate)
                 with self._track_cache_lock:
-                    self._track_audio_caches[track.id] = {
-                        "audio": rendered,
-                        "bpm": bpm,
-                        "sample_rate": sample_rate,
-                        "total_beats": end_beat,
-                        "version_hash": thash,
-                        "is_valid": True,
-                        "fully_rendered": True
-                    }
-
-            self._report_caching_progress(i + 1, total_tracks, track.name, (i + 1) / total_tracks)
-
-        self._report_caching_progress(total_tracks, total_tracks, "Prêt", 1.0)
+                    cache = self._track_audio_caches.get(track.id)
+                    if (not force and cache is not None and cache.get("is_valid", False)
+                            and cache.get("fully_rendered", False)
+                            and cache.get("version_hash") == thash and cache.get("audio") is not None
+                            and cache.get("total_beats", 0) >= end_beat):
+                        continue
+                    if cache is not None and cache.get("version_hash") != thash:
+                        self._track_audio_caches.pop(track.id, None)
+                snapshot = self._snapshot_cache_track(track)
+                if snapshot is not None:
+                    jobs.append((track, thash, self._iter_track_offline(snapshot, bpm, sample_rate, end_beat)))
+            total_jobs = len(jobs)
+            completed = 0
+            while jobs:
+                pending = []
+                for track, thash, blocks in jobs:
+                    if (self._cache_closed or self.project is not project
+                            or generation != self._cache_generation
+                            or self.sample_rate != sample_rate or project.bpm != bpm):
+                        return
+                    if project.get_track(track.id) is not track or track.armed:
+                        completed += 1
+                        continue
+                    try:
+                        buf, ready_frames = next(blocks)
+                    except StopIteration:
+                        completed += 1
+                        continue
+                    except Exception as exc:
+                        # Drop only this failed track, preserving live playback fallback.
+                        with self._track_cache_lock:
+                            self._track_audio_caches.pop(track.id, None)
+                        print(f"[AudioEngine] Erreur cache {track.name}: {exc}")
+                        completed += 1
+                        continue
+                    with self._track_cache_lock:
+                        if generation != self._cache_generation or self.project is not project:
+                            return
+                        if project.get_track(track.id) is not track:
+                            completed += 1
+                            continue
+                        previous = self._track_audio_caches.get(track.id)
+                        # Restarting after another track's edit must not shrink an
+                        # unchanged track's already playable prefix.
+                        previous_ready = 0
+                        if (previous and previous.get("is_valid", False)
+                                and previous.get("version_hash") == thash):
+                            previous_ready = previous.get("rendered_frames", 0)
+                        if previous_ready <= ready_frames:
+                            self._track_audio_caches[track.id] = {
+                                "audio": buf, "bpm": bpm, "sample_rate": sample_rate,
+                                "total_beats": end_beat, "version_hash": thash,
+                                "is_valid": True, "rendered_frames": ready_frames,
+                                "fully_rendered": ready_frames >= total_frames,
+                            }
+                    progress = (completed + ready_frames / total_frames * len(jobs)) / max(1, total_jobs)
+                    self._report_caching_progress(completed, max(1, total_jobs), track.name, min(progress, 0.999))
+                    if ready_frames < total_frames:
+                        pending.append((track, thash, blocks))
+                    else:
+                        completed += 1
+                    # Let the audio callback acquire the GIL between small render blocks.
+                    time.sleep(0)
+                jobs = pending
+            self._report_caching_progress(total_jobs, max(1, total_jobs), "Prêt", 1.0)
 
     def _get_cached_track_slice(self, track: Track, start_b: float, end_b: float, frames: int, bpm: float) -> Optional[np.ndarray]:
         """
@@ -1300,7 +1409,7 @@ class AudioEngine:
         """
         with self._track_cache_lock:
             cache = self._track_audio_caches.get(track.id)
-            if cache is None or not cache.get("is_valid", False) or not cache.get("fully_rendered", False) or cache.get("audio") is None:
+            if cache is None or not cache.get("is_valid", False) or cache.get("audio") is None:
                 return None
 
             beats_per_sec = bpm / 60.0
@@ -1309,6 +1418,9 @@ class AudioEngine:
 
             buf = cache["audio"]
             cache_sr = cache.get("sample_rate", self.sample_rate)
+            ready_frames = cache.get("rendered_frames", len(buf) if cache.get("fully_rendered", False) else 0)
+            if cache.get("bpm", bpm) != bpm:
+                return None
 
         if len(buf) == 0 or cache_sr != self.sample_rate:
             return None
@@ -1324,9 +1436,15 @@ class AudioEngine:
                 s_start = loop_s_start + ((s_start - loop_s_start) % loop_len)
                 s_end = s_start + frames
 
-            if s_end <= loop_s_end and s_end <= len(buf):
+            if s_end <= loop_s_end and s_end <= ready_frames:
                 return buf[s_start:s_end].copy()
             else:
+                # Both sides of a wrap must be ready; never read unwritten zeros.
+                if s_start < loop_s_end and loop_s_end > ready_frames:
+                    return None
+                rem_frames = s_end - loop_s_end
+                if rem_frames > 0 and loop_s_start + rem_frames > ready_frames:
+                    return None
                 boundary = min(loop_s_end, len(buf))
                 p1 = max(0, boundary - s_start)
                 out = np.zeros((frames, 2), dtype=np.float32)
@@ -1337,8 +1455,10 @@ class AudioEngine:
                     out[p1:] = buf[loop_s_start:loop_s_start + rem]
                 return out
         else:
-            if s_end <= len(buf):
+            if s_end <= ready_frames:
                 return buf[s_start:s_end].copy()
+            elif ready_frames < len(buf):
+                return None
             elif s_start < len(buf):
                 out = np.zeros((frames, 2), dtype=np.float32)
                 p1 = len(buf) - s_start

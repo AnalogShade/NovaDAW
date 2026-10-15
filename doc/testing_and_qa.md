@@ -72,3 +72,10 @@ Si lors d'une intervention un test échoue :
 Comme consigné dans `tests/PLUGIN_WORKFLOW_QA.md` :
 - **Plugins VST3 natifs complexes** : Certains plugins tiers propriétaires (ex: Kontakt lors de certains rendus MIDI ou Prologue pour son éditeur fenêtré) peuvent provoquer des instabilités natives. L'architecture `IsolatedPlugin` garantit que ces plantages sont contenus dans le processus fils sans fermer NovaDAW.
 - **Environnement Headless / CI** : Certains tests instancient des widgets PySide6 avec `pytest-qt` ou une fixture `QApplication`. En environnement d'intégration continue sans écran, utiliser la variable d'environnement `QT_QPA_PLATFORM=offscreen`.
+
+
+## 6. Régression du cache audio progressif
+
+`tests/test_progressive_audio_cache.py` couvre : lecture partielle et copie indépendante des buffers, boucle partiellement prête, alternance des pistes, annulation lors d'une modification/fermeture/changement de projet, regroupement des demandes, séparation de l'état DSP, routage, suppression et armement des pistes, pistes mixtes audio/MIDI et maintien du chemin VST externe. Le rendu progressif est comparé au vrai rendu NovaSynth en direct.
+
+Le lancement de tous les modules dans un seul processus peut provoquer un arrêt natif Qt dans `test_track_delete_and_reorder.py` (également reproduit avant le correctif au commit `3f1b250`). Pour la validation de cette modification, tous les fichiers `tests/test_*.py` sont exécutés séparément avec `NOVADAW_SILENT_TESTS=1` et `QT_QPA_PLATFORM=offscreen`, sans désactiver de test ni modifier ses attentes. Le détail des résultats et les limites sont dans `doc/audio_startup_validation.md`.
