@@ -587,8 +587,8 @@ class TrackInspector(QFrame):
             if not any(r.get("file_path") == inst.file_path for r in rack_insts) and inst.file_path not in ("novadaw.drum_machine", "novadaw.synth"):
                 self.combo_instrument.addItem(format_inst_label(inst.name), userData=inst.file_path)
 
-        # Option 6 : Charger manuellement un .vst3
-        self.combo_instrument.addItem("➕ Charger un fichier .vst3...", userData="__ADD_FILE__")
+        # Option 6 : Charger manuellement un .vst3 ou .dll
+        self.combo_instrument.addItem("➕ Charger un fichier .vst3 / .dll...", userData="__ADD_FILE__")
 
         # Sélectionner le plugin actuel de la piste
         selected_idx = 0
@@ -615,9 +615,9 @@ class TrackInspector(QFrame):
         if data == "__ADD_FILE__":
             file_path, _ = QFileDialog.getOpenFileName(
                 self,
-                "Sélectionner un instrument VST3",
+                "Sélectionner un instrument VST3 ou VST2",
                 "",
-                "Plugins VST3 (*.vst3);;Tous les fichiers (*.*)"
+                "Plugins Audio VST (*.vst3 *.dll);;Plugins VST3 (*.vst3);;Plugins VST2 (*.dll);;Tous les fichiers (*.*)"
             )
             if file_path:
                 info = analyze_plugin_file(file_path, self)
@@ -906,9 +906,9 @@ class TrackInspector(QFrame):
             return
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Sélectionner un effet VST3",
+            "Sélectionner un effet VST3 ou VST2",
             "",
-            "Plugins VST3 (*.vst3);;Tous les fichiers (*.*)"
+            "Plugins Audio VST (*.vst3 *.dll);;Plugins VST3 (*.vst3);;Plugins VST2 (*.dll);;Tous les fichiers (*.*)"
         )
         if file_path:
             info = analyze_plugin_file(file_path, self)

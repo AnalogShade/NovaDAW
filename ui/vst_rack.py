@@ -457,9 +457,9 @@ class VstRackWidget(QWidget):
     def _browse_vst_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Charger un plugin VST3 dans le projet",
+            "Charger un plugin VST3 ou VST2 dans le projet",
             "",
-            "Plugins VST3 (*.vst3);;Tous les fichiers (*.*)"
+            "Plugins Audio VST (*.vst3 *.dll);;Plugins VST3 (*.vst3);;Plugins VST2 (*.dll);;Tous les fichiers (*.*)"
         )
         if file_path:
             info = analyze_plugin_file(file_path, self)

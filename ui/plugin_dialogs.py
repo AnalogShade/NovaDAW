@@ -159,12 +159,22 @@ def ensure_plugin_loaded(path, parent=None, instance_key=None):
 
 def analyze_plugin_file(path, parent=None):
     """Load and classify a selected file without blocking the Qt event loop."""
+    path = os.path.normpath(path)
+    fmt = "vst2" if path.lower().endswith(".dll") else "vst3"
+    cur_mtime, cur_size = 0.0, 0
+    try:
+        cur_mtime = os.path.getmtime(path)
+        cur_size = os.path.getsize(path)
+    except OSError:
+        pass
     if not ensure_plugin_loaded(path, parent):
         return PluginInfo(os.path.basename(path), path, "unknown", False,
-                          global_plugin_manager.load_errors.get(path, "Chargement impossible"))
+                          global_plugin_manager.load_errors.get(path, "Chargement impossible"),
+                          format=fmt, file_mtime=cur_mtime, file_size=cur_size)
     plugin = global_plugin_manager.active_instances[path]
     info = PluginInfo(plugin.name, path, "instrument" if plugin.is_instrument else "effect",
-                      True, parameters_count=plugin.parameters_count)
+                      True, parameters_count=plugin.parameters_count,
+                      format=fmt, file_mtime=cur_mtime, file_size=cur_size)
     global_plugin_manager.plugins = [p for p in global_plugin_manager.plugins if p.file_path != path] + [info]
     global_plugin_manager.save_cache()
     global_plugin_manager.scan_updated.emit()
@@ -846,8 +856,8 @@ class PluginManagerDialog(QDialog):
         self.btn_deep_scan.clicked.connect(lambda: self.start_scan(deep_scan=True))
         top_bar.addWidget(self.btn_deep_scan)
 
-        self.btn_add_file = QPushButton("➕ Ajouter un .vst3...")
-        self.btn_add_file.setMinimumWidth(130)
+        self.btn_add_file = QPushButton("➕ Ajouter (.vst3/.dll)...")
+        self.btn_add_file.setMinimumWidth(145)
         self.btn_add_file.clicked.connect(self._add_single_file)
         top_bar.addWidget(self.btn_add_file)
 
@@ -914,6 +924,7 @@ class PluginManagerDialog(QDialog):
         fx_count = 0
         comp_count = 0
         vst2_count = 0
+        vst3_count = 0
 
         for row, p in enumerate(plugins):
             # Nom
@@ -924,6 +935,8 @@ class PluginManagerDialog(QDialog):
             fmt_badge = f" [{p.format.upper()}]" if hasattr(p, "format") and p.format else " [VST3]"
             if p.format == "vst2":
                 vst2_count += 1
+            else:
+                vst3_count += 1
 
             if p.plugin_type == "instrument":
                 type_str = f"🎹 Instrument{fmt_badge}"
@@ -945,9 +958,6 @@ class PluginManagerDialog(QDialog):
                 comp_str = "Compatible ✅"
                 comp_color = "#10b981"
                 comp_count += 1
-            elif p.format == "vst2":
-                comp_str = "Hérité VST 2.4 ⚠️ (MAJ requise)"
-                comp_color = "#f59e0b"
             else:
                 comp_str = "Incompatible ❌"
                 comp_color = "#ef4444"
@@ -972,10 +982,10 @@ class PluginManagerDialog(QDialog):
             self.table.setItem(row, 3, item_params)
             self.table.setItem(row, 4, item_path)
 
-        vst2_info = f" ({vst2_count} VST2 hérités)" if vst2_count > 0 else ""
+        fmt_info = f" ({vst3_count} VST3, {vst2_count} VST2)" if vst2_count > 0 else ""
         self.lbl_stats.setText(
             f"Total : {len(plugins)} plugins ({inst_count} instruments, {fx_count} effets) | "
-            f"{comp_count} compatibles{vst2_info}"
+            f"{comp_count} compatibles{fmt_info}"
         )
         self._filter_table(self.txt_search.text())
 
@@ -1049,9 +1059,9 @@ class PluginManagerDialog(QDialog):
     def _add_single_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Ajouter un plugin VST3",
+            "Ajouter un plugin VST3 ou VST2",
             "",
-            "Plugins VST3 (*.vst3);;Tous les fichiers (*.*)"
+            "Plugins Audio VST (*.vst3 *.dll);;Plugins VST3 (*.vst3);;Plugins VST2 (*.dll);;Tous les fichiers (*.*)"
         )
         if file_path:
             info = analyze_plugin_file(file_path, self)

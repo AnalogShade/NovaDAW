@@ -691,15 +691,15 @@ class MasterFxWidget(QWidget):
         self.fx_changed.emit()
 
     def browse_vst_file(self):
-        """Ouvre l'explorateur pour sélectionner un plugin .vst3 audio."""
+        """Ouvre l'explorateur pour sélectionner un plugin .vst3 ou .dll audio."""
         master_t = self.get_master_track()
         if not master_t:
             return
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Sélectionner un effet VST3 pour le Master",
+            "Sélectionner un effet VST3 ou VST2 pour le Master",
             "",
-            "Plugins VST3 (*.vst3);;Tous les fichiers (*.*)"
+            "Plugins Audio VST (*.vst3 *.dll);;Plugins VST3 (*.vst3);;Plugins VST2 (*.dll);;Tous les fichiers (*.*)"
         )
         if file_path:
             info = analyze_plugin_file(file_path, self)

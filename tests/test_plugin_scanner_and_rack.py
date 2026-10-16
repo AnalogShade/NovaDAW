@@ -61,9 +61,9 @@ def test_is_vst2_dll_pe_parser():
 
 def test_omnisphere_vs_kontakt_detection_and_categorization():
     """
-    Vérifie la résolution de l'énigme Omnisphere vs Kontakt :
+    Vérifie la détection et la compatibilité directe des plugins VST3 et VST2 :
     - Kontakt possède une version VST3 64-bit native (compatible direct).
-    - Omnisphere est présent en DLLs VST 2.4 héritées avec message diagnostique clair.
+    - Omnisphere (et les autres plugins VST 2.4 .dll) est pris en charge nativement et compatible direct.
     """
     plugins = global_plugin_manager.plugins
     assert len(plugins) > 0
@@ -77,14 +77,11 @@ def test_omnisphere_vs_kontakt_detection_and_categorization():
         assert kontakt_vst3.plugin_type == "instrument"
 
     if omnisphere_plugins:
-        # Toutes les versions d'Omnisphere trouvées sont du VST2 hérité
         for omni in omnisphere_plugins:
             assert omni.format == "vst2"
-            assert omni.is_compatible is False
+            assert omni.is_compatible is True
             assert omni.plugin_type == "instrument"
-            # Le message diagnostique doit être en français et mentionner la version VST3 de Spectrasonics
-            assert "vst 2.4" in omni.error_message.lower()
-            assert "spectrasonics" in omni.error_message.lower() or "vst3" in omni.error_message.lower()
+            assert omni.error_message is None
 
 
 def test_plugin_cache_speed_and_metadata():
@@ -166,7 +163,50 @@ def test_main_window_floating_vst_rack_shortcut(qapp):
 
     # Réappel ne doit pas recréer une 2ème fenêtre mais réutiliser l'existante
     existing = win.floating_vst_rack
-    win.show_floating_vst_rack()
+    win.show_vst_rack_again = win.show_floating_vst_rack()
     assert win.floating_vst_rack is existing
     win.floating_vst_rack.close()
     win.close()
+
+
+def test_vst2_isolated_host_synthesis_and_state():
+    """
+    Vérifie que l'hôte isolé VST2 charge réellement un synthétiseur .dll (ex: Omnisphere, Massive, FM8),
+    synthétise de l'audio non-nul sur réception de notes MIDI et sauvegarde/restaure son état (chunk).
+    """
+    from core.vst_host import IsolatedPlugin
+    import numpy as np
+
+    vst2_insts = [
+        p for p in global_plugin_manager.get_compatible_instruments()
+        if p.format == "vst2" and os.path.isfile(p.file_path)
+    ]
+    if not vst2_insts:
+        pytest.skip("Aucun instrument VST2 .dll installé sur cette machine")
+
+    # Prioriser Omnisphere ou Massive s'ils sont présents
+    target = next(
+        (p for p in vst2_insts if "omnisphere" in p.name.lower() or "massive" in p.name.lower() or "fm8" in p.name.lower()),
+        vst2_insts[0]
+    )
+
+    plugin = IsolatedPlugin(target.file_path, timeout=15)
+    try:
+        assert plugin.is_instrument is True
+        state = plugin.raw_state
+        assert isinstance(state, bytes)
+        assert len(state) > 0
+
+        # Envoyer un accord MIDI et vérifier que le moteur VST2 génère un signal audio
+        midi_events = [
+            (bytes([0x90, 60, 110]), 0.0),
+            (bytes([0x90, 64, 110]), 0.0),
+            (bytes([0x80, 60, 0]), 0.35),
+            (bytes([0x80, 64, 0]), 0.35),
+        ]
+        audio = plugin(midi_events, duration=0.5, sample_rate=44100, num_channels=2, reset=False)
+        assert audio.shape == (2, int(round(0.5 * 44100)))
+        assert float(np.max(np.abs(audio))) > 1e-4
+    finally:
+        plugin.dispose()
+
