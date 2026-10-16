@@ -243,6 +243,7 @@ class VST2Plugin64:
         self._editor_hwnd = None
         self._window_closed_by_user = False
 
+        self._in_process = False
         self._time_info = _VstTimeInfo(
             samplePos=0.0,
             sampleRate=self._sample_rate,
@@ -251,13 +252,13 @@ class VST2Plugin64:
             tempo=120.0,
             barStartPos=0.0,
             cycleStartPos=0.0,
-            cycleEndPos=0.0,
+            cycleEndPos=16.0,
             timeSigNumerator=4,
             timeSigDenominator=4,
             smpteOffset=0,
             smpteFrameRate=0,
             samplesToNextClock=0,
-            flags=(1 << 10) | (1 << 13),
+            flags=(1 << 1) | (1 << 9) | (1 << 10) | (1 << 11) | (1 << 13),
         )
         self._time_info_ptr = ctypes.addressof(self._time_info)
 
@@ -279,7 +280,7 @@ class VST2Plugin64:
             if opcode == 17:  # audioMasterGetBlockSize
                 return int(self._block_size)
             if opcode == 23:  # audioMasterGetCurrentProcessLevel
-                return 0
+                return 2 if self._in_process else 1
             if opcode == 24:  # audioMasterGetAutomationState
                 return 1
             if opcode in (32, 33) and ptr:  # Vendor / Product string
@@ -349,8 +350,8 @@ class VST2Plugin64:
             if eff_name:
                 self.name = eff_name
 
-            # Warmup default program & chunk so synths (e.g. Omnisphere, FM8, Absynth 5)
-            # initialize their default patch immediately before the first MIDI note
+            # Warmup default program, chunk & initial audio blocks so synths (e.g. Omnisphere, FM8, Absynth 5)
+            # complete their lazy STEAM/patch initialization before the first user MIDI note arrives.
             try:
                 eff.dispatcher(self._eff_ptr, 2, 0, 0, None, 0.0)  # effSetProgram(0)
                 er_warm = POINTER(_ERect)()
@@ -358,8 +359,34 @@ class VST2Plugin64:
                 if eff.flags & (1 << 5):
                     c_warm = c_void_p()
                     eff.dispatcher(self._eff_ptr, 23, 0, 0, byref(c_warm), 0.0)  # effGetChunk
+                self._flush_silent_blocks(6)
             except Exception:
                 pass
+
+    def _flush_silent_blocks(self, num_blocks: int = 4):
+        """Run silent processReplacing blocks so lazy-init synths (Omnisphere STEAM) finish internal voice resets."""
+        try:
+            eff = self._eff_ptr.contents
+            n_in = max(2, self.num_inputs)
+            n_out = max(2, self.num_outputs)
+            bs = self._block_size
+            in_bufs = [(c_float * bs)() for _ in range(n_in)]
+            out_bufs = [(c_float * bs)() for _ in range(n_out)]
+            in_ptrs = (POINTER(c_float) * n_in)(*[ctypes.cast(b, POINTER(c_float)) for b in in_bufs])
+            out_ptrs = (POINTER(c_float) * n_out)(*[ctypes.cast(b, POINTER(c_float)) for b in out_bufs])
+            self._in_process = True
+            try:
+                for _ in range(num_blocks):
+                    if eff.processReplacing:
+                        eff.processReplacing(self._eff_ptr, in_ptrs, out_ptrs, bs)
+                    elif eff.process:
+                        eff.process(self._eff_ptr, in_ptrs, out_ptrs, bs)
+                    self._time_info.samplePos += bs
+                    self._time_info.ppqPos = (self._time_info.samplePos / self._sample_rate) * (self._time_info.tempo / 60.0)
+            finally:
+                self._in_process = False
+        except Exception:
+            pass
 
     def _resize_editor_window(self, width: int, height: int):
         if not self._editor_hwnd or width <= 0 or height <= 0 or sys.platform != "win32":
@@ -402,10 +429,9 @@ class VST2Plugin64:
                 for i in range(32):
                     container.events[i] = ctypes.addressof(events_arr[i])
                 eff.dispatcher(self._eff_ptr, 25, 0, 0, byref(container), 0.0)
+                self._flush_silent_blocks(2)
             except Exception:
                 pass
-            eff.dispatcher(self._eff_ptr, 12, 0, 0, None, 0.0)
-            eff.dispatcher(self._eff_ptr, 12, 0, 1, None, 0.0)
 
     @property
     def raw_state(self) -> bytes:
@@ -415,7 +441,9 @@ class VST2Plugin64:
                 chunk_ptr = c_void_p()
                 sz = eff.dispatcher(self._eff_ptr, 23, 0, 0, byref(chunk_ptr), 0.0)
                 if sz > 0 and chunk_ptr.value:
-                    return ctypes.string_at(chunk_ptr.value, sz)
+                    data = ctypes.string_at(chunk_ptr.value, sz)
+                    self._flush_silent_blocks(4)
+                    return data
             if self.parameters_count > 0 and eff.getParameter:
                 vals = [float(eff.getParameter(self._eff_ptr, i)) for i in range(self.parameters_count)]
                 return struct.pack(f"<{len(vals)}f", *vals)
@@ -431,6 +459,7 @@ class VST2Plugin64:
                 buf = ctypes.create_string_buffer(data, len(data))
                 self._last_chunk_buf = buf
                 eff.dispatcher(self._eff_ptr, 24, 0, len(data), buf, 0.0)
+                self._flush_silent_blocks(4)
             elif eff.setParameter and len(data) >= 4:
                 count = min(self.parameters_count, len(data) // 4)
                 vals = struct.unpack(f"<{count}f", data[: count * 4])
@@ -537,10 +566,19 @@ class VST2Plugin64:
                         ev_container.events[i] = ctypes.addressof(mev)
                     eff.dispatcher(self._eff_ptr, 25, 0, 0, byref(ev_container), 0.0)
 
-                if eff.processReplacing:
-                    eff.processReplacing(self._eff_ptr, in_ptrs, out_ptrs, block)
-                elif eff.process:
-                    eff.process(self._eff_ptr, in_ptrs, out_ptrs, block)
+                self._in_process = True
+                try:
+                    self._time_info.sampleRate = float(self._sample_rate)
+                    self._time_info.ppqPos = (self._time_info.samplePos / self._sample_rate) * (self._time_info.tempo / 60.0)
+                    self._time_info.barStartPos = float(int(self._time_info.ppqPos // 4.0) * 4)
+                    self._time_info.nanoSeconds = (self._time_info.samplePos / self._sample_rate) * 1e9
+                    if eff.processReplacing:
+                        eff.processReplacing(self._eff_ptr, in_ptrs, out_ptrs, block)
+                    elif eff.process:
+                        eff.process(self._eff_ptr, in_ptrs, out_ptrs, block)
+                    self._time_info.samplePos += block
+                finally:
+                    self._in_process = False
 
                 for c in range(out_ch):
                     if c < n_out:
@@ -649,17 +687,19 @@ class VST2Plugin64:
         last_rect_check = time.monotonic()
         try:
             while not close_event.is_set() and not self._window_closed_by_user:
-                while user32.PeekMessageW(byref(msg), None, 0, 0, 1):
-                    if msg.message == 0x0012:  # WM_QUIT
-                        self._window_closed_by_user = True
-                        break
-                    user32.TranslateMessage(byref(msg))
-                    user32.DispatchMessageW(byref(msg))
-
-                if self._window_closed_by_user or close_event.is_set():
-                    break
-
                 with self._lock:
+                    msg_count = 0
+                    while msg_count < 32 and user32.PeekMessageW(byref(msg), None, 0, 0, 1):
+                        if msg.message == 0x0012:  # WM_QUIT
+                            self._window_closed_by_user = True
+                            break
+                        user32.TranslateMessage(byref(msg))
+                        user32.DispatchMessageW(byref(msg))
+                        msg_count += 1
+
+                    if self._window_closed_by_user or close_event.is_set():
+                        break
+
                     eff.dispatcher(self._eff_ptr, 19, 0, 0, None, 0.0)  # effEditIdle
                     now = time.monotonic()
                     if now - last_rect_check > 0.25:

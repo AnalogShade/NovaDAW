@@ -194,6 +194,11 @@ class EditorStatusWorker(QThread):
             if self.close_event.is_set():
                 self.plugin.request("close_editor", timeout=15)
             result = self.plugin.request("editor_status", timeout=15)
+            if not result.get("open", False):
+                try:
+                    result["state"] = self.plugin.raw_state
+                except Exception:
+                    pass
         except Exception as exc:
             result = {"open": False, "error": str(exc)}
         self.checked.emit(result)
@@ -241,6 +246,9 @@ def open_plugin_editor_gui(file_path: str, parent=None, instance_key=None):
         timer.stop()
         timer.deleteLater()
         worker.deleteLater()
+        if status.get("state"):
+            global_plugin_manager.saved_states[key] = status["state"]
+            global_plugin_manager.saved_states[file_path] = status["state"]
         global_plugin_manager.open_editors.pop(key, None)
         global_plugin_manager.editor_closed.emit(file_path)
         if status["error"] and not event.is_set():

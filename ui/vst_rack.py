@@ -415,7 +415,29 @@ class VstRackWidget(QWidget):
                 plugin = self.project.get_rack_native_plugin(path)
                 open_native_plugin_editor(plugin, self)
         else:
-            open_plugin_editor_gui(path, self)
+            vst_track_keys = []
+            all_tracks = list(self.project.tracks)
+            if self.project.master_track:
+                all_tracks.append(self.project.master_track)
+            for t in all_tracks:
+                if t.plugin_path == path:
+                    vst_track_keys.append((t, f"track:{t.id}:instrument:{path}"))
+                if hasattr(t, "insert_effects") and path in t.insert_effects:
+                    vst_track_keys.append((t, f"track:{t.id}:effect:{path}"))
+            if len(vst_track_keys) == 1:
+                open_plugin_editor_gui(path, self, vst_track_keys[0][1])
+            elif len(vst_track_keys) > 1:
+                menu = QMenu(self)
+                menu.setStyleSheet("""
+                    QMenu { background-color: #1a1c26; color: #ffffff; border: 1px solid #33384a; }
+                    QMenu::item:selected { background-color: #0284c7; }
+                """)
+                for t, k in vst_track_keys:
+                    act = menu.addAction(f"🎹 Éditer sur : {t.name}")
+                    act.triggered.connect(lambda _, key=k: open_plugin_editor_gui(path, self, key))
+                menu.exec(QCursor.pos())
+            else:
+                open_plugin_editor_gui(path, self)
 
     def _show_add_instrument_menu(self):
         instruments = global_plugin_manager.get_compatible_instruments()

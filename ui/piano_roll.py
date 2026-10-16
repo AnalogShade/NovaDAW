@@ -26,7 +26,8 @@ def pitch_to_name(pitch: int) -> str:
 
 class PianoKeysWidget(QWidget):
     """Clavier de piano vertical interactif à gauche"""
-    key_pressed = Signal(int)  # pitch
+    key_pressed = Signal(int)   # pitch (Note-On)
+    key_released = Signal(int)  # pitch (Note-Off)
 
     def __init__(self, start_pitch=36, num_pitches=48, row_height=18, parent=None):
         super().__init__(parent)
@@ -38,7 +39,8 @@ class PianoKeysWidget(QWidget):
         self.active_pitch: Optional[int] = None
 
     def pitch_at_y(self, y: int) -> int:
-        idx = y // self.row_height
+        idx = int(y) // self.row_height
+        idx = max(0, min(self.num_pitches - 1, idx))
         # Du haut (aigu) vers le bas (grave)
         pitch = (self.start_pitch + self.num_pitches - 1) - idx
         return pitch
@@ -46,13 +48,28 @@ class PianoKeysWidget(QWidget):
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
             pitch = self.pitch_at_y(event.position().y())
+            if self.active_pitch is not None and self.active_pitch != pitch:
+                self.key_released.emit(self.active_pitch)
             self.active_pitch = pitch
             self.key_pressed.emit(pitch)
             self.update()
 
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if event.buttons() & Qt.LeftButton:
+            pitch = self.pitch_at_y(event.position().y())
+            if pitch != self.active_pitch:
+                if self.active_pitch is not None:
+                    self.key_released.emit(self.active_pitch)
+                self.active_pitch = pitch
+                self.key_pressed.emit(pitch)
+                self.update()
+
     def mouseReleaseEvent(self, event: QMouseEvent):
-        self.active_pitch = None
-        self.update()
+        if self.active_pitch is not None:
+            released_pitch = self.active_pitch
+            self.active_pitch = None
+            self.key_released.emit(released_pitch)
+            self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -94,7 +111,8 @@ class PianoKeysWidget(QWidget):
 
 class NoteGridWidget(QWidget):
     """Grille matricielle d'édition des notes MIDI"""
-    note_added_or_edited = Signal(int)  # pitch joué
+    note_added_or_edited = Signal(int)  # pitch joué (Note-On)
+    note_released = Signal(int)         # pitch relâché (Note-Off)
     notes_changed = Signal()
     seek_requested = Signal(float)       # déplacement curseur
 
@@ -113,6 +131,7 @@ class NoteGridWidget(QWidget):
         self.selected_note: Optional[MidiNote] = None
         self._dragging_note = False
         self._resizing_note = False
+        self._active_preview_pitch: Optional[int] = None
         self._drag_start_x = 0
         self._drag_start_y = 0
         self._drag_start_beat = 0.0
@@ -234,6 +253,7 @@ class NoteGridWidget(QWidget):
                     self._resizing_note = True
                 else:
                     self._dragging_note = True
+                    self._active_preview_pitch = note.pitch
                     self.note_added_or_edited.emit(note.pitch)
             else:
                 # Créer une nouvelle note au clic !
@@ -247,6 +267,7 @@ class NoteGridWidget(QWidget):
                 new_note = MidiNote(pitch=pitch, start_beat=snapped_beat, duration=duration)
                 self.clip.notes.append(new_note)
                 self.selected_note = new_note
+                self._active_preview_pitch = pitch
                 self.note_added_or_edited.emit(pitch)
                 self.notes_changed.emit()
             self.update()
@@ -270,6 +291,9 @@ class NoteGridWidget(QWidget):
             new_pitch = self.pitch_at_y(y)
 
             if self.selected_note.pitch != new_pitch:
+                if self._active_preview_pitch is not None:
+                    self.note_released.emit(self._active_preview_pitch)
+                self._active_preview_pitch = new_pitch
                 self.note_added_or_edited.emit(new_pitch)
 
             self.selected_note.start_beat = new_beat
@@ -292,6 +316,10 @@ class NoteGridWidget(QWidget):
                 self.setCursor(Qt.ArrowCursor)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._active_preview_pitch is not None:
+            released_pitch = self._active_preview_pitch
+            self._active_preview_pitch = None
+            self.note_released.emit(released_pitch)
         if self._dragging_note or self._resizing_note:
             self._dragging_note = False
             self._resizing_note = False
@@ -505,7 +533,9 @@ class PianoRoll(QWidget):
 
         # Raccordements signaux audio & transport
         self.piano_keys.key_pressed.connect(self._play_sound)
+        self.piano_keys.key_released.connect(self._stop_sound)
         self.note_grid.note_added_or_edited.connect(self._play_sound)
+        self.note_grid.note_released.connect(self._stop_sound)
         self.note_grid.notes_changed.connect(self.notes_updated.emit)
         self.note_grid.seek_requested.connect(self.seek_requested.emit)
 
@@ -564,7 +594,8 @@ class PianoRoll(QWidget):
         elif track.plugin_path == "novadaw.drum_machine" or "drums" in (track.plugin_name or "").lower():
             inst_tag = f"🥁 {track.plugin_name} (Échantillonneur FP32) ✅"
         elif track.plugin_path and not is_multibus:
-            inst_tag = f"VST3 Direct : {track.plugin_name} ✅"
+            fmt_label = "VST2 Direct" if str(track.plugin_path).lower().endswith(".dll") else "VST3 Direct"
+            inst_tag = f"{fmt_label} : {track.plugin_name} ✅"
         elif is_multibus:
             inst_tag = f"{track.plugin_name} (Sampler Multi-bus ➔ Synthé secours) ⚠️"
         else:
@@ -611,7 +642,8 @@ class PianoRoll(QWidget):
         elif track.plugin_path == "novadaw.drum_machine" or "drums" in (track.plugin_name or "").lower():
             inst_tag = f"🥁 {track.plugin_name} (Échantillonneur FP32) ✅"
         elif track.plugin_path and not is_multibus:
-            inst_tag = f"VST3 Direct : {track.plugin_name} ✅"
+            fmt_label = "VST2 Direct" if str(track.plugin_path).lower().endswith(".dll") else "VST3 Direct"
+            inst_tag = f"{fmt_label} : {track.plugin_name} ✅"
         elif is_multibus:
             inst_tag = f"{track.plugin_name} (Sampler Multi-bus ➔ Synthé secours) ⚠️"
         else:
@@ -643,7 +675,14 @@ class PianoRoll(QWidget):
 
     def _play_sound(self, pitch: int):
         if self.audio_engine:
-            self.audio_engine.preview_note(pitch, duration_sec=0.35, velocity=100, track=self.current_track)
+            if hasattr(self.audio_engine, "start_live_note"):
+                self.audio_engine.start_live_note(pitch, velocity=100, track=self.current_track)
+            else:
+                self.audio_engine.preview_note(pitch, duration_sec=0.35, velocity=100, track=self.current_track)
+
+    def _stop_sound(self, pitch: int):
+        if self.audio_engine and hasattr(self.audio_engine, "stop_live_note"):
+            self.audio_engine.stop_live_note(pitch, track=self.current_track)
 
     def _on_snap_changed(self, idx: int):
         snaps = [0.25, 0.5, 1.0, 2.0, 4.0]

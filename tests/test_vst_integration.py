@@ -143,3 +143,49 @@ def test_piano_roll_track_binding():
     assert "Aucune piste sélectionnée" in roll.lbl_title.text()
 
     engine.close()
+
+
+def test_piano_roll_live_note_hold_and_release():
+    """Vérifie le maintien continu (Note-On) et le relâchement fluide (Note-Off) sur le Piano Roll"""
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import Qt, QPointF
+    from PySide6.QtGui import QMouseEvent
+    from ui.piano_roll import PianoRoll
+
+    app = QApplication.instance() or QApplication([])
+
+    engine = AudioEngine()
+    roll = PianoRoll(engine)
+    track_midi = Track(name="Omnisphere Piste", track_type="midi")
+    roll.set_active_track(track_midi)
+
+    pressed_pitches = []
+    released_pitches = []
+    roll.piano_keys.key_pressed.connect(lambda p: pressed_pitches.append(p))
+    roll.piano_keys.key_released.connect(lambda p: released_pitches.append(p))
+
+    press_ev = QMouseEvent(
+        QMouseEvent.MouseButtonPress,
+        QPointF(10.0, 45.0),
+        Qt.LeftButton,
+        Qt.LeftButton,
+        Qt.NoModifier,
+    )
+    roll.piano_keys.mousePressEvent(press_ev)
+    assert len(pressed_pitches) == 1
+    held_pitch = pressed_pitches[0]
+    assert roll.piano_keys.active_pitch == held_pitch
+
+    release_ev = QMouseEvent(
+        QMouseEvent.MouseButtonRelease,
+        QPointF(10.0, 45.0),
+        Qt.LeftButton,
+        Qt.NoButton,
+        Qt.NoModifier,
+    )
+    roll.piano_keys.mouseReleaseEvent(release_ev)
+    assert released_pitches == [held_pitch]
+    assert roll.piano_keys.active_pitch is None
+
+    engine.close()
+

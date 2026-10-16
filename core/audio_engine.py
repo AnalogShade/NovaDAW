@@ -143,6 +143,18 @@ class AudioEngine:
         self._preview_lock = threading.Lock()
         self._preview_buffers: List[Dict] = []
 
+        # Streaming temps réel continu pour les instruments VST (maintien infini + queue de release + aperçu GUI VST)
+        self._live_stream_lock = threading.Lock()
+        self._live_stream_chunks: List[Dict[str, Any]] = []
+        self._live_midi_lock = threading.Lock()
+        self._live_midi_queue: Dict[str, List[tuple[bytes, float]]] = {}
+        self._live_scheduled_note_offs: List[tuple[float, str, int]] = []
+        self._live_active_notes: Dict[tuple[str, int], Dict[str, Any]] = {}
+        self._live_active_track: Optional[Track] = None
+        self._live_tail_until: float = 0.0
+        self._live_vst_event = threading.Event()
+        self._live_vst_thread: Optional[threading.Thread] = None
+
         # Mesure des niveaux de crête et distorsion Master (VU-mètre)
         self._master_peak_l: float = 0.0
         self._master_peak_r: float = 0.0
@@ -325,11 +337,14 @@ class AudioEngine:
         if not opened:
             print("[AudioEngine] Avertissement : Impossible d'ouvrir un flux audio physique.")
             self._stream = None
+        else:
+            self._ensure_live_vst_streamer()
 
     def close(self):
         with self._cache_job_lock:
             self._cache_closed = True
             self._cache_request_pending = False
+        self._live_vst_event.set()
         self._cache_generation += 1
         timer = getattr(self, "_debounce_timer", None)
         if timer is not None:
@@ -657,8 +672,374 @@ class AudioEngine:
                 print(f"[AudioEngine] Erreur initialisation instrument natif {track.plugin_path}: {e}")
         return None
 
+    def _ensure_live_vst_streamer(self):
+        """Démarre le thread daemon de streaming VST temps réel si un flux audio est actif."""
+        if os.environ.get("NOVADAW_SILENT_TESTS") == "1":
+            return
+        if self._live_vst_thread is not None and self._live_vst_thread.is_alive():
+            return
+        self._live_vst_thread = threading.Thread(
+            target=self._live_vst_loop,
+            daemon=True,
+            name="NovaDAW-LiveVST-Streamer"
+        )
+        self._live_vst_thread.start()
+
+    def start_live_note(self, pitch: int, velocity: int = 100, track: Optional[Track] = None):
+        """
+        Démarre immédiatement une note en direct (Note-On maintenu sans limite de temps).
+        Pour les VST externes (ex: Omnisphere), streame les blocs temps réel en arrière-plan
+        tant que la touche est maintenue puis laisse résonner toute la queue de release/réverb.
+        """
+        stream_active = bool(
+            self._stream is not None
+            and getattr(self._stream, "active", False)
+            and os.environ.get("NOVADAW_SILENT_TESTS") != "1"
+        )
+        if not stream_active:
+            self.preview_note(pitch, duration_sec=0.35, velocity=velocity, track=track)
+            return
+
+        target_track = track
+        if track and getattr(track, "synth_route_track_id", None) and self.project:
+            routed = self.project.get_track(track.synth_route_track_id)
+            if routed:
+                target_track = routed
+
+        native_inst = self.get_native_instrument(target_track) if target_track else None
+        if native_inst is None and target_track and target_track.plugin_path:
+            vst_plugin = self.get_track_plugin(target_track)
+            if self._can_render_vst_offline(vst_plugin):
+                self._ensure_live_vst_streamer()
+                now = time.time()
+                vel = max(1, min(127, int(velocity)))
+                with self._live_midi_lock:
+                    self._live_scheduled_note_offs = [
+                        item for item in self._live_scheduled_note_offs
+                        if not (item[1] == target_track.id and item[2] == pitch)
+                    ]
+                    q = self._live_midi_queue.setdefault(target_track.id, [])
+                    if (target_track.id, pitch) in self._live_active_notes:
+                        q.append((bytes([0x80, pitch, 0]), 0.0))
+                    self._live_active_notes[(target_track.id, pitch)] = {
+                        "press_time": now,
+                        "start_beat": self.current_beat,
+                        "velocity": vel,
+                        "record_track": track,
+                    }
+                    q.append((bytes([0x90, pitch, vel]), 0.0))
+                    self._live_active_track = target_track
+                    self._live_tail_until = max(self._live_tail_until, now + 4.0)
+                self._live_vst_event.set()
+                return
+
+        # Instruments natifs (NovaSynth, Nova Drums) ou SynthVoice par défaut
+        is_drum = bool(
+            (native_inst and getattr(native_inst, "plugin_type_id", None) == "novadaw.drum_machine")
+            or (target_track and getattr(target_track, "plugin_path", None) == "novadaw.drum_machine")
+        )
+        render_dur = 1.2 if is_drum else 4.0
+        wave = None
+        if native_inst and hasattr(native_inst, "render_note"):
+            try:
+                bus_idx = getattr(track, "synth_output_bus", None) if track else None
+                wave = native_inst.render_note(
+                    pitch, duration_sec=render_dur, sample_rate=self.sample_rate, velocity=velocity, bus_index=bus_idx
+                )
+            except TypeError:
+                try:
+                    wave = native_inst.render_note(
+                        pitch, duration_sec=render_dur, sample_rate=self.sample_rate, velocity=velocity
+                    )
+                except Exception:
+                    wave = None
+            except Exception:
+                wave = None
+
+        if wave is None and target_track and target_track.plugin_path:
+            return
+        if wave is None:
+            wave = SynthVoice.generate_note(pitch, render_dur, self.sample_rate, velocity)
+
+        if wave is not None and len(wave) > 0 and track:
+            wave = self._process_track_effects_isolated(track, wave.copy(), native_inst)
+            vol = float(getattr(track, "volume", 0.8))
+            pan = max(-1.0, min(1.0, float(getattr(track, "pan", 0.0))))
+            left_gain = vol * (1.0 - max(0.0, pan))
+            right_gain = vol * (1.0 + min(0.0, pan))
+            wave[:, 0] *= left_gain
+            wave[:, 1] *= right_gain
+
+        live_key = (track.id if track else "", int(pitch))
+        now = time.time()
+        with self._preview_lock:
+            if not is_drum:
+                for item in self._preview_buffers:
+                    if item.get("live_key") == live_key and not item.get("releasing", False):
+                        buf = item["buffer"]
+                        cur = item["cursor"]
+                        rem = len(buf) - cur
+                        if rem > 0:
+                            fade_len = min(rem, max(1, int(0.012 * self.sample_rate)))
+                            buf[cur:cur + fade_len] *= np.linspace(1.0, 0.0, fade_len, dtype=np.float32)[:, None]
+                            item["buffer"] = buf[:cur + fade_len]
+                            item["releasing"] = True
+            self._preview_buffers.append({
+                "buffer": np.ascontiguousarray(wave, dtype=np.float32),
+                "cursor": 0,
+                "live_key": None if is_drum else live_key,
+                "press_time": now,
+                "start_beat": self.current_beat,
+                "velocity": velocity,
+                "record_track": track,
+                "releasing": is_drum,
+            })
+
+    def stop_live_note(self, pitch: int, track: Optional[Track] = None):
+        """
+        Relâche une note démarrée avec start_live_note (Note-Off) avec maintien minimal
+        pour les clics rapides et queue de résonance naturelle sans coupure.
+        """
+        now = time.time()
+        target_track = track
+        if track and getattr(track, "synth_route_track_id", None) and self.project:
+            routed = self.project.get_track(track.synth_route_track_id)
+            if routed:
+                target_track = routed
+
+        if target_track:
+            note_info = None
+            with self._live_midi_lock:
+                note_info = self._live_active_notes.pop((target_track.id, int(pitch)), None)
+                if note_info is not None:
+                    held_sec = max(0.05, now - float(note_info.get("press_time", now)))
+                    min_gate_sec = 0.35
+                    if held_sec < min_gate_sec:
+                        release_at = float(note_info.get("press_time", now)) + min_gate_sec
+                        self._live_scheduled_note_offs.append((release_at, target_track.id, int(pitch)))
+                        self._live_tail_until = max(self._live_tail_until, release_at + 4.0)
+                    else:
+                        q = self._live_midi_queue.setdefault(target_track.id, [])
+                        q.append((bytes([0x80, int(pitch), 0]), 0.0))
+                        self._live_tail_until = max(self._live_tail_until, now + 4.0)
+            if note_info is not None:
+                self._live_vst_event.set()
+                rec_track = note_info.get("record_track") or track
+                if self.is_recording and rec_track and rec_track.track_type == "midi" and getattr(rec_track, "armed", False):
+                    bpm = self.project.bpm if self.project else 120.0
+                    held_sec = max(0.25, now - float(note_info.get("press_time", now)))
+                    dur_beats = max(0.25, (held_sec * bpm) / 60.0)
+                    rel_beat = max(0.0, float(note_info.get("start_beat", self.current_beat)) - self.recording_start_beat)
+                    with self._record_lock:
+                        self._recorded_midi_notes.append(MidiNote(
+                            pitch=int(pitch),
+                            start_beat=rel_beat,
+                            duration=dur_beats,
+                            velocity=int(note_info.get("velocity", 100))
+                        ))
+                return
+
+        live_key = (track.id if track else "", int(pitch))
+        matched_info = None
+        with self._preview_lock:
+            for item in self._preview_buffers:
+                if item.get("live_key") == live_key and not item.get("releasing", False):
+                    item["releasing"] = True
+                    matched_info = item
+                    buf = item["buffer"]
+                    cur = item["cursor"]
+                    min_gate_frames = int(0.30 * self.sample_rate)
+                    release_start = max(cur, min(len(buf), min_gate_frames))
+                    rem = len(buf) - release_start
+                    if rem > 0:
+                        fade_len = min(rem, max(1, int(0.18 * self.sample_rate)))
+                        buf[release_start:release_start + fade_len] *= np.linspace(
+                            1.0, 0.0, fade_len, dtype=np.float32
+                        )[:, None]
+                        item["buffer"] = buf[:release_start + fade_len]
+
+        if matched_info is not None:
+            rec_track = matched_info.get("record_track") or track
+            if self.is_recording and rec_track and rec_track.track_type == "midi" and getattr(rec_track, "armed", False):
+                bpm = self.project.bpm if self.project else 120.0
+                held_sec = max(0.25, now - float(matched_info.get("press_time", now)))
+                dur_beats = max(0.25, (held_sec * bpm) / 60.0)
+                rel_beat = max(0.0, float(matched_info.get("start_beat", self.current_beat)) - self.recording_start_beat)
+                with self._record_lock:
+                    self._recorded_midi_notes.append(MidiNote(
+                        pitch=int(pitch),
+                        start_beat=rel_beat,
+                        duration=dur_beats,
+                        velocity=int(matched_info.get("velocity", 100))
+                    ))
+
+    def _live_vst_loop(self):
+        """
+        Thread de streaming temps réel continu pour les instruments VST (VST2 / VST3) lorsque
+        le transport est à l'arrêt :
+        - Maintient le flux audio sans limite de durée tant qu'une note est enfoncée au Piano Roll
+        - Laisse résonner toute la queue de release/réverb après Note-Off tant que le signal est audible
+        - Alimente également le flux audio lorsqu'une fenêtre d'éditeur VST (ex: Omnisphere Patch Browser)
+          est ouverte afin que le bouton d'aperçu interne du plugin fonctionne en direct.
+        """
+        from core.plugin_manager import global_plugin_manager
+        last_audible_time = 0.0
+
+        while not self._cache_closed:
+            now = time.time()
+
+            # Gérer les Note-Off différés (clics courts)
+            due_note_offs: List[tuple[str, int]] = []
+            with self._live_midi_lock:
+                if self._live_scheduled_note_offs:
+                    still_waiting = []
+                    for rel_ts, tid, p in self._live_scheduled_note_offs:
+                        if now >= rel_ts:
+                            due_note_offs.append((tid, p))
+                        else:
+                            still_waiting.append((rel_ts, tid, p))
+                    self._live_scheduled_note_offs = still_waiting
+                    for tid, p in due_note_offs:
+                        self._live_midi_queue.setdefault(tid, []).append((bytes([0x80, p, 0]), 0.0))
+                        self._live_tail_until = max(self._live_tail_until, now + 4.0)
+
+            if self.is_playing:
+                with self._live_stream_lock:
+                    self._live_stream_chunks.clear()
+                self._live_vst_event.wait(timeout=0.015)
+                self._live_vst_event.clear()
+                continue
+
+            # Identifier les cibles VST actives (notes jouées, queue de release, ou éditeur VST ouvert)
+            active_track: Optional[Track] = None
+            has_pending_midi = False
+            has_note_on = False
+            with self._live_midi_lock:
+                has_active_notes = bool(self._live_active_notes) or bool(self._live_scheduled_note_offs)
+                for tid, events in self._live_midi_queue.items():
+                    if events:
+                        has_pending_midi = True
+                        if any((ev[0][0] & 0xF0) == 0x90 and ev[0][2] > 0 for ev in events):
+                            has_note_on = True
+                active_track = self._live_active_track
+                tail_active = (now < self._live_tail_until) or (now - last_audible_time < 1.2)
+
+            open_editor_plugin = None
+            open_editor_track: Optional[Track] = None
+            if global_plugin_manager.open_editors:
+                for ed_key, ed_evt in list(global_plugin_manager.open_editors.items()):
+                    if ed_evt.is_set():
+                        continue
+                    inst = global_plugin_manager.active_instances.get(ed_key)
+                    if inst and getattr(inst, "is_instrument", False):
+                        open_editor_plugin = inst
+                        if self.project:
+                            for t in self.project.tracks:
+                                if ed_key == f"track:{t.id}:instrument:{t.plugin_path}" or t.plugin_path == ed_key:
+                                    open_editor_track = t
+                                    break
+                        break
+
+            should_stream = has_pending_midi or has_active_notes or tail_active or (open_editor_plugin is not None)
+            if not should_stream:
+                self._live_vst_event.wait(timeout=0.020)
+                self._live_vst_event.clear()
+                continue
+
+            # Vérifier la profondeur actuelle du FIFO de streaming temps réel
+            chunk_frames = max(512, int(self.block_size))
+            target_buffered_frames = chunk_frames * 3
+            with self._live_stream_lock:
+                if has_note_on and self._live_stream_chunks:
+                    # Purger les blocs silencieux d'attente pour une attaque immédiate (< 11 ms)
+                    kept = []
+                    for c in self._live_stream_chunks:
+                        rem_buf = c["buffer"][c["cursor"]:]
+                        if len(rem_buf) > 0 and float(np.max(np.abs(rem_buf))) > 1e-4:
+                            kept.append(c)
+                    self._live_stream_chunks = kept
+                queued_frames = sum(len(c["buffer"]) - c["cursor"] for c in self._live_stream_chunks)
+
+            if queued_frames >= target_buffered_frames:
+                self._live_vst_event.wait(timeout=0.004)
+                self._live_vst_event.clear()
+                continue
+
+            target_track = active_track or open_editor_track
+            vst_plugin = None
+            if target_track is not None:
+                vst_plugin = self.get_track_plugin(target_track)
+            if vst_plugin is None and open_editor_plugin is not None:
+                vst_plugin = open_editor_plugin
+
+            if not self._can_render_vst_offline(vst_plugin):
+                self._live_vst_event.wait(timeout=0.015)
+                self._live_vst_event.clear()
+                continue
+
+            midi_msgs: List[tuple[bytes, float]] = []
+            with self._live_midi_lock:
+                if target_track and target_track.id in self._live_midi_queue:
+                    midi_msgs = list(self._live_midi_queue.pop(target_track.id, []))
+                elif self._live_midi_queue:
+                    for tid in list(self._live_midi_queue.keys()):
+                        midi_msgs.extend(self._live_midi_queue.pop(tid, []))
+
+            dur_sec = chunk_frames / float(self.sample_rate)
+            try:
+                vst_out = vst_plugin(
+                    midi_msgs,
+                    duration=dur_sec,
+                    sample_rate=self.sample_rate,
+                    num_channels=2,
+                    reset=False,
+                )
+                wave = None
+                if vst_out is not None and vst_out.size > 0:
+                    if vst_out.ndim == 1:
+                        wave = np.column_stack((vst_out, vst_out))
+                    elif vst_out.shape[0] == 1:
+                        wave = np.column_stack((vst_out[0], vst_out[0]))
+                    else:
+                        wave = vst_out[:2].T
+
+                if wave is not None and len(wave) > 0:
+                    peak = float(np.max(np.abs(wave)))
+                    if peak > 1e-4:
+                        last_audible_time = time.time()
+                        with self._live_midi_lock:
+                            if self._live_tail_until > 0.0:
+                                self._live_tail_until = max(self._live_tail_until, last_audible_time + 1.0)
+
+                    if target_track is not None:
+                        wave = self._process_track_effects_isolated(target_track, wave.copy(), None)
+                        vol = float(getattr(target_track, "volume", 0.8))
+                        pan = max(-1.0, min(1.0, float(getattr(target_track, "pan", 0.0))))
+                        left_gain = vol * (1.0 - max(0.0, pan))
+                        right_gain = vol * (1.0 + min(0.0, pan))
+                        wave[:, 0] *= left_gain
+                        wave[:, 1] *= right_gain
+
+                    with self._live_stream_lock:
+                        self._live_stream_chunks.append({
+                            "buffer": np.ascontiguousarray(wave, dtype=np.float32),
+                            "cursor": 0,
+                        })
+            except Exception:
+                self._live_vst_event.wait(timeout=0.015)
+
     def preview_note(self, pitch: int, duration_sec: float = 0.35, velocity: int = 100, track: Optional[Track] = None):
-        """Joue immédiatement une note (appelé par le Piano Roll lors d'un clic)"""
+        """Joue immédiatement une note (appelé par le Piano Roll ou les tests)"""
+        stream_active = bool(
+            self._stream is not None
+            and getattr(self._stream, "active", False)
+            and os.environ.get("NOVADAW_SILENT_TESTS") != "1"
+        )
+        if stream_active and track and track.plugin_path and not str(track.plugin_path).startswith("novadaw."):
+            self.start_live_note(pitch, velocity=velocity, track=track)
+            self.stop_live_note(pitch, track=track)
+            return
+
         wave = None
         # 1. Vérifier si la piste est routée vers un instrument natif (Nova Drums VSTi, NovaSynth)
         native_inst = self.get_native_instrument(track) if track else None
@@ -869,6 +1250,26 @@ class AudioEngine:
                 if item["cursor"] < len(buf):
                     active_previews.append(item)
             self._preview_buffers = active_previews
+
+        # 1.bis Consommer le flux FIFO continu du streamer VST temps réel (Omnisphere / VSTi en direct)
+        need_wake = False
+        with self._live_stream_lock:
+            written = 0
+            while written < frames and self._live_stream_chunks:
+                head = self._live_stream_chunks[0]
+                buf = head["buffer"]
+                cur = head["cursor"]
+                avail = len(buf) - cur
+                take = min(frames - written, avail)
+                if take > 0:
+                    out[written:written + take] += buf[cur:cur + take]
+                    head["cursor"] = cur + take
+                    written += take
+                if head["cursor"] >= len(buf):
+                    self._live_stream_chunks.pop(0)
+                    need_wake = True
+        if need_wake:
+            self._live_vst_event.set()
 
         # 2. Si le transport est en lecture, mixer les pistes du projet
         if self.is_playing and self.project:
@@ -1561,6 +1962,12 @@ class AudioEngine:
                                 midi_messages.append((bytes([0x80, note.pitch, 0]), offset))
                             elif abs_note_start < end_b and abs_note_end > start_b:
                                 has_notes = True
+
+                    with self._live_midi_lock:
+                        live_evs = self._live_midi_queue.pop(track.id, None)
+                        if live_evs:
+                            midi_messages.extend(live_evs)
+                            has_notes = True
 
                     midi_messages.sort(key=lambda event: event[1])
                     vst_out = vst_plugin(midi_messages, duration=dur_sec, sample_rate=self.sample_rate, num_channels=2, reset=False)
