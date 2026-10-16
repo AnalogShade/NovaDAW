@@ -133,6 +133,7 @@ class TransportBar(QWidget):
     record_toggled = Signal(bool)
     loop_toggled = Signal(bool)
     autoscroll_toggled = Signal(bool)
+    musical_typing_toggled = Signal(bool)
     bpm_changed = Signal(float)
     master_volume_changed = Signal(float)
     master_clip_reset = Signal()
@@ -266,6 +267,19 @@ class TransportBar(QWidget):
         self.btn_autoscroll.toggled.connect(self._on_autoscroll)
         nav_layout.addWidget(self.btn_autoscroll)
 
+        # 10. Clavier Musical Virtuel (Musical Typing) [Ctrl+K]
+        self.btn_musical_typing = QPushButton("🎹 Clavier")
+        self.btn_musical_typing.setObjectName("btn_musical_typing")
+        self.btn_musical_typing.setCheckable(True)
+        self.btn_musical_typing.setChecked(False)
+        set_button_glow(self.btn_musical_typing, False, "#38bdf8", blur_radius=15, alpha=210)
+        self.btn_musical_typing.setFixedHeight(32)
+        self.btn_musical_typing.setMinimumWidth(88)
+        self.btn_musical_typing.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.btn_musical_typing.setToolTip("Activer / Masquer le Clavier Musical Virtuel (Jouer en direct avec le clavier de l'ordinateur) [Ctrl+K]")
+        self.btn_musical_typing.toggled.connect(self._on_musical_typing)
+        nav_layout.addWidget(self.btn_musical_typing)
+
         main_layout.addWidget(nav_container)
 
         self._add_separator(main_layout)
@@ -386,6 +400,17 @@ class TransportBar(QWidget):
     def _on_autoscroll(self, checked: bool):
         set_button_glow(self.btn_autoscroll, checked, "#10b981", blur_radius=15, alpha=210)
         self.autoscroll_toggled.emit(checked)
+
+    def _on_musical_typing(self, checked: bool):
+        set_button_glow(self.btn_musical_typing, checked, "#38bdf8", blur_radius=15, alpha=210)
+        self.musical_typing_toggled.emit(checked)
+
+    def set_musical_typing_state(self, active: bool):
+        if hasattr(self, "btn_musical_typing"):
+            self.btn_musical_typing.blockSignals(True)
+            self.btn_musical_typing.setChecked(active)
+            self.btn_musical_typing.blockSignals(False)
+            set_button_glow(self.btn_musical_typing, active, "#38bdf8", blur_radius=15, alpha=210)
 
     def _on_stop(self):
         self.btn_play.blockSignals(True)

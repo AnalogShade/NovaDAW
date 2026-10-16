@@ -34,6 +34,7 @@ from ui.inspector import TrackInspector
 from ui.vst_rack import VstRackWidget
 from ui.master_fx_rack import MasterFxWidget
 from ui.floating_plugin_rack import FloatingPluginRackDialog
+from ui.virtual_keyboard import VirtualKeyboardDialog
 from ui.plugin_dialogs import analyze_plugin_file, PluginManagerDialog, PluginFolderManagerDialog, open_plugin_editor_gui, open_native_plugin_editor
 from plugins.registry import plugin_registry, ensure_plugins_loaded
 import core.actions
@@ -210,7 +211,7 @@ class MainWindow(QMainWindow):
         menu_edit.addSeparator()
 
         act_split = QAction("⚡ &Scinder à la tête de lecture (Playhead)", self)
-        act_split.setShortcut("Ctrl+K")
+        act_split.setShortcut("Ctrl+B")
         act_split.triggered.connect(self._on_split_playhead)
         menu_edit.addAction(act_split)
 
@@ -415,6 +416,13 @@ class MainWindow(QMainWindow):
         act_test_sound = QAction("▶ &Tester la Sortie Audio (Test Tone)", self)
         act_test_sound.triggered.connect(lambda: self.audio_engine.play_test_tone())
         menu_devices.addAction(act_test_sound)
+
+        menu_devices.addSeparator()
+
+        act_musical_typing = QAction("🎹 &Clavier Musical Virtuel (Musical Typing)...", self)
+        act_musical_typing.setShortcut("Ctrl+K")
+        act_musical_typing.triggered.connect(self.toggle_musical_typing)
+        menu_devices.addAction(act_musical_typing)
 
         menu_devices.addSeparator()
 
@@ -713,6 +721,7 @@ class MainWindow(QMainWindow):
         self.transport_bar.step_rewind.connect(self._on_step_relative)
         self.transport_bar.step_forward.connect(self._on_step_relative)
         self.transport_bar.autoscroll_toggled.connect(self._on_autoscroll_toggled)
+        self.transport_bar.musical_typing_toggled.connect(self._on_transport_musical_typing_toggled)
         bottom_layout.addWidget(self.transport_bar)
 
         # Zone inférieure avec onglets
@@ -807,6 +816,13 @@ class MainWindow(QMainWindow):
 
         self.shortcut_f11 = QShortcut(QKeySequence("F11"), self)
         self.shortcut_f11.activated.connect(self.show_vst_rack)
+
+        # Clavier Musical Virtuel (Musical Typing) [Ctrl+K]
+        self.virtual_keyboard_dialog = VirtualKeyboardDialog(self.audio_engine, self)
+        self.virtual_keyboard_dialog.visibility_toggled.connect(self._on_musical_typing_dialog_visibility_changed)
+
+        self.shortcut_musical_typing = QShortcut(QKeySequence("Ctrl+K"), self)
+        self.shortcut_musical_typing.activated.connect(self.toggle_musical_typing)
 
     def _init_status_bar(self):
         status = QStatusBar()
@@ -1005,6 +1021,9 @@ class MainWindow(QMainWindow):
 
             if hasattr(self, "mixer_widget") and self.mixer_widget:
                 self.mixer_widget.set_selected_track(track.id)
+
+            if hasattr(self, "virtual_keyboard_dialog"):
+                self.virtual_keyboard_dialog.set_active_track(track)
         else:
             self.selected_track_id = None
             if hasattr(self, "inspector"):
@@ -1013,6 +1032,8 @@ class MainWindow(QMainWindow):
                 self.piano_roll.clear()
             if hasattr(self, "timeline_grid"):
                 self.timeline_grid.set_selected_track_id(None)
+            if hasattr(self, "virtual_keyboard_dialog"):
+                self.virtual_keyboard_dialog.set_active_track(None)
             for i in range(self.headers_layout.count() - 1):
                 item = self.headers_layout.itemAt(i)
                 if item and item.widget() and isinstance(item.widget(), TrackHeaderWidget):
@@ -1049,6 +1070,47 @@ class MainWindow(QMainWindow):
 
         self.floating_vst_rack.show_and_focus()
         self.statusBar().showMessage("Rack de Plugins flottant affiché (F11)", 2000)
+
+    def toggle_musical_typing(self):
+        """Bascule l'activation et l'affichage du Clavier Musical Virtuel (Musical Typing) [Ctrl+K]"""
+        if not hasattr(self, "virtual_keyboard_dialog"):
+            return
+        is_visible = self.virtual_keyboard_dialog.isVisible()
+        if is_visible:
+            self.virtual_keyboard_dialog.hide()
+        else:
+            # Assigner la piste active
+            target = getattr(self.piano_roll, "current_track", None)
+            if not target and getattr(self, "selected_track_id", None):
+                target = self.project.get_track(self.selected_track_id)
+            if not target and self.project.tracks:
+                for t in self.project.tracks:
+                    if t.track_type == "midi":
+                        target = t
+                        break
+                if not target:
+                    target = self.project.tracks[0]
+
+            self.virtual_keyboard_dialog.set_active_track(target)
+            self.virtual_keyboard_dialog.show()
+            self.virtual_keyboard_dialog.raise_()
+            self.virtual_keyboard_dialog.activateWindow()
+            self.statusBar().showMessage(
+                "🎹 Clavier Musical Virtuel ACTIF — Jouez en temps réel avec vos touches [A-K, W-O] (Ctrl+K pour désactiver)",
+                6000
+            )
+
+    def _on_musical_typing_dialog_visibility_changed(self, is_visible: bool):
+        if hasattr(self, "transport_bar"):
+            self.transport_bar.set_musical_typing_state(is_visible)
+        if not is_visible:
+            self.statusBar().showMessage("Clavier Musical Virtuel désactivé — Raccourcis clavier standards rétablis", 3000)
+
+    def _on_transport_musical_typing_toggled(self, checked: bool):
+        if not hasattr(self, "virtual_keyboard_dialog"):
+            return
+        if checked != self.virtual_keyboard_dialog.isVisible():
+            self.toggle_musical_typing()
 
     def show_mixer_console(self):
         """Bascule immédiatement vers l'onglet de la Console de Mixage (F5)"""

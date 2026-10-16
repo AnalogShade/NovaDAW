@@ -153,7 +153,7 @@ class HelpDialog(QDialog):
             ("1", "Outil Pointeur (Sélection & Déplacement)", "Édition"),
             ("2", "Outil Scinder / Ciseaux (Découper un clip au clic)", "Édition"),
             ("3", "Outil Gomme (Supprimer un clip au clic)", "Édition"),
-            ("Ctrl + K ou S", "Scinder le clip sélectionné à la tête de lecture", "Édition"),
+            ("Ctrl + B ou S", "Scinder le clip sélectionné à la tête de lecture", "Édition"),
             ("Ctrl + C", "Copier le clip sélectionné", "Édition"),
             ("Ctrl + X", "Couper le clip sélectionné", "Édition"),
             ("Ctrl + V", "Coller le clip à la position de la tête de lecture", "Édition"),
@@ -162,6 +162,12 @@ class HelpDialog(QDialog):
             ("J", "Activer / Désactiver le magnétisme de grille (Snap)", "Édition"),
             ("Ctrl + + / Ctrl + -", "Zoom horizontal avant / arrière sur la timeline", "Affichage"),
             ("Ctrl + 0", "Réinitialiser le zoom horizontal de la timeline (100%)", "Affichage"),
+
+            # Catégorie Clavier Musical Virtuel (Musical Typing)
+            ("Ctrl + K", "🎹 Activer / Désactiver le Clavier Musical Virtuel (Musical Typing)", "Clavier Musical"),
+            ("Touches A - K & W - O", "Jouer les notes en direct au clavier d'ordinateur (Do, Ré, Mi, etc.)", "Clavier Musical"),
+            ("Z / X", "Descendre / Monter d'une octave au clavier musical", "Clavier Musical"),
+            ("C / V", "Diminuer / Augmenter la vélocité des notes jouées", "Clavier Musical"),
             
             # Catégorie Pistes & Timeline
             ("Ctrl + T", "Ajouter une nouvelle piste (MIDI ou Audio)", "Pistes & Timeline"),
