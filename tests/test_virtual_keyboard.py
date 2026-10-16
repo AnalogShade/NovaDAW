@@ -113,3 +113,62 @@ def test_main_window_musical_typing_toggle(app):
     assert not win.transport_bar.btn_musical_typing.isChecked()
 
     win.audio_engine.close()
+
+
+def test_musical_typing_suspends_conflicting_single_key_shortcuts(app):
+    from ui.main_window import MainWindow
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtCore import QEvent
+
+    win = MainWindow()
+    win.show()
+
+    # Trouver l'action Aimantage / Snap (touche 'J')
+    act_snap = None
+    for a in win.findChildren(object):
+        if hasattr(a, 'text') and 'Aimantage' in a.text():
+            act_snap = a
+            break
+
+    assert act_snap is not None
+    assert act_snap.shortcut().toString() == "J"
+    initial_snap = win.editing_toolbar.btn_snap.isChecked()
+
+    # 1. Activation du Clavier Musical
+    win.toggle_musical_typing()
+    app.processEvents()
+
+    # Les raccourcis mono-touches (J, F, L, etc.) doivent être suspendus
+    assert act_snap.shortcut().toString() == ""
+    assert len(win._suspended_shortcuts) > 0
+
+    # Événement ShortcutOverride sur la touche J doit être intercepté
+    ev_override = QKeyEvent(QEvent.ShortcutOverride, Qt.Key_J, Qt.NoModifier, "j")
+    app.sendEvent(win, ev_override)
+    assert ev_override.isAccepted() is True
+
+    # Appui sur J doit jouer la note Si/B (pitch 59 pour base C3=48) et ne PAS toucher au Snap
+    ev_press = QKeyEvent(QEvent.KeyPress, Qt.Key_J, Qt.NoModifier, "j")
+    app.sendEvent(win, ev_press)
+    app.processEvents()
+
+    assert Qt.Key_J in win.virtual_keyboard_dialog.held_keys_pitches
+    assert win.virtual_keyboard_dialog.held_keys_pitches[Qt.Key_J] == 59
+    assert win.editing_toolbar.btn_snap.isChecked() == initial_snap
+
+    # Relâchement de la touche J
+    ev_release = QKeyEvent(QEvent.KeyRelease, Qt.Key_J, Qt.NoModifier, "j")
+    app.sendEvent(win, ev_release)
+    app.processEvents()
+    assert Qt.Key_J not in win.virtual_keyboard_dialog.held_keys_pitches
+
+    # 2. Désactivation du Clavier Musical
+    win.toggle_musical_typing()
+    app.processEvents()
+
+    # Les raccourcis doivent être immédiatement et intégralement rétablis
+    assert act_snap.shortcut().toString() == "J"
+    assert len(win._suspended_shortcuts) == 0
+
+    win.audio_engine.close()
+

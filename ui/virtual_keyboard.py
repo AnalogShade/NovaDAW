@@ -265,16 +265,45 @@ class MusicalTypingEventFilter(QObject):
         self.dialog = dialog
         self.active = False
 
+    def is_musical_typing_key(self, key_code: int) -> bool:
+        """Indique si la touche est une touche de note musicale ou de contrôle (octave, vélocité)."""
+        if key_code in KEY_NOTE_MAP:
+            return True
+        if key_code in (
+            Qt.Key_Z, Qt.Key_X, Qt.Key_C, Qt.Key_V,
+            Qt.Key_BracketLeft, Qt.Key_BracketRight,
+            Qt.Key_Up, Qt.Key_Down
+        ):
+            return True
+        return False
+
     def eventFilter(self, watched, event):
-        if not self.active or not self.dialog.isVisible():
+        try:
+            if not self.active or self.dialog is None or not self.dialog.isVisible():
+                return False
+        except (RuntimeError, ReferenceError):
             return False
 
         # Ne pas intercepter la saisie si l'utilisateur est dans un champ texte éditable
-        if isinstance(watched, (QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox)):
+        from PySide6.QtWidgets import QApplication
+        focus_w = QApplication.focusWidget()
+        if isinstance(watched, (QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox)) or \
+           isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox)):
             return False
 
         evt_type = event.type()
-        if evt_type == QEvent.KeyPress:
+        if evt_type == QEvent.ShortcutOverride:
+            # Laisser passer les combinaisons avec Ctrl ou Alt (ex: Ctrl+K pour basculer le mode)
+            if event.modifiers() & (Qt.ControlModifier | Qt.AltModifier):
+                return False
+            # Si c'est une touche de note ou de contrôle musical, intercepter l'override pour que Qt
+            # n'exécute pas les raccourcis d'action (comme 'J' pour Snap, 'F' pour Follow, etc.)
+            if self.is_musical_typing_key(event.key()):
+                event.accept()
+                return True
+            return False
+
+        elif evt_type == QEvent.KeyPress:
             # Laisser passer les combinaisons avec Ctrl ou Alt (ex: Ctrl+K pour désactiver)
             if event.modifiers() & (Qt.ControlModifier | Qt.AltModifier):
                 return False
@@ -351,12 +380,9 @@ class VirtualKeyboardDialog(QDialog):
 
         self._init_ui()
 
-        # Filtre d'événement global
+        # Filtre d'événement global (activé dynamiquement lors de l'affichage)
         self.event_filter = MusicalTypingEventFilter(self)
-        from PySide6.QtWidgets import QApplication
-        app = QApplication.instance()
-        if app:
-            app.installEventFilter(self.event_filter)
+        self._filter_installed = False
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -521,17 +547,38 @@ class VirtualKeyboardDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app and not self._filter_installed:
+            app.installEventFilter(self.event_filter)
+            self._filter_installed = True
         self.event_filter.active = True
         self.visibility_toggled.emit(True)
 
     def hideEvent(self, event):
         self._release_all_held_notes()
         self.event_filter.active = False
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app and self._filter_installed:
+            try:
+                app.removeEventFilter(self.event_filter)
+            except Exception:
+                pass
+            self._filter_installed = False
         self.visibility_toggled.emit(False)
         super().hideEvent(event)
 
     def closeEvent(self, event):
         self._release_all_held_notes()
         self.event_filter.active = False
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app and self._filter_installed:
+            try:
+                app.removeEventFilter(self.event_filter)
+            except Exception:
+                pass
+            self._filter_installed = False
         self.visibility_toggled.emit(False)
         super().closeEvent(event)

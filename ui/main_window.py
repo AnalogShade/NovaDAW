@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
         self._active_recording_clips: Dict[str, Any] = {}
         self.floating_vst_rack: Optional[FloatingPluginRackDialog] = None
         self.autoscroll_enabled: bool = True
+        self._suspended_shortcuts: list[tuple[Any, str, str]] = []
 
         # 2. Construction de l'interface
         self._init_menus()
@@ -1100,7 +1101,63 @@ class MainWindow(QMainWindow):
                 6000
             )
 
+    def _suspend_conflicting_shortcuts(self):
+        """
+        Désactive temporairement les raccourcis mono-touches (J, F, L, R, 1, 2, 3, 0...)
+        pendant que le Clavier Musical Virtuel est actif, afin de dédier ces touches à la
+        génération de notes et de commandes musicales sans effets de bord.
+        """
+        if self._suspended_shortcuts:
+            return
+
+        from PySide6.QtGui import QAction, QShortcut, QKeySequence
+
+        # 1. Suspendre les QAction à touche unique (hors Espace pour lecture/pause)
+        for act in self.findChildren(QAction):
+            try:
+                sc = act.shortcut().toString()
+                if len(sc) == 1 and sc != " ":
+                    self._suspended_shortcuts.append((act, sc, "action"))
+                    act.setShortcut(QKeySequence())
+            except Exception:
+                pass
+
+        # 2. Suspendre les QShortcut à touche unique (ex: 'F' pour Follow)
+        for sc_obj in self.findChildren(QShortcut):
+            try:
+                sc_str = sc_obj.key().toString()
+                if len(sc_str) == 1 and sc_str != " ":
+                    self._suspended_shortcuts.append((sc_obj, sc_str, "shortcut"))
+                    sc_obj.setEnabled(False)
+            except Exception:
+                pass
+
+    def _restore_conflicting_shortcuts(self):
+        """Rétablit tous les raccourcis mono-touches suspendus dès la désactivation du Clavier Musical."""
+        if not self._suspended_shortcuts:
+            return
+
+        from PySide6.QtGui import QKeySequence
+
+        for item, orig_sc, item_type in self._suspended_shortcuts:
+            try:
+                if item_type == "action":
+                    item.setShortcut(QKeySequence(orig_sc))
+                elif item_type == "shortcut":
+                    item.setEnabled(True)
+            except (RuntimeError, ReferenceError):
+                pass
+            except Exception:
+                pass
+
+        self._suspended_shortcuts.clear()
+
     def _on_musical_typing_dialog_visibility_changed(self, is_visible: bool):
+        if is_visible:
+            self._suspend_conflicting_shortcuts()
+        else:
+            self._restore_conflicting_shortcuts()
+
         if hasattr(self, "transport_bar"):
             self.transport_bar.set_musical_typing_state(is_visible)
         if not is_visible:
