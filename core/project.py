@@ -314,6 +314,7 @@ class Track:
     plugin_name: Optional[str] = None
     insert_effects: List[str] = field(default_factory=list)
     plugins: List[Any] = field(default_factory=list)
+    midi_channel: int = 1  # Canal MIDI de sortie, 1 à 16
     synth_output_bus: Optional[int] = None  # Sortie stéréo assignée de 0 à 9 (Out 1 à Out 10)
     synth_route_track_id: Optional[str] = None  # Piste hébergeant le synthétiseur partagé
 
@@ -371,6 +372,7 @@ class Track:
             "plugin_name": plugin_name,
             "insert_effects": list(self.insert_effects),
             "plugins": [p.to_dict() for p in self.plugins if hasattr(p, "to_dict")],
+            "midi_channel": self.midi_channel,
             "synth_output_bus": self.synth_output_bus,
             "synth_route_track_id": self.synth_route_track_id,
             "clips": [c.to_dict() for c in self.clips],
@@ -392,6 +394,7 @@ class Track:
             plugin_path=data.get("plugin_path"),
             plugin_name=data.get("plugin_name"),
             insert_effects=data.get("insert_effects", []),
+            midi_channel=max(1, min(16, int(data.get("midi_channel", 1) or 1))),
             synth_output_bus=data.get("synth_output_bus"),
             synth_route_track_id=data.get("synth_route_track_id"),
         )

@@ -136,3 +136,7 @@ Pour étendre les capacités de NovaDAW et les exposer automatiquement à l'IA :
    ```
 3. Si le fichier est nouveau, importez-le dans `core/actions/__init__.py`.
 4. **C'est tout !** Le serveur FastMCP et le pont IPC exposent la commande automatiquement sans aucune autre modification.
+
+## Canal MIDI par piste
+
+`novadaw_set_midi_channel(track_id_or_name, channel)` choisit un canal entier de 1 à 16 sur une piste MIDI, invalide son cache, marque le projet modifié et synchronise l’interface. `novadaw_get_project_summary` expose `midi_channel` pour chaque piste. Un redémarrage de Nova et un rechargement du serveur MCP sont nécessaires après installation de cette action.

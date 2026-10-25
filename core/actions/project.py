@@ -20,6 +20,7 @@ def get_project_summary(app) -> Dict[str, Any]:
             "id": t.id,
             "name": t.name,
             "type": t.track_type,
+            "midi_channel": t.midi_channel,
             "volume": t.volume,
             "pan": t.pan,
             "muted": t.muted,
@@ -486,3 +487,23 @@ def set_editing_tool_action(app, tool_name: str = "select") -> Dict[str, Any]:
     }
 
 
+@action_registry.register(
+    name="novadaw_set_midi_channel",
+    description="Choisit le canal MIDI de sortie d'une piste (1 à 16), indépendamment des sorties audio.",
+    tags=["track", "midi"]
+)
+def set_midi_channel(app, track_id_or_name: str, channel: int) -> Dict[str, Any]:
+    track = app.project.get_track(track_id_or_name)
+    if track is None or track.track_type != "midi":
+        raise ValueError("Sélectionnez une piste MIDI existante.")
+    if isinstance(channel, bool) or not isinstance(channel, int) or not 1 <= channel <= 16:
+        raise ValueError("Le canal MIDI doit être un entier entre 1 et 16.")
+    if track.midi_channel != channel:
+        track.midi_channel = channel
+        if hasattr(app, "audio_engine"):
+            app.audio_engine.invalidate_track_cache(track.id)
+        if hasattr(app, "set_dirty"):
+            app.set_dirty(True)
+        if hasattr(app, "refresh_project_ui"):
+            app.refresh_project_ui()
+    return {"status": "success", "track_id": track.id, "midi_channel": channel}

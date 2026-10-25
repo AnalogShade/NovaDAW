@@ -526,6 +526,19 @@ class MainWindow(QMainWindow):
         self.btn_quick_plugins.clicked.connect(self.show_floating_vst_rack)
         bb_layout.addWidget(self.btn_quick_plugins)
 
+        # Séparateur vertical
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.VLine)
+        sep2.setStyleSheet("color: #2b2f42; max-height: 20px;")
+        bb_layout.addWidget(sep2)
+
+        # Affichage visible en tout temps du chemin complet du projet actif (barre supérieure)
+        self.lbl_project_path_top = QLabel("📁 Non enregistré")
+        self.lbl_project_path_top.setObjectName("lbl_project_path_top")
+        self.lbl_project_path_top.setCursor(Qt.PointingHandCursor)
+        self.lbl_project_path_top.mousePressEvent = lambda e: self._on_project_path_clicked()
+        bb_layout.addWidget(self.lbl_project_path_top)
+
         bb_layout.addStretch()
 
         # Côté droit : Accès Périphériques Audio & GPU et Statut IA
@@ -862,6 +875,13 @@ class MainWindow(QMainWindow):
         """)
         self.cache_progress_bar.setVisible(False)
         cache_layout.addWidget(self.cache_progress_bar)
+
+        # Affichage visible en tout temps du chemin complet du projet actif (barre d'état)
+        self.lbl_project_path_status = QLabel("📁 Non enregistré")
+        self.lbl_project_path_status.setObjectName("lbl_project_path_status")
+        self.lbl_project_path_status.setCursor(Qt.PointingHandCursor)
+        self.lbl_project_path_status.mousePressEvent = lambda e: self._on_project_path_clicked()
+        status.addPermanentWidget(self.lbl_project_path_status)
 
         status.addPermanentWidget(self.cache_container)
 
@@ -2196,11 +2216,133 @@ class MainWindow(QMainWindow):
         except Exception:
             return ""
 
-    def _update_window_title(self):
-        """Met à jour le titre de la fenêtre avec le nom du projet et l'indicateur '*' de modification."""
+    def _update_project_path_display(self):
+        """
+        Met à jour l'affichage en tout temps du chemin complet du projet :
+        - Dans la barre de titre de la fenêtre NovaDAW
+        - Dans la barre supérieure (brand bar)
+        - Dans la barre d'état permanente (en bas)
+        """
         star = " *" if getattr(self, "_is_dirty", False) else ""
-        file_info = f" [{os.path.basename(self.project.file_path)}]" if getattr(self.project, "file_path", None) else ""
-        self.setWindowTitle(f"NovaDAW - {self.project.name}{file_info}{star}")
+        file_path = getattr(self.project, "file_path", None)
+
+        if file_path:
+            full_path = os.path.abspath(file_path)
+            self.setWindowTitle(f"NovaDAW - {self.project.name} [{full_path}]{star}")
+
+            display_text = f"📁 {full_path}"
+            status_text = f"📁 {full_path}"
+            tooltip_text = (
+                f"Projet : {self.project.name}\n"
+                f"Emplacement complet : {full_path}\n\n"
+                "💡 Cliquez pour ouvrir l'explorateur de fichiers et sélectionner le projet."
+            )
+            top_style = (
+                "QLabel#lbl_project_path_top {"
+                "  color: #38bdf8;"
+                "  font-size: 11px;"
+                "  font-weight: 600;"
+                "  padding: 3px 10px;"
+                "  background-color: #111827;"
+                "  border: 1px solid #1e293b;"
+                "  border-radius: 4px;"
+                "}"
+                "QLabel#lbl_project_path_top:hover {"
+                "  background-color: #1e293b;"
+                "  border-color: #38bdf8;"
+                "}"
+            )
+            status_style = (
+                "QLabel#lbl_project_path_status {"
+                "  color: #38bdf8;"
+                "  font-size: 11px;"
+                "  font-weight: 500;"
+                "  padding: 0 10px;"
+                "  border-right: 1px solid #252834;"
+                "}"
+                "QLabel#lbl_project_path_status:hover {"
+                "  color: #7dd3fc;"
+                "  background-color: #171b26;"
+                "}"
+            )
+        else:
+            self.setWindowTitle(f"NovaDAW - {self.project.name} [Non enregistré]{star}")
+
+            display_text = "📁 Non enregistré"
+            status_text = "📁 Non enregistré"
+            tooltip_text = (
+                f"Projet : {self.project.name}\n"
+                "Ce projet n'a pas encore été enregistré sur le disque.\n\n"
+                "💡 Cliquez pour enregistrer le projet sous..."
+            )
+            top_style = (
+                "QLabel#lbl_project_path_top {"
+                "  color: #f59e0b;"
+                "  font-size: 11px;"
+                "  font-weight: 600;"
+                "  padding: 3px 10px;"
+                "  background-color: #1e1708;"
+                "  border: 1px solid #78350f;"
+                "  border-radius: 4px;"
+                "}"
+                "QLabel#lbl_project_path_top:hover {"
+                "  background-color: #291e0a;"
+                "  border-color: #f59e0b;"
+                "}"
+            )
+            status_style = (
+                "QLabel#lbl_project_path_status {"
+                "  color: #f59e0b;"
+                "  font-size: 11px;"
+                "  font-weight: 500;"
+                "  padding: 0 10px;"
+                "  border-right: 1px solid #252834;"
+                "}"
+                "QLabel#lbl_project_path_status:hover {"
+                "  color: #fcd34d;"
+                "  background-color: #1f1a10;"
+                "}"
+            )
+
+        if hasattr(self, "lbl_project_path_top"):
+            self.lbl_project_path_top.setText(display_text)
+            self.lbl_project_path_top.setToolTip(tooltip_text)
+            self.lbl_project_path_top.setStyleSheet(top_style)
+
+        if hasattr(self, "lbl_project_path_status"):
+            self.lbl_project_path_status.setText(status_text)
+            self.lbl_project_path_status.setToolTip(tooltip_text)
+            self.lbl_project_path_status.setStyleSheet(status_style)
+
+    def _update_window_title(self):
+        """Met à jour le titre de la fenêtre et les indicateurs du chemin complet du projet."""
+        self._update_project_path_display()
+
+    def _on_project_path_clicked(self):
+        """Révèle le fichier projet dans l'explorateur Windows, ou propose d'enregistrer."""
+        file_path = getattr(self.project, "file_path", None)
+        if file_path and os.path.exists(file_path):
+            abs_path = os.path.abspath(file_path)
+            try:
+                import subprocess
+                subprocess.Popen(["explorer.exe", f"/select,{abs_path}"])
+            except Exception:
+                folder = os.path.dirname(abs_path)
+                try:
+                    os.startfile(folder)
+                except Exception:
+                    pass
+        elif file_path:
+            folder = os.path.dirname(os.path.abspath(file_path))
+            if os.path.exists(folder):
+                try:
+                    os.startfile(folder)
+                except Exception:
+                    pass
+            else:
+                self.save_project_action()
+        else:
+            self.save_project_action()
 
     def _prompt_save_dialog(self, message: str) -> str:
         """
@@ -2324,6 +2466,7 @@ class MainWindow(QMainWindow):
         global_plugin_manager.close_all_editors()
         self.audio_engine.stop()
         self.project = Project.create_empty()
+        self.project.file_path = None
         self.audio_engine.set_project(self.project)
         self.selected_track_id = None
         self._on_seek(0.0)
@@ -2339,6 +2482,7 @@ class MainWindow(QMainWindow):
         global_plugin_manager.close_all_editors()
         self.audio_engine.stop()
         self.project = Project.create_demo()
+        self.project.file_path = None
         self.audio_engine.set_project(self.project)
         self.selected_track_id = None
         self._on_seek(0.0)
@@ -2474,6 +2618,7 @@ class MainWindow(QMainWindow):
                 self.set_dirty(False)
                 self.recent_projects_manager.add_recent_project(self.project.file_path)
                 self._update_recent_projects_menu()
+                self._update_project_path_display()
                 self.statusBar().showMessage("Projet enregistré avec succès.", 3000)
                 return True
             except Exception as e:
@@ -2482,18 +2627,169 @@ class MainWindow(QMainWindow):
         else:
             return self.save_project_as_dialog()
 
+    def _prompt_overwrite_confirmation(self, file_path: str, is_current_file: bool = False) -> bool:
+        """
+        Demande confirmation à l'utilisateur avant d'écraser un fichier existant.
+        Retourne True pour confirmer l'écrasement (Oui), False pour refuser/renommer (Non).
+        """
+        # Hook pour tests automatisés
+        if hasattr(self, "_test_overwrite_prompt_response") and self._test_overwrite_prompt_response is not None:
+            return bool(self._test_overwrite_prompt_response)
+
+        # Mode silencieux pour pytest si aucune valeur explicite injectée
+        if os.environ.get("NOVADAW_SILENT_TESTS") == "1" or "PYTEST_CURRENT_TEST" in os.environ:
+            return True
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Confirmer l'écrasement - NovaDAW")
+        box.setIcon(QMessageBox.Warning)
+
+        filename = os.path.basename(file_path)
+        if is_current_file:
+            box.setText(
+                f"Le fichier <b>{filename}</b> est le fichier actuel de ce projet.<br><br>"
+                "<b>Voulez-vous vraiment écraser le fichier courant ?</b>"
+            )
+        else:
+            box.setText(
+                f"Le fichier <b>{filename}</b> existe déjà à cet emplacement.<br><br>"
+                "<b>Voulez-vous vraiment écraser et remplacer ce fichier ?</b>"
+            )
+
+        box.setStyleSheet("""
+            QMessageBox {
+                background-color: #1a1c24;
+                color: #f8fafc;
+            }
+            QLabel {
+                color: #e2e8f0;
+                font-size: 13px;
+            }
+            QPushButton {
+                background-color: #2a2e3f;
+                color: #f8fafc;
+                border: 1px solid #3b4252;
+                border-radius: 4px;
+                padding: 6px 16px;
+                font-weight: 600;
+                min-width: 90px;
+            }
+            QPushButton:hover {
+                background-color: #38bdf8;
+                color: #0f172a;
+                border: 1px solid #38bdf8;
+            }
+        """)
+
+        btn_yes = box.addButton("Oui, écraser", QMessageBox.YesRole)
+        btn_no = box.addButton("Non, renommer", QMessageBox.NoRole)
+        box.setDefaultButton(btn_no)
+
+        btn_yes.setStyleSheet("""
+            QPushButton {
+                background-color: #dc2626;
+                color: #ffffff;
+                border: 1px solid #ef4444;
+                border-radius: 4px;
+                padding: 6px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #ef4444;
+                border: 1px solid #f87171;
+            }
+        """)
+
+        btn_no.setStyleSheet("""
+            QPushButton {
+                background-color: #0284c7;
+                color: #ffffff;
+                border: 1px solid #38bdf8;
+                border-radius: 4px;
+                padding: 6px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #38bdf8;
+                color: #0f172a;
+            }
+        """)
+
+        box.exec()
+        return box.clickedButton() == btn_yes
+
     def save_project_as_dialog(self) -> bool:
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Enregistrer le projet sous...",
-            f"{self.project.name}.ndaw",
-            "Fichiers NovaDAW (*.ndaw);;Tous les fichiers (*.*)"
-        )
-        if file_path:
+        """
+        Ouvre la boîte de dialogue 'Enregistrer sous...'.
+        - Si le projet est déjà enregistré, ouvre directement dans son dossier avec son nom pré-rempli.
+        - Si le fichier choisi existe déjà (fichier courant ou autre), affiche une confirmation
+          avec le choix Oui/Non.
+        - Si Non, l'opération n'écrase rien et ré-ouvre l'explorateur pour permettre de renommer le fichier.
+        """
+        # Détermination de l'emplacement et du nom de fichier initiaux
+        if getattr(self.project, "file_path", None):
+            initial_dir = os.path.dirname(os.path.abspath(self.project.file_path))
+            initial_name = os.path.basename(self.project.file_path)
+            if not initial_name.endswith(".ndaw"):
+                initial_name += ".ndaw"
+            if os.path.exists(initial_dir):
+                current_initial_path = os.path.join(initial_dir, initial_name)
+            else:
+                current_initial_path = initial_name
+        else:
+            recents = self.recent_projects_manager.get_recent_projects() if hasattr(self, "recent_projects_manager") else []
+            default_dir = ""
+            if recents and os.path.exists(os.path.dirname(recents[0])):
+                default_dir = os.path.dirname(recents[0])
+            name = self.project.name if self.project.name else "Nouveau Projet"
+            initial_name = f"{name}.ndaw" if not name.endswith(".ndaw") else name
+            if default_dir:
+                current_initial_path = os.path.join(default_dir, initial_name)
+            else:
+                current_initial_path = initial_name
+
+        while True:
+            # Hook pour les tests automatisés
+            if hasattr(self, "_test_save_as_path") and self._test_save_as_path is not None:
+                if isinstance(self._test_save_as_path, list):
+                    file_path = self._test_save_as_path.pop(0) if self._test_save_as_path else ""
+                elif callable(self._test_save_as_path):
+                    file_path = self._test_save_as_path()
+                else:
+                    file_path = self._test_save_as_path
+                    self._test_save_as_path = ""
+            else:
+                file_path, _ = QFileDialog.getSaveFileName(
+                    self,
+                    "Enregistrer le projet sous...",
+                    current_initial_path,
+                    "Fichiers NovaDAW (*.ndaw);;Tous les fichiers (*.*)",
+                    options=QFileDialog.Option.DontConfirmOverwrite
+                )
+
+            if not file_path:
+                return False
+
             if not file_path.endswith(".ndaw"):
                 file_path += ".ndaw"
+
+            # Vérification de l'écrasement si le fichier existe déjà
+            if os.path.exists(file_path):
+                is_current_file = bool(
+                    getattr(self.project, "file_path", None)
+                    and os.path.abspath(file_path).lower() == os.path.abspath(self.project.file_path).lower()
+                )
+                confirmed = self._prompt_overwrite_confirmation(file_path, is_current_file=is_current_file)
+                if not confirmed:
+                    # L'utilisateur a cliqué "Non, renommer"
+                    # On conserve le chemin pour ré-ouvrir directement l'explorateur au bon endroit
+                    current_initial_path = file_path
+                    continue
+
+            # Sauvegarde effective
             try:
                 self.project.name = os.path.splitext(os.path.basename(file_path))[0]
+                self.project.file_path = file_path
                 save_project(self.project, file_path)
                 self._saved_project_snapshot = self._capture_project_snapshot()
                 self.set_dirty(False)
@@ -2505,7 +2801,6 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Erreur d'enregistrement", f"Impossible d'enregistrer le projet :\n{e}")
                 return False
-        return False
 
     def export_audio_dialog(self):
         file_path, _ = QFileDialog.getSaveFileName(

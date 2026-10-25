@@ -391,6 +391,13 @@ class TrackHeaderWidget(QFrame):
             self.combo_plugin.currentIndexChanged.connect(self._on_plugin_changed)
             global_plugin_manager.scan_updated.connect(self._populate_plugin_combo)
             row3.addWidget(self.combo_plugin, stretch=1)
+            self.combo_midi_channel = QComboBox()
+            for channel in range(1, 17):
+                self.combo_midi_channel.addItem(f"Ch {channel}", channel)
+            self.combo_midi_channel.setCurrentIndex(self.track.midi_channel - 1)
+            self.combo_midi_channel.setToolTip("Canal MIDI de sortie (1–16)")
+            self.combo_midi_channel.currentIndexChanged.connect(self._on_midi_channel_changed)
+            row3.addWidget(self.combo_midi_channel)
 
             # Bouton [e] d'édition d'instrument virtuel (style Cubase)
             self.btn_edit_plugin = QPushButton("e")
@@ -719,8 +726,16 @@ class TrackHeaderWidget(QFrame):
         self.btn_solo.blockSignals(False)
         set_button_glow(self.btn_solo, soloed, "#facc15", blur_radius=14, alpha=220)
 
+    def _on_midi_channel_changed(self, index):
+        self.track.midi_channel = index + 1
+        self.track_modified.emit()
+
     def sync_controls_from_track(self):
         """Synchronise tous les contrôles (M, S, R, Volume, Pan, Nom) depuis la piste."""
+        if hasattr(self, "combo_midi_channel"):
+            self.combo_midi_channel.blockSignals(True)
+            self.combo_midi_channel.setCurrentIndex(self.track.midi_channel - 1)
+            self.combo_midi_channel.blockSignals(False)
         self.update_mute_state(self.track.muted)
         self.update_solo_state(self.track.soloed)
         self.update_arm_state(self.track.armed)

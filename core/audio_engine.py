@@ -148,7 +148,8 @@ class AudioEngine:
         self._live_stream_chunks: List[Dict[str, Any]] = []
         self._live_midi_lock = threading.Lock()
         self._live_midi_queue: Dict[str, List[tuple[bytes, float]]] = {}
-        self._live_scheduled_note_offs: List[tuple[float, str, int]] = []
+        self._vst_midi_channels: Dict[str, int] = {}
+        self._live_scheduled_note_offs: List[tuple[float, str, int, int]] = []
         self._live_active_notes: Dict[tuple[str, int], Dict[str, Any]] = {}
         self._live_active_track: Optional[Track] = None
         self._live_tail_until: float = 0.0
@@ -714,20 +715,25 @@ class AudioEngine:
                 now = time.time()
                 vel = max(1, min(127, int(velocity)))
                 with self._live_midi_lock:
+                    for _when, tid, old_pitch, old_channel in self._live_scheduled_note_offs:
+                        if tid == target_track.id and old_pitch == pitch:
+                            self._live_midi_queue.setdefault(tid, []).append(
+                                (bytes([0x80 | old_channel, pitch, 0]), 0.0))
                     self._live_scheduled_note_offs = [
                         item for item in self._live_scheduled_note_offs
                         if not (item[1] == target_track.id and item[2] == pitch)
                     ]
                     q = self._live_midi_queue.setdefault(target_track.id, [])
                     if (target_track.id, pitch) in self._live_active_notes:
-                        q.append((bytes([0x80, pitch, 0]), 0.0))
+                        q.append((bytes([0x80 | self._live_active_notes[(target_track.id, pitch)].get("channel", 0), pitch, 0]), 0.0))
                     self._live_active_notes[(target_track.id, pitch)] = {
+                        "channel": self._midi_status(0, track),
                         "press_time": now,
                         "start_beat": self.current_beat,
                         "velocity": vel,
                         "record_track": track,
                     }
-                    q.append((bytes([0x90, pitch, vel]), 0.0))
+                    q.append((bytes([self._midi_status(0x90, track), pitch, vel]), 0.0))
                     self._live_active_track = target_track
                     self._live_tail_until = max(self._live_tail_until, now + 4.0)
                 self._live_vst_event.set()
@@ -816,11 +822,11 @@ class AudioEngine:
                     min_gate_sec = 0.35
                     if held_sec < min_gate_sec:
                         release_at = float(note_info.get("press_time", now)) + min_gate_sec
-                        self._live_scheduled_note_offs.append((release_at, target_track.id, int(pitch)))
+                        self._live_scheduled_note_offs.append((release_at, target_track.id, int(pitch), note_info.get("channel", 0)))
                         self._live_tail_until = max(self._live_tail_until, release_at + 4.0)
                     else:
                         q = self._live_midi_queue.setdefault(target_track.id, [])
-                        q.append((bytes([0x80, int(pitch), 0]), 0.0))
+                        q.append((bytes([0x80 | note_info.get("channel", 0), int(pitch), 0]), 0.0))
                         self._live_tail_until = max(self._live_tail_until, now + 4.0)
             if note_info is not None:
                 self._live_vst_event.set()
@@ -889,18 +895,18 @@ class AudioEngine:
             now = time.time()
 
             # Gérer les Note-Off différés (clics courts)
-            due_note_offs: List[tuple[str, int]] = []
+            due_note_offs: List[tuple[str, int, int]] = []
             with self._live_midi_lock:
                 if self._live_scheduled_note_offs:
                     still_waiting = []
-                    for rel_ts, tid, p in self._live_scheduled_note_offs:
+                    for rel_ts, tid, p, channel in self._live_scheduled_note_offs:
                         if now >= rel_ts:
-                            due_note_offs.append((tid, p))
+                            due_note_offs.append((tid, p, channel))
                         else:
-                            still_waiting.append((rel_ts, tid, p))
+                            still_waiting.append((rel_ts, tid, p, channel))
                     self._live_scheduled_note_offs = still_waiting
-                    for tid, p in due_note_offs:
-                        self._live_midi_queue.setdefault(tid, []).append((bytes([0x80, p, 0]), 0.0))
+                    for tid, p, channel in due_note_offs:
+                        self._live_midi_queue.setdefault(tid, []).append((bytes([0x80 | channel, p, 0]), 0.0))
                         self._live_tail_until = max(self._live_tail_until, now + 4.0)
 
             if self.is_playing:
@@ -1059,8 +1065,8 @@ class AudioEngine:
             vst_plugin = self.get_track_plugin(track)
             if self._can_render_vst_offline(vst_plugin):
                 try:
-                    on_msg = (bytes([0x90, pitch, max(1, min(127, velocity))]), 0.0)
-                    off_msg = (bytes([0x80, pitch, 0]), duration_sec * 0.8)
+                    on_msg = (bytes([self._midi_status(0x90, track), pitch, max(1, min(127, velocity))]), 0.0)
+                    off_msg = (bytes([self._midi_status(0x80, track), pitch, 0]), duration_sec * 0.8)
                     vst_out = vst_plugin([on_msg, off_msg], duration=duration_sec, sample_rate=self.sample_rate, num_channels=2, reset=False)
                     if vst_out is not None and vst_out.size > 0:
                         if vst_out.ndim == 1:
@@ -1481,9 +1487,13 @@ class AudioEngine:
             except Exception as exc:
                 print(f"[AudioEngine] Erreur pré-rendu: {exc}")
 
+    @staticmethod
+    def _midi_status(status, track):
+        return status | (max(1, min(16, int(getattr(track, "midi_channel", 1)))) - 1)
+
     def _compute_track_hash(self, track: Track, bpm: float, sample_rate: int) -> str:
         """Calcule une empreinte rapide des notes, clips et état d'instrument pour valider le cache ASIO-Guard."""
-        parts = [track.id, str(track.plugin_path or ""), f"{bpm:.2f}", str(sample_rate)]
+        parts = [track.id, str(getattr(track, "midi_channel", 1)), str(track.plugin_path or ""), f"{bpm:.2f}", str(sample_rate)]
 
         # 1. État de l'instrument (direct ou routé vers une autre piste)
         target_track = None
@@ -1936,6 +1946,12 @@ class AudioEngine:
                 try:
                     dur_sec = frames / self.sample_rate
                     midi_messages = []
+                    channel = self._midi_status(0, track)
+                    previous_channel = self._vst_midi_channels.get(track.id, channel)
+                    if previous_channel != channel:
+                        # Release the previous part before sending notes to the new one.
+                        midi_messages.append((bytes([0xB0 | previous_channel, 123, 0]), 0.0))
+                    self._vst_midi_channels[track.id] = channel
                     has_notes = False
 
                     for clip in track.clips:
@@ -1953,13 +1969,13 @@ class AudioEngine:
                             # Détection Note-On dans cette tranche
                             if start_b <= abs_note_start < end_b:
                                 offset = max(0.0, min(dur_sec, (abs_note_start - start_b) / beats_per_sec))
-                                midi_messages.append((bytes([0x90, note.pitch, max(1, min(127, note.velocity))]), offset))
+                                midi_messages.append((bytes([self._midi_status(0x90, track), note.pitch, max(1, min(127, note.velocity))]), offset))
                                 has_notes = True
 
                             # Détection Note-Off dans cette tranche
                             if start_b <= abs_note_end < end_b:
                                 offset = max(0.0, min(dur_sec, (abs_note_end - start_b) / beats_per_sec))
-                                midi_messages.append((bytes([0x80, note.pitch, 0]), offset))
+                                midi_messages.append((bytes([self._midi_status(0x80, track), note.pitch, 0]), offset))
                             elif abs_note_start < end_b and abs_note_end > start_b:
                                 has_notes = True
 
@@ -2131,6 +2147,7 @@ class AudioEngine:
             renderer._asio_guard_enabled = False
             renderer._track_audio_caches = {}
             renderer.track_plugins = {}
+            renderer._vst_midi_channels = {}
             renderer._master_peak_lock = threading.Lock()
             renderer.is_playing = False
             renderer._reset_all_plugins()

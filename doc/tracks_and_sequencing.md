@@ -141,3 +141,7 @@ Dédié à l'inspection et à l'édition des clips audio :
 - Réglage du gain du clip individuel.
 - Visualisation et ajustement du décalage interne (`source_offset_beats`).
 - Bouton direct **"Importer un fichier audio"** ouvrant l'explorateur pour remplacer ou charger une nouvelle piste sans quitter l'éditeur.
+
+## Canal MIDI de sortie
+
+Chaque piste MIDI possède `midi_channel` (1–16, défaut 1). Le sélecteur « Canal MIDI » de l’inspecteur et « Ch » de l’en-tête sont synchronisés. Ce canal choisit la partie réceptrice du VST; il ne sélectionne pas une sortie audio et ne crée pas un partage d’instance. La partie correspondante doit être configurée dans le plugin. Les pistes Audio/Master ne proposent pas ce contrôle. Le champ est sauvegardé et conservé par duplication; les anciens projets utilisent le canal 1.

@@ -113,3 +113,7 @@ La fonction d'exportation (`novadaw_export_wav` / `Ctrl+E`) réalise un rendu ha
 6. **Accès MCP** : le pont IPC attend jusqu'à 300 secondes pour l'export (5 secondes pour les autres actions par défaut). Un délai explicitement fourni reste prioritaire. Le calcul reste synchrone dans l'application; cela ne constitue pas encore une interface d'export asynchrone avec progression.
 
 Les instruments et effets VST externes continuent d'utiliser le gestionnaire de plugins existant : leur état DSP n'est pas cloné par ce correctif ciblé sur les plugins natifs. Ils nécessitent une validation séparée, notamment si un export est lancé pendant leur lecture. Les tests de non-régression spécifiques se trouvent dans `tests/test_mixdown_isolation.py`.
+
+## Canaux MIDI des VST
+
+Le canal `Track.midi_channel` (1–16) est encodé dans les statuts Note-On/Off du séquenceur, de la prévisualisation et du clavier en direct. Le mixdown conserve le champ dans ses copies de pistes. Le cache inclut le canal dans son empreinte. Les notes jouées en direct mémorisent leur canal de départ pour leur Note-Off immédiat ou différé. Un changement de canal pendant le séquençage envoie All Notes Off au canal précédent au prochain bloc rendu. Le routage audio stéréo et l’isolation existante des instances VST restent inchangés. Tests silencieux : `tests/test_midi_channels.py`; pas de validation matérielle Omnisphere par ces tests.

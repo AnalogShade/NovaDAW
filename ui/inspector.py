@@ -221,6 +221,17 @@ class TrackInspector(QFrame):
         self.combo_instrument.currentIndexChanged.connect(self._on_instrument_changed)
         fm_layout.addWidget(self.combo_instrument)
 
+        channel_row = QHBoxLayout()
+        channel_row.addWidget(QLabel("Canal MIDI :"))
+        self.combo_midi_channel = QComboBox()
+        for channel in range(1, 17):
+            self.combo_midi_channel.addItem(str(channel), channel)
+        self.combo_midi_channel.setToolTip("Canal des notes envoyées à l'instrument (1–16). Configurez la partie correspondante dans le plugin.")
+        self.combo_midi_channel.currentIndexChanged.connect(self._on_midi_channel_changed)
+        channel_row.addWidget(self.combo_midi_channel)
+        fm_layout.addLayout(channel_row)
+
+
         self.btn_edit_instrument = QPushButton("🎹 Ouvrir l'instrument [e]")
         self.btn_edit_instrument.setObjectName("btn_edit_plugin")
         self.btn_edit_instrument.setToolTip("Ouvrir l'interface graphique de l'instrument virtuel sélectionné [e]")
@@ -458,6 +469,9 @@ class TrackInspector(QFrame):
         if not self.current_track:
             return
         track = self.current_track
+        self.combo_midi_channel.blockSignals(True)
+        self.combo_midi_channel.setCurrentIndex(track.midi_channel - 1)
+        self.combo_midi_channel.blockSignals(False)
         self.btn_mute.blockSignals(True)
         self.btn_mute.setChecked(track.muted)
         self.btn_mute.blockSignals(False)
@@ -606,6 +620,11 @@ class TrackInspector(QFrame):
         self.combo_instrument.blockSignals(False)
         self.btn_edit_instrument.setEnabled(bool(self.current_track.plugin_path))
         self._update_instrument_status_label()
+
+    def _on_midi_channel_changed(self, index):
+        if self.current_track and self.current_track.track_type == "midi":
+            self.current_track.midi_channel = index + 1
+            self.track_modified.emit()
 
     def _on_instrument_changed(self, index: int):
         if not self.current_track:
