@@ -149,3 +149,8 @@ La classe [`RecentProjectsManager`](../core/recent_projects.py) (singleton `rece
 2. **Décodage de repli (`_decode_with_miniaudio`)** : Si `libsndfile` échoue sur un conteneur compressé (`MP3`/`M4A`/`AAC`), bascule automatiquement sur `miniaudio.decode_file(..., output_format=SampleFormat.FLOAT32, nchannels=2, sample_rate=target_sr)`.
 3. **Normalisation Stéréo & Rééchantillonnage** : Convertit tout signal mono en stéréo `(N, 2)` `float32` et rééchantillonne vers `target_sr` via `scipy.signal.resample_poly` (ou interpolation linéaire NumPy en fallback).
 4. **Tranches d'onde fidèles 1:1 (`get_slice_waveform_peaks`)** : Calcule les pics d'amplitude exactement sur l'intervalle `[start_offset_beats, start_offset_beats + length_beats]` afin que le redimensionnement d'un clip audio sur la timeline **rogne (trim)** le clip sans jamais déformer ni étirer visuellement la forme d'onde.
+
+
+## Écriture atomique des projets
+
+`save_project` écrit un fichier temporaire dans le dossier de destination, vide le tampon Python, synchronise les données avec `os.fsync`, puis utilise `os.replace`. Une erreur de sérialisation, d'écriture ou de remplacement conserve le fichier précédemment enregistré. Le chemin du projet n'est mis à jour qu'après réussite. Le temporaire est nettoyé sur erreur normale ; une interruption brutale peut laisser un fichier `.novadaw-*.tmp`. Ce mécanisme ne constitue pas un historique de sauvegardes ni une garantie contre une panne matérielle. Le format `.ndaw` 1.1 reste inchangé.

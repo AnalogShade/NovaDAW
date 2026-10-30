@@ -3,6 +3,7 @@ core/serializer.py - Sauvegarde et chargement de projet au format .ndaw (JSON st
 """
 import json
 import os
+import tempfile
 import soundfile as sf
 from core.project import Project, AudioClip
 
@@ -31,8 +32,22 @@ def save_project(project: Project, file_path: str) -> None:
         "tracks": [t.to_dict() for t in project.tracks],
     }
 
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(project_dict, f, indent=2, ensure_ascii=False)
+    # Write beside the destination so replacement stays atomic on the same volume.
+    # A failed serialization or interrupted write must leave the saved project intact.
+    destination = os.path.abspath(file_path)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                         dir=os.path.dirname(destination),
+                                         prefix=".novadaw-", suffix=".tmp", delete=False) as f:
+            temporary_path = f.name
+            json.dump(project_dict, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_path, destination)
+    finally:
+        if temporary_path and os.path.exists(temporary_path):
+            os.unlink(temporary_path)
 
     project.file_path = file_path
 

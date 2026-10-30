@@ -1,6 +1,7 @@
 """
 core/actions/midi.py - Actions de manipulation des notes et clips MIDI pour NovaDAW
 """
+import math
 from typing import Dict, Any, List, Optional, Union
 from core.action_registry import action_registry
 from core.project import Track, MidiClip, MidiNote
@@ -9,34 +10,46 @@ from core.mcp.midi_converters import note_name_to_pitch, pitch_to_note_name
 
 def _resolve_clip(app, clip_id_or_name: Optional[str] = None, track_id_or_name: Optional[str] = None) -> tuple[Optional[Track], Optional[MidiClip]]:
     """Trouve un clip MIDI et sa piste dans le projet."""
-    # 1. Si clip_id_or_name est spécifié, chercher par ID ou par nom
+    tracks = app.project.tracks
+    if track_id_or_name:
+        needle = str(track_id_or_name).strip().lower()
+        tracks = [t for t in tracks if needle in (t.id.lower(), t.name.lower())]
     if clip_id_or_name:
         needle = str(clip_id_or_name).strip().lower()
-        for track in app.project.tracks:
-            if track_id_or_name:
-                t_needle = str(track_id_or_name).strip().lower()
-                if track.id.lower() != t_needle and track.name.lower() != t_needle:
-                    continue
+        for track in tracks:
             for clip in track.clips:
-                if isinstance(clip, MidiClip):
-                    if clip.id.lower() == needle or clip.name.lower() == needle:
-                        return track, clip
-
-    # 2. Si non trouvé ou non spécifié, vérifier le clip actuellement ouvert dans le Piano Roll
-    if hasattr(app, "piano_roll") and app.piano_roll.current_clip:
-        return app.piano_roll.current_track, app.piano_roll.current_clip
-
-    # 3. Fallback : prendre le premier clip MIDI disponible
-    for track in app.project.tracks:
-        if track_id_or_name:
-            t_needle = str(track_id_or_name).strip().lower()
-            if track.id.lower() != t_needle and track.name.lower() != t_needle:
-                continue
+                if isinstance(clip, MidiClip) and needle in (clip.id.lower(), clip.name.lower()):
+                    return track, clip
+        # An explicit unknown target must never modify another clip as a fallback.
+        return None, None
+    roll = getattr(app, "piano_roll", None)
+    current = getattr(roll, "current_clip", None)
+    for track in tracks:
+        if any(c is current for c in track.clips) and isinstance(current, MidiClip):
+            return track, current
+    for track in tracks:
         for clip in track.clips:
             if isinstance(clip, MidiClip):
                 return track, clip
-
     return None, None
+
+
+def _notify_midi_edit(app, track, clip):
+    roll = getattr(app, "piano_roll", None)
+    if roll and roll.current_clip is clip:
+        grid = roll.note_grid
+        if hasattr(grid, "set_clip"):
+            grid.set_clip(clip)
+        grid.update_dimensions()
+        grid.update()
+    if hasattr(app, "timeline_grid"):
+        app.timeline_grid.update_dimensions()
+        app.timeline_grid.update()
+    if hasattr(app, "set_dirty"):
+        app.set_dirty(True)
+    engine = getattr(app, "audio_engine", None)
+    if track and engine and hasattr(engine, "invalidate_track_cache"):
+        engine.invalidate_track_cache(track.id, trigger_async=True)
 
 
 @action_registry.register(
@@ -116,24 +129,26 @@ def add_midi_notes(
     if not clip:
         raise ValueError("Aucun clip MIDI trouvé. Spécifiez un clip existant ou créez-en un avec 'novadaw_create_midi_clip'.")
 
-    if clear_existing:
-        clip.notes.clear()
-
+    pending = []
     added = []
     for n_data in notes:
         raw_pitch = n_data.get("pitch", 60)
         pitch = note_name_to_pitch(raw_pitch)
-        start_beat = max(0.0, float(n_data.get("start_beat", 0.0)))
-        duration = max(0.0625, float(n_data.get("duration", 1.0)))
+        start_beat = float(n_data.get("start_beat", 0.0))
+        duration = float(n_data.get("duration", 1.0))
         velocity = max(1, min(127, int(n_data.get("velocity", 100))))
 
+        if not math.isfinite(start_beat) or not math.isfinite(duration):
+            raise ValueError("La position et la durée doivent être des nombres finis.")
+        start_beat = max(0.0, start_beat)
+        duration = max(0.0625, duration)
         midi_note = MidiNote(
             pitch=pitch,
             start_beat=start_beat,
             duration=duration,
             velocity=velocity
         )
-        clip.notes.append(midi_note)
+        pending.append(midi_note)
         added.append({
             "pitch": pitch,
             "note_name": pitch_to_note_name(pitch),
@@ -141,6 +156,12 @@ def add_midi_notes(
             "duration": duration,
             "velocity": velocity
         })
+
+    # Validate the entire batch before replacing existing musical data.
+    if clear_existing:
+        clip.notes = pending
+    else:
+        clip.notes.extend(pending)
 
     # Mise à jour de la longueur du clip si les notes dépassent
     max_beat = max((n.start_beat + n.duration for n in clip.notes), default=clip.length_beats)
@@ -156,12 +177,7 @@ def add_midi_notes(
             if getattr(app, "is_lower_zone_minimized", False):
                 app._expand_lower_zone()
 
-    if hasattr(app, "timeline_grid"):
-        app.timeline_grid.update_dimensions()
-        app.timeline_grid.update()
-
-    if hasattr(app, "set_dirty"):
-        app.set_dirty(True)
+    _notify_midi_edit(app, track, clip)
 
     return {
         "status": "success",
@@ -186,12 +202,7 @@ def clear_midi_notes(app, clip_id_or_name: Optional[str] = None, track_id_or_nam
     count = len(clip.notes)
     clip.notes.clear()
 
-    if hasattr(app, "piano_roll") and app.piano_roll.current_clip == clip:
-        app.piano_roll.note_grid.update()
-    if hasattr(app, "timeline_grid"):
-        app.timeline_grid.update()
-    if hasattr(app, "set_dirty"):
-        app.set_dirty(True)
+    _notify_midi_edit(app, track, clip)
 
     return {"status": "success", "clip_id": clip.id, "cleared_count": count}
 
@@ -231,12 +242,7 @@ def remove_midi_notes(
 
     clip.notes = remaining
 
-    if hasattr(app, "piano_roll") and app.piano_roll.current_clip == clip:
-        app.piano_roll.note_grid.update()
-    if hasattr(app, "timeline_grid"):
-        app.timeline_grid.update()
-    if hasattr(app, "set_dirty"):
-        app.set_dirty(True)
+    _notify_midi_edit(app, track, clip)
 
     return {"status": "success", "clip_id": clip.id, "removed_count": removed_count, "remaining_count": len(remaining)}
 
@@ -278,11 +284,7 @@ def create_midi_clip(
         if hasattr(app, "lower_zone"):
             app.lower_zone.setCurrentWidget(app.piano_roll)
 
-    if hasattr(app, "timeline_grid"):
-        app.timeline_grid.update_dimensions()
-        app.timeline_grid.update()
-    if hasattr(app, "set_dirty"):
-        app.set_dirty(True)
+    _notify_midi_edit(app, target_track, new_clip)
 
     return {
         "status": "success",
@@ -308,12 +310,7 @@ def transpose_clip(app, semitones: int, clip_id_or_name: Optional[str] = None) -
     for n in clip.notes:
         n.pitch = max(0, min(127, n.pitch + shift))
 
-    if hasattr(app, "piano_roll") and app.piano_roll.current_clip == clip:
-        app.piano_roll.note_grid.update()
-    if hasattr(app, "timeline_grid"):
-        app.timeline_grid.update()
-    if hasattr(app, "set_dirty"):
-        app.set_dirty(True)
+    _notify_midi_edit(app, track, clip)
 
     return {"status": "success", "clip_id": clip.id, "semitones": shift, "notes_count": len(clip.notes)}
 
@@ -328,15 +325,16 @@ def quantize_notes(app, grid_division: float = 0.25, clip_id_or_name: Optional[s
     if not clip:
         raise ValueError("Aucun clip MIDI trouvé.")
 
-    div = max(0.0625, float(grid_division))
+    div = float(grid_division)
+    if not math.isfinite(div):
+        raise ValueError("La résolution de grille doit être un nombre fini.")
+    div = max(0.0625, div)
     for n in clip.notes:
         n.start_beat = round(n.start_beat / div) * div
 
-    if hasattr(app, "piano_roll") and app.piano_roll.current_clip == clip:
-        app.piano_roll.note_grid.update()
-    if hasattr(app, "timeline_grid"):
-        app.timeline_grid.update()
-    if hasattr(app, "set_dirty"):
-        app.set_dirty(True)
+    if clip.notes:
+        clip.length_beats = max(clip.length_beats,
+                                max(n.start_beat + n.duration for n in clip.notes))
+    _notify_midi_edit(app, track, clip)
 
     return {"status": "success", "clip_id": clip.id, "grid_division": div, "notes_count": len(clip.notes)}

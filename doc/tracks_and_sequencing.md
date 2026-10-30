@@ -121,13 +121,24 @@ Inspirés de la palette d'outils de Cubase Pro :
 ## 5. Le Séquenceur MIDI : Piano Roll (`ui/piano_roll.py`)
 
 Intégré dans le premier onglet de la zone inférieure :
-- **Clavier Virtuel Vertical** : Échelle chromatique complète (de C-2 à G8, 128 touches).
+- **Clavier Virtuel Vertical** : Échelle chromatique complète (de C-1 à G9, 128 touches).
   - Le clic sur une touche joue immédiatement la note sur l'instrument assigné à la piste (`AudioEngine.preview_note`).
 - **Grille Piano Roll** :
   - **Clic gauche sur case vide** : Ajoute une note avec la durée et vélocité par défaut.
   - **Clic droit sur une note** : Supprime la note.
   - **Glisser sur le bord droit d'une note** : Ajuste sa durée.
-  - **Sélection multiple par rectangle de sélection**.
+  - **Ctrl+clic** : ajoute ou retire une note de la sélection.
+  - **Ctrl+glisser sur une zone vide** : sélection par rectangle.
+  - **Ctrl+A** : sélectionne toutes les notes ; **Échap** désélectionne.
+  - **Glisser une note sélectionnée / sa poignée droite** : déplace / redimensionne le groupe en préservant les intervalles.
+  - **Flèches gauche/droite** : déplace la sélection d'un pas de grille.
+  - **Flèches haut/bas** : transpose d'un demi-ton ; **Shift+haut/bas** transpose d'une octave.
+  - **Q / bouton Quantifier** : aligne les débuts des notes sélectionnées sur la grille, sans modifier leur durée.
+  - **Vélocité (1–127)** : applique la valeur à la sélection et aux nouvelles notes.
+  - **Ctrl+C / X / V**, **Ctrl+D**, **Suppr** : copie / coupe / colle à la tête de lecture relative au clip, duplique à la suite du groupe et supprime les notes sélectionnées lorsque la grille a le focus. L'arrangement garde ses raccourcis lorsque sa grille a le focus.
+  - **Ctrl+Z**, **Ctrl+Y / Ctrl+Shift+Z** ou boutons Annuler/Rétablir : historique de 100 opérations dans le clip ouvert. Un glisser constitue une seule opération. Changer de clip ou modifier ses notes depuis MCP/enregistrement invalide cet historique pour préserver les modifications externes.
+  - Les créations, déplacements, duplications et collages étendent le clip si nécessaire pour rendre les notes audibles.
+  - **Tout effacer** passe aussi par l'historique ; **Shift+clic** conserve le déplacement de la tête de lecture.
 - **Outils d'Édition Musicale Intégrés** :
   - **Quantification** (`novadaw_quantize_notes`) : Aligne automatiquement les notes sur la grille temporelle (noire, croche, double-croche).
   - **Transposition** (`novadaw_transpose_clip`) : Décale l'ensemble des notes de $\pm N$ demi-tons ou par octave complète ($\pm 12$).

@@ -1589,18 +1589,33 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Outil actif : {tool_labels.get(tool_name, tool_name)}", 2500)
 
     def _on_copy_clip(self):
+        if self.piano_roll.note_grid.hasFocus():
+            self.piano_roll.note_grid.copy_selected()
+            return
         self.timeline_grid.copy_selected_clip()
 
     def _on_cut_clip(self):
+        if self.piano_roll.note_grid.hasFocus():
+            self.piano_roll.note_grid.cut_selected()
+            return
         self.timeline_grid.cut_selected_clip()
 
     def _on_paste_clip(self):
+        if self.piano_roll.note_grid.hasFocus():
+            self.piano_roll.note_grid.paste_notes()
+            return
         self.timeline_grid.paste_clip_at_playhead()
 
     def _on_duplicate_clip(self):
+        if self.piano_roll.note_grid.hasFocus():
+            self.piano_roll.note_grid.duplicate_selected()
+            return
         self.timeline_grid.duplicate_selected_clip()
 
     def _on_delete_clip(self):
+        if self.piano_roll.note_grid.hasFocus():
+            self.piano_roll.note_grid.delete_selected()
+            return
         self.timeline_grid.delete_selected_clip()
 
     def _on_split_playhead(self):
@@ -2020,10 +2035,13 @@ class MainWindow(QMainWindow):
 
     def _on_notes_updated(self):
         """Appelé lors de l'édition d'une note dans le Piano Roll."""
+        self.timeline_grid.update_dimensions()
         self.timeline_grid.update()
         self.set_dirty(True)
         if hasattr(self, "audio_engine") and hasattr(self.audio_engine, "invalidate_track_cache"):
-            self.audio_engine.invalidate_track_cache(self.selected_track_id, trigger_async=True)
+            track = self.piano_roll.current_track
+            if track:
+                self.audio_engine.invalidate_track_cache(track.id, trigger_async=True)
 
     def _on_project_modified(self):
         self.set_dirty(True)

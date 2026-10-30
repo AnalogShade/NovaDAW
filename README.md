@@ -60,6 +60,16 @@ NovaDAW transforme la station de travail audio numérique en un environnement co
 
 ---
 
+## Édition MIDI et protection des projets
+
+Le piano roll couvre les 128 notes MIDI et propose sélection multiple (Ctrl+clic ou Ctrl+glisser), déplacement et redimensionnement groupés, quantification (Q), transposition par flèches, vélocité, copier/coller et duplication des notes. Ctrl+Z et Ctrl+Y annulent/rétablissent les éditions du clip ouvert, y compris « Tout effacer ». Les clips s'allongent lorsque les nouvelles notes dépassent leur fin.
+
+Les sauvegardes utilisent un remplacement atomique du fichier pour préserver la version précédente en cas d'erreur d'écriture. Les actions MIDI/MCP respectent strictement les cibles explicites et valident les lots avant modification.
+
+Voir [les commandes du piano roll](doc/tracks_and_sequencing.md) et [le rapport de validation](doc/editing_workflow_validation.md).
+
+---
+
 ## 🎛️ Fonctionnalités Audio & Studio
 
 - **Console de Mixage Pro (`novadaw.mixer`)** :

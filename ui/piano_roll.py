@@ -4,7 +4,7 @@ ui/piano_roll.py - Séquenceur MIDI / Piano Roll interactif avec clavier virtuel
 from typing import Optional, List, Tuple
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QComboBox, QScrollArea, QFrame, QSplitter, QSizePolicy
+    QComboBox, QScrollArea, QFrame, QSplitter, QSizePolicy, QSpinBox
 )
 from PySide6.QtGui import (
     QPainter, QColor, QPen, QBrush, QFont, QMouseEvent, QWheelEvent, QPolygonF
@@ -114,6 +114,7 @@ class NoteGridWidget(QWidget):
     note_added_or_edited = Signal(int)  # pitch joué (Note-On)
     note_released = Signal(int)         # pitch relâché (Note-Off)
     notes_changed = Signal()
+    selection_changed = Signal()
     seek_requested = Signal(float)       # déplacement curseur
 
     def __init__(self, start_pitch=36, num_pitches=48, row_height=18, parent=None):
@@ -129,6 +130,14 @@ class NoteGridWidget(QWidget):
 
         # Interaction notes
         self.selected_note: Optional[MidiNote] = None
+        self.selected_notes = []
+        self.default_velocity = 100
+        self._undo = []
+        self._redo = []
+        self._known_state = None
+        self._gesture_before = None
+        self._drag_notes = []
+        self._marquee = None
         self._dragging_note = False
         self._resizing_note = False
         self._active_preview_pitch: Optional[int] = None
@@ -139,11 +148,16 @@ class NoteGridWidget(QWidget):
         self._drag_start_dur = 1.0
 
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setToolTip("Ctrl+clic : sélection multiple · Ctrl+glisser : rectangle · "
+                        "Flèches : déplacer/transposer · Shift+↑/↓ : octave · Q : quantifier · "
+                        "Ctrl+Z / Ctrl+Y : annuler/rétablir")
         self.update_dimensions()
 
     def set_playhead(self, beat: float):
-        old_px = int(self.playhead_project_beat * self.pixels_per_beat)
-        new_px = int(beat * self.pixels_per_beat)
+        offset = self.clip.start_beat if self.clip else 0.0
+        old_px = int((self.playhead_project_beat - offset) * self.pixels_per_beat)
+        new_px = int((beat - offset) * self.pixels_per_beat)
         self.playhead_project_beat = beat
         if old_px == new_px:
             return
@@ -157,8 +171,22 @@ class NoteGridWidget(QWidget):
             self.update(new_px - 4, 0, 9, h)
 
     def set_clip(self, clip: Optional[MidiClip]):
+        if self.clip is clip:
+            self._sync_history()
+            self.update_dimensions()
+            self.update()
+            return
+        self._stop_preview()
         self.clip = clip
         self.selected_note = None
+        self.selected_notes = []
+        self._undo.clear()
+        self._redo.clear()
+        self._gesture_before = None
+        self._dragging_note = self._resizing_note = False
+        self._marquee = None
+        self._known_state = self._snapshot()
+        self.selection_changed.emit()
         self.update_dimensions()
         self.update()
 
@@ -198,8 +226,9 @@ class NoteGridWidget(QWidget):
         self.setFixedSize(w, h)
 
     def pitch_at_y(self, y: int) -> int:
-        idx = y // self.row_height
-        return (self.start_pitch + self.num_pitches - 1) - idx
+        idx = int(y) // self.row_height
+        return max(self.start_pitch, min(self.start_pitch + self.num_pitches - 1,
+                                        self.start_pitch + self.num_pitches - 1 - idx))
 
     def y_for_pitch(self, pitch: int) -> int:
         idx = (self.start_pitch + self.num_pitches - 1) - pitch
@@ -223,108 +252,312 @@ class NoteGridWidget(QWidget):
                     return note, is_resize
         return None, False
 
+    def _snapshot(self):
+        if self.clip is None:
+            return None
+        return (self.clip.length_beats,
+                tuple((n.pitch, n.start_beat, n.duration, n.velocity) for n in self.clip.notes))
+
+    def _sync_history(self):
+        # External edits (MCP, recording) must never be overwritten by stale undo.
+        state = self._snapshot()
+        if state != self._known_state:
+            self._undo.clear()
+            self._redo.clear()
+            self._known_state = state
+            self._gesture_before = None
+            self._dragging_note = self._resizing_note = False
+            self._marquee = None
+            self._stop_preview()
+        if self.clip:
+            self.selected_notes = [n for n in self.selected_notes
+                                   if any(n is live for live in self.clip.notes)]
+            if not any(self.selected_note is n for n in self.clip.notes):
+                self.selected_note = None
+
+    def _selection(self):
+        self._sync_history()
+        return self.selected_notes or ([self.selected_note] if self.selected_note else [])
+
+    def _select(self, notes):
+        self.selected_notes = list(notes)
+        self.selected_note = self.selected_notes[-1] if self.selected_notes else None
+        self.selection_changed.emit()
+        self.update()
+
+    def _changed(self):
+        self._known_state = self._snapshot()
+        self.update_dimensions()
+        self.notes_changed.emit()
+        self.update()
+
+    def _commit(self, before):
+        if before == self._snapshot():
+            return
+        self._undo.append(before)
+        del self._undo[:-100]
+        self._redo.clear()
+        self._changed()
+
+    def _restore(self, state):
+        self._stop_preview()
+        self.clip.length_beats, notes = state
+        self.clip.notes = [MidiNote(*values) for values in notes]
+        self._select([])
+        self._changed()
+
+    def undo(self):
+        self._sync_history()
+        if self.clip and self._undo:
+            self._redo.append(self._snapshot())
+            self._restore(self._undo.pop())
+
+    def redo(self):
+        self._sync_history()
+        if self.clip and self._redo:
+            self._undo.append(self._snapshot())
+            self._restore(self._redo.pop())
+
+    def select_all(self):
+        if self.clip:
+            self._select(self.clip.notes)
+
+    def delete_selected(self):
+        notes = self._selection()
+        if not notes:
+            return
+        before = self._snapshot()
+        ids = {id(n) for n in notes}
+        self.clip.notes = [n for n in self.clip.notes if id(n) not in ids]
+        self._select([])
+        self._commit(before)
+
+    def clear_notes(self):
+        if self.clip:
+            self.select_all()
+            self.delete_selected()
+
+    def copy_selected(self):
+        notes = self._selection()
+        if notes:
+            origin = min(n.start_beat for n in notes)
+            self._clipboard = [(n.pitch, n.start_beat - origin, n.duration, n.velocity)
+                               for n in notes]
+
+    def cut_selected(self):
+        if self._selection():
+            self.copy_selected()
+            self.delete_selected()
+
+    def _insert_notes(self, values, beat):
+        if not self.clip or not values:
+            return
+        self._sync_history()
+        before = self._snapshot()
+        notes = [MidiNote(p, max(0.0, beat) + s, d, v) for p, s, d, v in values]
+        self.clip.notes.extend(notes)
+        self.clip.length_beats = max(self.clip.length_beats,
+                                     max(n.start_beat + n.duration for n in notes))
+        self._select(notes)
+        self._commit(before)
+
+    def paste_notes(self):
+        beat = max(0.0, self.playhead_project_beat - self.clip.start_beat) if self.clip else 0.0
+        beat = round(beat / self.snap_beats) * self.snap_beats
+        self._insert_notes(getattr(self, '_clipboard', []), beat)
+
+    def duplicate_selected(self):
+        notes = self._selection()
+        if notes:
+            origin = min(n.start_beat for n in notes)
+            end = max(n.start_beat + n.duration for n in notes)
+            values = [(n.pitch, n.start_beat - origin, n.duration, n.velocity) for n in notes]
+            self._insert_notes(values, end)
+
+    def quantize_selected(self):
+        notes = self._selection()
+        before = self._snapshot()
+        for n in notes:
+            n.start_beat = max(0.0, round(n.start_beat / self.snap_beats) * self.snap_beats)
+        if notes:
+            self.clip.length_beats = max(self.clip.length_beats,
+                                         max(n.start_beat + n.duration for n in notes))
+        self._commit(before)
+
+    def move_selected(self, beats=0.0, semitones=0):
+        notes = self._selection()
+        if not notes:
+            return
+        before = self._snapshot()
+        beats = max(-min(n.start_beat for n in notes), beats)
+        semitones = max(-min(n.pitch for n in notes),
+                        min(127 - max(n.pitch for n in notes), semitones))
+        for n in notes:
+            n.start_beat += beats
+            n.pitch += semitones
+        self.clip.length_beats = max(self.clip.length_beats,
+                                     max(n.start_beat + n.duration for n in notes))
+        self._commit(before)
+
+    def set_velocity(self, value):
+        self.default_velocity = max(1, min(127, int(value)))
+        notes = self._selection()
+        before = self._snapshot()
+        for n in notes:
+            n.velocity = self.default_velocity
+        self._commit(before)
+
+    def _stop_preview(self):
+        if self._active_preview_pitch is not None:
+            pitch = self._active_preview_pitch
+            self._active_preview_pitch = None
+            self.note_released.emit(pitch)
+
+    def event(self, event):
+        # Claim editing shortcuts before window-wide clip actions can consume them.
+        if event.type() == QEvent.ShortcutOverride:
+            modifiers = event.modifiers()
+            ctrl = bool(modifiers & Qt.ControlModifier)
+            if modifiers & (Qt.AltModifier | Qt.MetaModifier):
+                return super().event(event)
+            if (ctrl and event.key() in (Qt.Key_A, Qt.Key_C, Qt.Key_X, Qt.Key_V,
+                                         Qt.Key_D, Qt.Key_Z, Qt.Key_Y)) or (not ctrl and event.key() in (
+                    Qt.Key_Delete, Qt.Key_Backspace, Qt.Key_Left, Qt.Key_Right,
+                    Qt.Key_Up, Qt.Key_Down, Qt.Key_Q, Qt.Key_Escape)):
+                event.accept()
+                return True
+        return super().event(event)
+
+    def keyPressEvent(self, event):
+        if event.modifiers() & (Qt.AltModifier | Qt.MetaModifier):
+            super().keyPressEvent(event)
+            return
+        ctrl = bool(event.modifiers() & Qt.ControlModifier)
+        shift = bool(event.modifiers() & Qt.ShiftModifier)
+        key = event.key()
+        actions = {Qt.Key_A: self.select_all, Qt.Key_C: self.copy_selected,
+                   Qt.Key_X: self.cut_selected, Qt.Key_V: self.paste_notes,
+                   Qt.Key_D: self.duplicate_selected, Qt.Key_Y: self.redo,
+                   Qt.Key_Z: self.redo if shift else self.undo}
+        if ctrl and key in actions:
+            actions[key]()
+        elif key in (Qt.Key_Delete, Qt.Key_Backspace) and not ctrl:
+            self.delete_selected()
+        elif key == Qt.Key_Q and not ctrl:
+            self.quantize_selected()
+        elif key in (Qt.Key_Up, Qt.Key_Down) and not ctrl:
+            self.move_selected(semitones=(12 if shift else 1) * (1 if key == Qt.Key_Up else -1))
+        elif key in (Qt.Key_Left, Qt.Key_Right) and not ctrl:
+            self.move_selected(beats=self.snap_beats * (1 if key == Qt.Key_Right else -1))
+        elif key == Qt.Key_Escape and not ctrl:
+            self._select([])
+        else:
+            super().keyPressEvent(event)
+            return
+        event.accept()
+
     def mousePressEvent(self, event: QMouseEvent):
         if not self.clip:
             return
-
-        x = event.position().x()
-        y = event.position().y()
-
-        # Shift + Clic gauche : Déplace le curseur de lecture directement à cet endroit !
-        if event.button() == Qt.LeftButton and (event.modifiers() & Qt.ShiftModifier):
-            rel_beat = max(0.0, x / self.pixels_per_beat)
-            abs_beat = (self.clip.start_beat if self.clip else 0.0) + rel_beat
-            self.seek_requested.emit(abs_beat)
-            self.update()
+        self.setFocus(Qt.MouseFocusReason)
+        self._sync_history()
+        x, y = event.position().x(), event.position().y()
+        if event.button() == Qt.LeftButton and event.modifiers() & Qt.ShiftModifier:
+            self.seek_requested.emit(self.clip.start_beat + max(0.0, x / self.pixels_per_beat))
             return
-
         note, is_resize = self._get_note_at(x, y)
-
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.RightButton:
             if note:
-                self.selected_note = note
-                self._drag_start_x = x
-                self._drag_start_y = y
-                self._drag_start_beat = note.start_beat
-                self._drag_start_pitch = note.pitch
-                self._drag_start_dur = note.duration
-
-                if is_resize:
-                    self._resizing_note = True
+                before = self._snapshot()
+                self.clip.notes = [n for n in self.clip.notes if n is not note]
+                self._select(n for n in self.selected_notes if n is not note)
+                self._commit(before)
+            return
+        if event.button() != Qt.LeftButton:
+            return
+        if event.modifiers() & Qt.ControlModifier:
+            if note:
+                if any(n is note for n in self.selected_notes):
+                    self._select(n for n in self.selected_notes if n is not note)
                 else:
-                    self._dragging_note = True
-                    self._active_preview_pitch = note.pitch
-                    self.note_added_or_edited.emit(note.pitch)
+                    self._select([*self.selected_notes, note])
             else:
-                # Créer une nouvelle note au clic !
-                pitch = self.pitch_at_y(y)
-                raw_beat = x / self.pixels_per_beat
-                # Magnétisme / Snap
-                snapped_beat = round(raw_beat / self.snap_beats) * self.snap_beats
-                # Durée par défaut = 1 temps ou valeur du snap
-                duration = max(self.snap_beats, 1.0)
-
-                new_note = MidiNote(pitch=pitch, start_beat=snapped_beat, duration=duration)
-                self.clip.notes.append(new_note)
-                self.selected_note = new_note
-                self._active_preview_pitch = pitch
-                self.note_added_or_edited.emit(pitch)
-                self.notes_changed.emit()
-            self.update()
-
-        elif event.button() == Qt.RightButton:
-            # Clic droit sur une note = Suppression immédiate !
-            if note:
-                self.clip.notes = [n for n in self.clip.notes if n != note]
-                if self.selected_note == note:
-                    self.selected_note = None
-                self.notes_changed.emit()
-                self.update()
+                self._select([])
+                self._marquee = QRectF(QPointF(x, y), QPointF(x, y))
+                self._drag_start_x, self._drag_start_y = x, y
+            return
+        self._gesture_before = self._snapshot()
+        if note:
+            if not any(n is note for n in self.selected_notes):
+                self._select([note])
+            self.selected_note = note
+            self._drag_start_x, self._drag_start_y = x, y
+            self._drag_start_pitch = self.pitch_at_y(y)
+            self._drag_start_beat = note.start_beat
+            self._drag_start_dur = note.duration
+            self._drag_notes = [(n, n.start_beat, n.pitch, n.duration) for n in self.selected_notes]
+            self._resizing_note = is_resize
+            self._dragging_note = not is_resize
+            if not is_resize:
+                self._active_preview_pitch = note.pitch
+                self.note_added_or_edited.emit(note.pitch)
+        else:
+            beat = max(0.0, round(x / self.pixels_per_beat / self.snap_beats) * self.snap_beats)
+            # Clicking beyond the clip grows it, so added notes are always audible.
+            note = MidiNote(self.pitch_at_y(y), beat, max(self.snap_beats, 1.0), self.default_velocity)
+            self.clip.notes.append(note)
+            self.clip.length_beats = max(self.clip.length_beats, beat + note.duration)
+            self._select([note])
+            self._active_preview_pitch = note.pitch
+            self.note_added_or_edited.emit(note.pitch)
+            self._changed()
+        self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent):
-        x = event.position().x()
-        y = event.position().y()
-
-        if self._dragging_note and self.selected_note:
-            delta_beat = (x - self._drag_start_x) / self.pixels_per_beat
-            new_beat = max(0.0, round((self._drag_start_beat + delta_beat) / self.snap_beats) * self.snap_beats)
-            new_pitch = self.pitch_at_y(y)
-
-            if self.selected_note.pitch != new_pitch:
-                if self._active_preview_pitch is not None:
-                    self.note_released.emit(self._active_preview_pitch)
-                self._active_preview_pitch = new_pitch
-                self.note_added_or_edited.emit(new_pitch)
-
-            self.selected_note.start_beat = new_beat
-            self.selected_note.pitch = new_pitch
-            self.notes_changed.emit()
-            self.update()
-
-        elif self._resizing_note and self.selected_note:
-            delta_beat = (x - self._drag_start_x) / self.pixels_per_beat
-            new_dur = max(self.snap_beats, round((self._drag_start_dur + delta_beat) / self.snap_beats) * self.snap_beats)
-            self.selected_note.duration = new_dur
-            self.notes_changed.emit()
-            self.update()
-
-        else:
-            _, is_resize = self._get_note_at(x, y)
-            if is_resize:
-                self.setCursor(Qt.SizeHorCursor)
+        x, y = event.position().x(), event.position().y()
+        if self._marquee is not None:
+            self._marquee = QRectF(QPointF(self._drag_start_x, self._drag_start_y),
+                                   QPointF(x, y)).normalized()
+            self._select(n for n in self.clip.notes if self._marquee.intersects(QRectF(
+                n.start_beat * self.pixels_per_beat, self.y_for_pitch(n.pitch),
+                n.duration * self.pixels_per_beat, self.row_height)))
+        elif (self._dragging_note or self._resizing_note) and self.selected_note:
+            before = self._snapshot()
+            delta = (x - self._drag_start_x) / self.pixels_per_beat
+            if self._dragging_note:
+                delta = round((self._drag_start_beat + delta) / self.snap_beats) * self.snap_beats - self._drag_start_beat
+                delta = max(-min(s for _, s, _, _ in self._drag_notes), delta)
+                pitch_delta = self.pitch_at_y(y) - self._drag_start_pitch
+                pitch_delta = max(-min(p for _, _, p, _ in self._drag_notes),
+                                  min(127 - max(p for _, _, p, _ in self._drag_notes), pitch_delta))
+                for n, start, pitch, _ in self._drag_notes:
+                    n.start_beat, n.pitch = start + delta, pitch + pitch_delta
+                if self.selected_note.pitch != self._active_preview_pitch:
+                    self._stop_preview()
+                    self._active_preview_pitch = self.selected_note.pitch
+                    self.note_added_or_edited.emit(self.selected_note.pitch)
             else:
-                self.setCursor(Qt.ArrowCursor)
+                delta = round((self._drag_start_dur + delta) / self.snap_beats) * self.snap_beats - self._drag_start_dur
+                delta = max(self.snap_beats - min(d for _, _, _, d in self._drag_notes), delta)
+                for n, _, _, duration in self._drag_notes:
+                    n.duration = duration + delta
+            self.clip.length_beats = max(self._gesture_before[0],
+                                         max(n.start_beat + n.duration for n in self.clip.notes))
+            if before != self._snapshot():
+                self._changed()
+        else:
+            _, resize = self._get_note_at(x, y)
+            self.setCursor(Qt.SizeHorCursor if resize else Qt.ArrowCursor)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
-        if self._active_preview_pitch is not None:
-            released_pitch = self._active_preview_pitch
-            self._active_preview_pitch = None
-            self.note_released.emit(released_pitch)
-        if self._dragging_note or self._resizing_note:
-            self._dragging_note = False
-            self._resizing_note = False
-            self.notes_changed.emit()
-            self.update()
+        self._stop_preview()
+        self._dragging_note = self._resizing_note = False
+        self._marquee = None
+        if self._gesture_before is not None:
+            # One drag is one undo operation, even when many mouse moves occurred.
+            before, self._gesture_before = self._gesture_before, None
+            self._commit(before)
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -379,7 +612,7 @@ class NoteGridWidget(QWidget):
                 w = max(4.0, note.duration * self.pixels_per_beat - 2)
                 h = self.row_height - 2
 
-                is_sel = (self.selected_note == note)
+                is_sel = any(note is n for n in self.selected_notes) or self.selected_note is note
                 note_rect = QRectF(x, y, w, h)
 
                 base_col = QColor("#38bdf8")
@@ -398,6 +631,11 @@ class NoteGridWidget(QWidget):
                     font = QFont("Segoe UI", 8, QFont.Bold)
                     painter.setFont(font)
                     painter.drawText(int(x) + 4, int(y) + self.row_height - 5, pitch_to_name(note.pitch))
+
+        if self._marquee is not None:
+            painter.setPen(QPen(QColor("#38bdf8"), 1, Qt.DashLine))
+            painter.setBrush(QColor(56, 189, 248, 40))
+            painter.drawRect(self._marquee)
 
         # 5. Tête de lecture / Curseur synchronisé avec la timeline principale
         if self.clip:
@@ -446,8 +684,9 @@ class PianoRoll(QWidget):
 
         self.lbl_title = QLabel("🎹 PIANO ROLL : Aucun bloc sélectionné")
         self.lbl_title.setStyleSheet("font-weight: bold; color: #38bdf8; font-size: 12px;")
-        self.lbl_title.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        tb_layout.addWidget(self.lbl_title)
+        self.lbl_title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.lbl_title.setMinimumWidth(160)
+        tb_layout.addWidget(self.lbl_title, 1)
 
         # Sélecteur de quantification / Snap
         lbl_snap = QLabel("Grille (Snap) :")
@@ -477,8 +716,6 @@ class PianoRoll(QWidget):
         self.btn_zoom_in.setToolTip("Zoomer (Ctrl + Molette haut)")
         self.btn_zoom_in.clicked.connect(self.zoom_in)
         tb_layout.addWidget(self.btn_zoom_in)
-
-        tb_layout.addStretch()
 
         # Bouton Ouvrir Interface Plugin
         self.btn_open_instrument = QPushButton("⚡ Éditer Instrument [e]")
@@ -515,6 +752,38 @@ class PianoRoll(QWidget):
 
         layout.addWidget(toolbar)
 
+        edit_bar = QFrame()
+        edit_layout = QHBoxLayout(edit_bar)
+        edit_layout.setContentsMargins(8, 2, 8, 2)
+        edit_layout.setSpacing(6)
+        for label, tip, method in [
+            ("Annuler", "Annuler dans le clip ouvert (Ctrl+Z)", "undo"),
+            ("Rétablir", "Rétablir (Ctrl+Y / Ctrl+Shift+Z)", "redo"),
+            ("Tout sélectionner", "Sélectionner toutes les notes (Ctrl+A)", "select_all"),
+            ("Quantifier", "Aligner les notes sélectionnées sur la grille (Q)", "quantize_selected"),
+            ("− Octave", "Transposer la sélection (Shift+↓)", None),
+            ("+ Octave", "Transposer la sélection (Shift+↑)", None),
+        ]:
+            button = QPushButton(label)
+            button.setToolTip(tip)
+            button.setFocusPolicy(Qt.NoFocus)
+            if method:
+                button.clicked.connect(lambda checked=False, m=method: getattr(self.note_grid, m)())
+            else:
+                shift = -12 if label.startswith("−") else 12
+                button.clicked.connect(lambda checked=False, s=shift: self.note_grid.move_selected(semitones=s))
+            edit_layout.addWidget(button)
+        edit_layout.addWidget(QLabel("Vélocité :"))
+        self.spin_velocity = QSpinBox()
+        self.spin_velocity.setMinimumWidth(72)
+        self.spin_velocity.setRange(1, 127)
+        self.spin_velocity.setValue(100)
+        self.spin_velocity.setToolTip("Vélocité des notes sélectionnées et des nouvelles notes")
+        self.spin_velocity.valueChanged.connect(lambda value: self.note_grid.set_velocity(value))
+        edit_layout.addWidget(self.spin_velocity)
+        edit_layout.addStretch()
+        layout.addWidget(edit_bar)
+
         # Zone de défilement pour le piano + grille synchronisés
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
@@ -528,8 +797,8 @@ class PianoRoll(QWidget):
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
 
-        self.piano_keys = PianoKeysWidget(start_pitch=36, num_pitches=48, row_height=18)
-        self.note_grid = NoteGridWidget(start_pitch=36, num_pitches=48, row_height=18)
+        self.piano_keys = PianoKeysWidget(start_pitch=0, num_pitches=128, row_height=18)
+        self.note_grid = NoteGridWidget(start_pitch=0, num_pitches=128, row_height=18)
 
         # Raccordements signaux audio & transport
         self.piano_keys.key_pressed.connect(self._play_sound)
@@ -537,6 +806,7 @@ class PianoRoll(QWidget):
         self.note_grid.note_added_or_edited.connect(self._play_sound)
         self.note_grid.note_released.connect(self._stop_sound)
         self.note_grid.notes_changed.connect(self.notes_updated.emit)
+        self.note_grid.selection_changed.connect(self._sync_velocity)
         self.note_grid.seek_requested.connect(self.seek_requested.emit)
 
         content_layout.addWidget(self.piano_keys)
@@ -546,7 +816,7 @@ class PianoRoll(QWidget):
         layout.addWidget(self.scroll_area)
 
         # Centrer le défilement vertical vers le milieu (Do4 / C4)
-        self.scroll_area.verticalScrollBar().setValue(200)
+        self.scroll_area.verticalScrollBar().setValue(self.note_grid.y_for_pitch(72))
 
     def eventFilter(self, watched, event):
         """Intercepte Ctrl + Molette partout dans la zone de défilement du Piano Roll pour zoomer"""
@@ -573,7 +843,10 @@ class PianoRoll(QWidget):
 
     def set_active_track(self, track: Optional[Track]):
         """Lie le Piano Roll et son clavier virtuel à la piste active sélectionnée"""
+        if self.current_track is not track:
+            self._release_preview_notes()
         self.current_track = track
+        self.btn_open_instrument.setEnabled(bool(track and track.track_type == "midi" and track.plugin_path))
         if not track:
             self.current_clip = None
             self.lbl_title.setText("🎹 PIANO ROLL : Aucune piste sélectionnée")
@@ -625,6 +898,8 @@ class PianoRoll(QWidget):
             self.set_active_track(None)
             return
 
+        if self.current_track is not track:
+            self._release_preview_notes()
         self.current_track = track
         self.current_clip = clip
 
@@ -674,11 +949,25 @@ class PianoRoll(QWidget):
         self.set_active_track(None)
 
     def _play_sound(self, pitch: int):
+        velocity = self.note_grid.default_velocity
+        if self.note_grid.selected_note is not None:
+            velocity = self.note_grid.selected_note.velocity
         if self.audio_engine:
             if hasattr(self.audio_engine, "start_live_note"):
-                self.audio_engine.start_live_note(pitch, velocity=100, track=self.current_track)
+                self.audio_engine.start_live_note(pitch, velocity=velocity, track=self.current_track)
             else:
-                self.audio_engine.preview_note(pitch, duration_sec=0.35, velocity=100, track=self.current_track)
+                self.audio_engine.preview_note(pitch, duration_sec=0.35, velocity=velocity, track=self.current_track)
+
+    def _release_preview_notes(self):
+        self.note_grid._stop_preview()
+        if self.piano_keys.active_pitch is not None:
+            self._stop_sound(self.piano_keys.active_pitch)
+            self.piano_keys.active_pitch = None
+            self.piano_keys.update()
+
+    def hideEvent(self, event):
+        self._release_preview_notes()
+        super().hideEvent(event)
 
     def _stop_sound(self, pitch: int):
         if self.audio_engine and hasattr(self.audio_engine, "stop_live_note"):
@@ -689,8 +978,13 @@ class PianoRoll(QWidget):
         if 0 <= idx < len(snaps):
             self.note_grid.set_snap(snaps[idx])
 
+    def _sync_velocity(self):
+        note = self.note_grid.selected_note
+        value = note.velocity if note else self.note_grid.default_velocity
+        self.spin_velocity.blockSignals(True)
+        self.spin_velocity.setValue(value)
+        self.spin_velocity.blockSignals(False)
+
     def _clear_notes(self):
-        if self.current_clip:
-            self.current_clip.notes.clear()
-            self.note_grid.update()
-            self.notes_updated.emit()
+        self.note_grid.setFocus(Qt.OtherFocusReason)
+        self.note_grid.clear_notes()
