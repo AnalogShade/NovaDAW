@@ -1,5 +1,10 @@
 # 📚 Spécifications et Documentation Technique NovaDAW
 
+Pour apprendre à utiliser le logiciel, ouvrez **Aide / F1** dans Nova DAW.
+Le [rapport d’audit du manuel intégré](help_audit.md) décrit sa couverture,
+ses sources de vérification et ses tests. Les documents ci-dessous restent
+des références techniques destinées au développement.
+
 Bienvenue dans le centre de spécifications techniques et d'architecture de **NovaDAW**.
 
 Ce dossier rassemble l'ensemble des spécifications fonctionnelles, architecturales et techniques du projet. Il sert de **source de vérité unique et de guide d'ingénierie** pour les développeurs et les agents d'intelligence artificielle (Claude, Codex, Gemini, Antigravity, Cursor) afin de concilier un développement à haute vélocité (*Vibe Coding*) avec une **cohérence modulaire exemplaire**, une **intentionnalité claire** de chaque changement et la **non-régression** des fonctionnalités.

@@ -1,387 +1,179 @@
-"""
-ui/help_dialog.py - Boîte de dialogue d'aide et documentation intégrée pour NovaDAW
-"""
-import os
+"""Centre d'aide hors ligne, consultable pendant l'édition du projet."""
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QDialog, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QLabel,
-    QPushButton, QTextBrowser, QTableWidget, QTableWidgetItem,
-    QHeaderView, QFrame
+    QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QPushButton, QSplitter, QTextBrowser, QVBoxLayout,
 )
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QColor, QPixmap, QIcon
+from ui.help_content import TOPIC_BY_ID, render_topic, search_topics
 
 
 class HelpDialog(QDialog):
-    """Fenêtre d'aide contenant les raccourcis clavier et le manuel d'utilisation"""
+    """Le manuel ne déclenche aucune action projet ou audio."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Documentation & Raccourcis Clavier - NovaDAW")
-        self.resize(780, 580)
-        self.setMinimumSize(640, 480)
+        self.setWindowTitle("Aide — Manuel Nova DAW")
+        self.resize(1000, 720)
+        self.setMinimumSize(480, 360)
         self.setSizeGripEnabled(True)
+        self.current_topic_id = None
+        self._history = []
+        self._history_index = -1
         self.setStyleSheet("""
-            QDialog {
-                background-color: #14151c;
+            QDialog { background: #14151c; color: #e2e8f0; }
+            QLabel { color: #cbd5e1; }
+            QLineEdit, QListWidget, QTextBrowser, QComboBox {
+                background: #171822; color: #e2e8f0; border: 1px solid #34384b;
+                border-radius: 4px; padding: 8px; font-size: 13px;
             }
-            QTabWidget::pane {
-                border: 1px solid #282a38;
-                background-color: #171822;
-                border-radius: 4px;
-            }
-            QTabBar::tab {
-                background: #1e202c;
-                border: 1px solid #282a38;
-                border-bottom: none;
-                padding: 8px 18px;
-                margin-right: 3px;
-                border-top-left-radius: 5px;
-                border-top-right-radius: 5px;
-                color: #94a3b8;
-                font-weight: 600;
-            }
-            QTabBar::tab:selected {
-                background: #252834;
-                color: #38bdf8;
-                border-bottom: 2px solid #38bdf8;
-            }
-            QTableWidget {
-                background-color: #171822;
-                border: none;
-                gridline-color: #262838;
-                color: #e2e8f0;
-            }
-            QTableWidget::item {
-                padding: 6px 12px;
-                border-bottom: 1px solid #202230;
-            }
-            QTableWidget::item:selected {
-                background-color: #0284c7;
-                color: #ffffff;
-            }
-            QHeaderView::section {
-                background-color: #1c1e2a;
-                color: #38bdf8;
-                font-weight: bold;
-                padding: 6px 10px;
-                border: none;
-                border-bottom: 1px solid #2d3042;
-            }
-            QTextBrowser {
-                background-color: #171822;
-                border: none;
-                color: #e2e8f0;
-                padding: 16px;
-                font-size: 13px;
-                line-height: 1.6;
+            QListWidget::item { padding: 8px 4px; }
+            QListWidget::item:selected { background: #164e63; color: #ffffff; }
+            QPushButton { background: #252834; color: #e2e8f0;
+                border: 1px solid #475569; border-radius: 4px; padding: 6px 10px; }
+            QPushButton:hover { background: #164e63; }
+            QPushButton:disabled { color: #64748b; }
+            QPushButton:focus, QLineEdit:focus, QListWidget:focus, QTextBrowser:focus {
+                border: 2px solid #38bdf8;
             }
         """)
-
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        title = QLabel("Nova DAW — Apprendre et créer")
+        title.setWordWrap(True)
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #38bdf8;")
+        layout.addWidget(title)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Rechercher dans tout le manuel… (Ctrl+F)")
+        self.search.setAccessibleName("Rechercher dans tout le manuel")
+        self.search.setClearButtonEnabled(True)
+        layout.addWidget(self.search)
+        self.compact_topics = QComboBox()
+        self.compact_topics.setAccessibleName("Choisir un chapitre ou un résultat")
+        self.compact_topics.setMinimumWidth(0)
+        self.compact_topics.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.compact_topics.setMinimumContentsLength(12)
+        self.compact_topics.hide()
+        layout.addWidget(self.compact_topics)
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.topics = QListWidget()
+        self.topics.setAccessibleName("Chapitres et résultats de recherche")
+        self.topics.setWordWrap(True)
+        self.topics.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.topics.setMinimumWidth(130)
+        self.browser = QTextBrowser()
+        self.browser.setAccessibleName("Contenu du manuel et table des matières")
+        self.browser.setOpenLinks(False)
+        self.browser.setOpenExternalLinks(False)
+        self.browser.setMinimumWidth(220)
+        self.splitter.addWidget(self.topics)
+        self.splitter.addWidget(self.browser)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([260, 700])
+        self.splitter.setChildrenCollapsible(False)
+        layout.addWidget(self.splitter, 1)
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        self.status.setAccessibleName("État de la recherche")
+        layout.addWidget(self.status)
+        buttons = QHBoxLayout()
+        self.back_button = QPushButton("← Précédent")
+        self.forward_button = QPushButton("Suivant →")
+        self.home_button = QPushButton("Accueil")
+        self.close_button = QPushButton("Fermer")
+        for button in (self.back_button, self.forward_button, self.home_button, self.close_button):
+            button.setAutoDefault(False)
+            buttons.addWidget(button)
+        layout.addLayout(buttons)
+        self.search.textChanged.connect(self._filter)
+        self.search.returnPressed.connect(self._open_first_result)
+        self.topics.currentItemChanged.connect(self._selected)
+        self.compact_topics.activated.connect(
+            lambda index: self.show_topic(self.compact_topics.itemData(index)))
+        self.browser.anchorClicked.connect(self._link_clicked)
+        self.back_button.clicked.connect(lambda: self._move_history(-1))
+        self.forward_button.clicked.connect(lambda: self._move_history(1))
+        self.home_button.clicked.connect(lambda: self.show_topic("welcome"))
+        self.close_button.clicked.connect(self.close)
+        for key, callback in (("Ctrl+F", self.search.setFocus),
+                              ("Alt+Left", lambda: self._move_history(-1)),
+                              ("Alt+Right", lambda: self._move_history(1))):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.activated.connect(callback)
+        self._filter("")
+        self.show_topic("welcome")
 
-        # En-tête
-        header_layout = QHBoxLayout()
-        lbl_title = QLabel("🎵 NovaDAW — Centre d'Aide & Documentation")
-        lbl_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #38bdf8;")
-        header_layout.addWidget(lbl_title)
-        header_layout.addStretch()
-        layout.addLayout(header_layout)
+    def _filter(self, query):
+        results = search_topics(query)
+        self.topics.blockSignals(True)
+        self.topics.clear()
+        self.compact_topics.clear()
+        last_category = None
+        for topic in results:
+            self.compact_topics.addItem(f"{topic.category} — {topic.title}", topic.id)
+            if topic.category != last_category:
+                header = QListWidgetItem(topic.category.upper())
+                header.setFlags(Qt.NoItemFlags)
+                self.topics.addItem(header)
+                last_category = topic.category
+            item = QListWidgetItem(topic.title)
+            item.setData(Qt.UserRole, topic.id)
+            self.topics.addItem(item)
+            if topic.id == self.current_topic_id:
+                self.topics.setCurrentItem(item)
+        self.topics.blockSignals(False)
+        self.compact_topics.setCurrentIndex(self.compact_topics.findData(self.current_topic_id))
+        self.status.setText(
+            f"{len(results)} chapitre(s) — Entrée ouvre le premier résultat."
+            if results else "Aucun résultat. Essayez moins de mots, ou effacez la recherche.")
 
-        # Onglets
-        tabs = QTabWidget()
+    def _open_first_result(self):
+        for index in range(self.topics.count()):
+            item = self.topics.item(index)
+            if item.data(Qt.UserRole):
+                self.topics.setCurrentItem(item)
+                self.show_topic(item.data(Qt.UserRole))
+                self.browser.setFocus()
+                return
 
-        # Onglet 1 : Raccourcis Clavier
-        tabs.addTab(self._create_shortcuts_tab(), "⌨️ Raccourcis Clavier & Souris")
+    def _selected(self, item, previous):
+        if item and item.data(Qt.UserRole):
+            self.show_topic(item.data(Qt.UserRole))
 
-        # Onglet 2 : Guide des Fonctionnalités
-        tabs.addTab(self._create_guide_tab(), "📖 Guide des Fonctionnalités")
+    def show_topic(self, topic_id, *, remember=True):
+        if topic_id not in TOPIC_BY_ID:
+            return
+        if remember and topic_id != self.current_topic_id:
+            self._history = self._history[:self._history_index + 1]
+            self._history.append(topic_id)
+            self._history_index = len(self._history) - 1
+        self.current_topic_id = topic_id
+        self.browser.setHtml(render_topic(TOPIC_BY_ID[topic_id]))
+        self.topics.blockSignals(True)
+        self.topics.setCurrentRow(-1)
+        for index in range(self.topics.count()):
+            if self.topics.item(index).data(Qt.UserRole) == topic_id:
+                self.topics.setCurrentRow(index)
+                break
+        self.topics.blockSignals(False)
+        self.compact_topics.setCurrentIndex(self.compact_topics.findData(topic_id))
+        self.back_button.setEnabled(self._history_index > 0)
+        self.forward_button.setEnabled(self._history_index + 1 < len(self._history))
 
-        # Onglet 3 : À propos
-        tabs.addTab(self._create_about_tab(), "ℹ️ À Propos")
+    def _move_history(self, delta):
+        index = self._history_index + delta
+        if 0 <= index < len(self._history):
+            self._history_index = index
+            self.show_topic(self._history[index], remember=False)
 
-        layout.addWidget(tabs)
+    def _link_clicked(self, url: QUrl):
+        if url.scheme() == "help":
+            self.show_topic(url.path())
+        elif not url.scheme() and url.fragment():
+            self.browser.scrollToAnchor(url.fragment())
 
-        # Bouton Fermer
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        btn_close = QPushButton("Fermer")
-        btn_close.setFixedWidth(100)
-        btn_close.setStyleSheet("""
-            QPushButton {
-                background-color: #0284c7;
-                color: #ffffff;
-                border: none;
-                border-radius: 4px;
-                padding: 6px 16px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #0369a1;
-            }
-        """)
-        btn_close.clicked.connect(self.accept)
-        btn_layout.addWidget(btn_close)
-        layout.addLayout(btn_layout)
-
-    def _create_shortcuts_tab(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(8, 8, 8, 8)
-
-        shortcuts = [
-            # Catégorie Transport
-            ("Espace", "Lecture / Pause du morceau", "Transport"),
-            ("0 ou Num 0", "Arrêt (Stop) et retour au point de départ", "Transport"),
-            ("Home / Début", "Déplacer la tête de lecture à la Mesure 1 (début absolu)", "Transport"),
-            ("End / Fin", "Déplacer la tête de lecture à la fin du dernier bloc", "Transport"),
-            ("Bouton ⏪ (Maintien)", "Rembobiner en continu dans le morceau", "Transport"),
-            ("Bouton ⏩ (Maintien)", "Avancer rapidement en continu dans le morceau", "Transport"),
-            ("L", "Activer / Désactiver la lecture en boucle (Loop)", "Transport"),
-            ("Glisser poignées L / R", "Ajuster interactivement le début ou la fin de la boucle", "Transport"),
-            ("Maj + Clic-Glisser sur règle", "Définir rapidement une nouvelle région de boucle", "Transport"),
-            
-            # Catégorie Projet & Fichiers
-            ("Ctrl + N", "Créer un Nouveau Projet", "Projet"),
-            ("Ctrl + O", "Ouvrir un Projet existant (.ndaw)", "Projet"),
-            ("Ctrl + S", "Enregistrer le Projet actuel", "Projet"),
-            ("Ctrl + Shift + S", "Enregistrer le Projet sous un nouveau nom", "Projet"),
-            ("Ctrl + E", "⚡ Exporter le mixage audio complet en fichier WAV", "Projet"),
-            ("Ctrl + Q", "Quitter l'application", "Projet"),
-            
-            # Catégorie Édition & Outils
-            ("1", "Outil Pointeur (Sélection & Déplacement)", "Édition"),
-            ("2", "Outil Scinder / Ciseaux (Découper un clip au clic)", "Édition"),
-            ("3", "Outil Gomme (Supprimer un clip au clic)", "Édition"),
-            ("Ctrl + B ou S", "Scinder le clip sélectionné à la tête de lecture", "Édition"),
-            ("Ctrl + C", "Copier le clip sélectionné", "Édition"),
-            ("Ctrl + X", "Couper le clip sélectionné", "Édition"),
-            ("Ctrl + V", "Coller le clip à la position de la tête de lecture", "Édition"),
-            ("Ctrl + D", "Dupliquer le clip sélectionné immédiatement à sa suite", "Édition"),
-            ("Suppr / Backspace", "Supprimer le clip sélectionné", "Édition"),
-            ("J", "Activer / Désactiver le magnétisme de grille (Snap)", "Édition"),
-            ("Ctrl + + / Ctrl + -", "Zoom horizontal avant / arrière sur la timeline", "Affichage"),
-            ("Ctrl + 0", "Réinitialiser le zoom horizontal de la timeline (100%)", "Affichage"),
-
-            # Catégorie Clavier Musical Virtuel (Musical Typing)
-            ("Ctrl + K", "🎹 Activer / Désactiver le Clavier Musical Virtuel (Musical Typing)", "Clavier Musical"),
-            ("Touches A - K & W - O", "Jouer les notes en direct au clavier d'ordinateur (Do, Ré, Mi, etc.)", "Clavier Musical"),
-            ("Z / X", "Descendre / Monter d'une octave au clavier musical", "Clavier Musical"),
-            ("C / V", "Diminuer / Augmenter la vélocité des notes jouées", "Clavier Musical"),
-            
-            # Catégorie Pistes & Timeline
-            ("Ctrl + T", "Ajouter une nouvelle piste (MIDI ou Audio)", "Pistes & Timeline"),
-            ("Glisser bord inférieur de piste", "Redimensionner interactivement la hauteur d'une piste (ou sur la timeline)", "Pistes & Timeline"),
-            ("Shift + Glisser bord de piste", "Redimensionner simultanément la hauteur de toutes les pistes", "Pistes & Timeline"),
-            ("Ctrl + Alt + ↑ / ↓", "Zoomer / Dézoomer la hauteur de toutes les pistes", "Pistes & Timeline"),
-            ("Ctrl + Alt + 0", "Réinitialiser la hauteur des pistes à la valeur par défaut (76px)", "Pistes & Timeline"),
-            ("Glisser séparateur latéral", "Ajuster la largeur de l'inspecteur / en-têtes de pistes à gauche", "Interface"),
-            ("Bouton ◀ / ▶", "Masquer ou afficher rapidement le volet inspecteur / en-têtes à gauche", "Interface"),
-            ("Double-clic sur piste vide", "Créer automatiquement un nouveau bloc/clip sur la mesure ou sur la boucle", "Pistes & Timeline"),
-            ("Double-clic sur un bloc", "Ouvrir l'éditeur correspondant (Piano Roll pour MIDI, Inspecteur pour Audio)", "Pistes & Timeline"),
-            ("Glisser un bloc", "Déplacer le bloc temporellement sur la timeline (avec magnétisme)", "Pistes & Timeline"),
-            ("Glisser le bord droit d'un bloc", "Redimensionner la longueur du bloc (rognage audio 1:1 sans distorsion)", "Pistes & Timeline"),
-            ("Clic droit sur un bloc", "Menu contextuel : scinder, copier, couper, supprimer", "Pistes & Timeline"),
-            ("Shift + Glisser sur la règle", "Définir rapidement la région de boucle [L / R]", "Pistes & Timeline"),
-            
-            # Catégorie Piano Roll (Séquenceur MIDI)
-            ("Clic sur les touches du piano", "Jouer et prévisualiser immédiatement la note du synthétiseur", "Piano Roll"),
-            ("Clic gauche sur la grille", "Poser une note MIDI (joue un son test en direct)", "Piano Roll"),
-            ("Glisser une note", "Changer la hauteur de note ou le temps de déclenchement", "Piano Roll"),
-            ("Glisser bord droit d'une note", "Ajuster la durée de la note", "Piano Roll"),
-            ("Clic droit sur une note", "Supprimer immédiatement la note", "Piano Roll"),
-            
-            # Catégorie Affichage & Plugins
-            ("F1", "Ouvrir cette fenêtre d'aide et documentation", "Interface"),
-            ("F2", "Afficher / Masquer l'Inspecteur de Piste", "Interface"),
-            ("F3 ou Bouton ▼/▲", "Minimiser la zone d'édition (ne voir que les onglets) / Agrandir", "Interface"),
-            ("F4", "Ouvrir le Gestionnaire de Plugins (Scanner & Diagnostic VST3/VST2)", "Plugins"),
-            ("F5", "Ouvrir la Console de Mixage intégrée", "Mixeur"),
-            ("F11", "Ouvrir le Rack de Plugins Flottant du Projet (Style Cubase Pro)", "Plugins"),
-            ("Ctrl + ,", "Configuration Audio, Périphériques & GPU", "Configuration"),
-        ]
-
-        table = QTableWidget(len(shortcuts), 3)
-        table.setHorizontalHeaderLabels(["Raccourci / Action", "Description", "Section"])
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        table.verticalHeader().setVisible(False)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
-        table.setSelectionBehavior(QTableWidget.SelectRows)
-
-        for row, (key, desc, cat) in enumerate(shortcuts):
-            item_key = QTableWidgetItem(key)
-            item_key.setFont(QFont("Consolas", 10, QFont.Bold))
-            item_key.setForeground(QColor("#38bdf8"))
-
-            item_desc = QTableWidgetItem(desc)
-            item_cat = QTableWidgetItem(cat)
-            item_cat.setForeground(QColor("#94a3b8"))
-
-            table.setItem(row, 0, item_key)
-            table.setItem(row, 1, item_desc)
-            table.setItem(row, 2, item_cat)
-
-        layout.addWidget(table)
-        return widget
-
-    def _create_guide_tab(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(8, 8, 8, 8)
-
-        browser = QTextBrowser()
-        browser.setOpenExternalLinks(True)
-        html_content = """
-        <h2 style="color: #38bdf8; margin-top: 0;">Guide d'Utilisation de NovaDAW</h2>
-        
-        <p>Bienvenue dans <b>NovaDAW</b>, votre station de travail audio numérique (DAW) open-source conçue pour la création et la composition musicale intuitive.</p>
-        
-        <hr style="border: 0; border-top: 1px solid #282a38; margin: 16px 0;">
-
-        <h3 style="color: #34d399;">1. Les Pistes (Tracks)</h3>
-        <ul>
-            <li><b>Piste MIDI (🎹) :</b> Destinée aux instruments virtuels et à la mélodie. Elle utilise le synthétiseur polyphonique interne haute qualité pour jouer vos notes sans latence.</li>
-            <li><b>Piste Audio (🔊) :</b> Destinée aux enregistrements de microphones, guitares ou importations d'échantillons (fichiers WAV, etc.).</li>
-            <li><b>Contrôles de piste :</b>
-                <ul>
-                    <li><b>M (Mute) :</b> Coupe temporairement le son de la piste.</li>
-                    <li><b>S (Solo) :</b> Isole la piste pour être la seule entendue dans le mixage.</li>
-                    <li><b>R (Arm) :</b> Arme la piste pour l'enregistrement.</li>
-                    <li><b>Curseurs VOL & PAN :</b> Ajustent le volume et la répartition panoramique (Gauche / Droite).</li>
-                </ul>
-            </li>
-        </ul>
-
-        <h3 style="color: #34d399;">2. La Timeline & Outils d'Édition</h3>
-        <ul>
-            <li><b>Palette d'outils :</b>
-                <ul>
-                    <li><b>Pointeur [1] :</b> Outil standard pour sélectionner, déplacer et redimensionner les clips.</li>
-                    <li><b>Scinder / Ciseaux [2] :</b> Cliquez sur n'importe quel clip pour le scinder instantanément en deux morceaux (avec ligne de guidage visuelle et magnétisme).</li>
-                    <li><b>Gomme [3] :</b> Cliquez sur un clip pour le supprimer en un clic.</li>
-                    <li><b>Scinder Tête (Ctrl+K / S) :</b> Découpe le clip sélectionné précisément à la position de la tête de lecture.</li>
-                    <li><b>Presse-papiers (Copier / Couper / Coller / Dupliquer) :</b> Dupliquez ou collez vos blocs audio et MIDI directement à la tête de lecture.</li>
-                </ul>
-            </li>
-            <li><b>Grille Musicale & Magnétisme (Snap) :</b>
-                <ul>
-                    <li>La timeline affiche désormais une grille musicale dynamique synchronisée sur le BPM du projet (Mesure, 1/2, 1/4, 1/8, 1/16, 1/32).</li>
-                    <li>Le bouton <b>🧲 Snap [J]</b> active ou désactive l'alignement magnétique automatique lors du déplacement, du redimensionnement et du découpage des clips.</li>
-                </ul>
-            </li>
-            <li><b>Édition & Rognage Audio Non-Destructif :</b>
-                <ul>
-                    <li>Redimensionner un bloc audio ne déforme ni n'étire jamais sa waveform : la prévisualisation reste parfaitement calée à l'échelle temporelle 1:1.</li>
-                    <li>Rétrécir un bloc masque proprement le début ou la fin sans décaler l'audio lu.</li>
-                    <li>Un clip audio ne peut pas être étendu au-delà de la durée réelle de son fichier audio source.</li>
-                </ul>
-            </li>
-            <li><b>Créer un bloc / clip :</b> <i>Double-cliquez</i> simplement sur n'importe quel endroit vide d'une piste.</li>
-            <li><b>Région de boucle (Loop) :</b> La règle en haut affiche des marqueurs ambre <b>[L]</b> et <b>[R]</b>. Maintenez <i>Shift + Glisser</i> sur la règle pour ajuster la boucle à la souris.</li>
-        </ul>
-
-        <h3 style="color: #34d399;">3. Le Séquenceur MIDI (Piano Roll)</h3>
-        <ul>
-            <li><b>Clavier virtuel interactif :</b> Sur le côté gauche, le clavier vous permet d'entendre immédiatement le son de chaque touche en cliquant dessus.</li>
-            <li><b>Ajouter des notes :</b> Cliquez dans la grille pour déposer une note. Le son est joué en temps réel pour vérifier la tonalité.</li>
-            <li><b>Modifier / Supprimer :</b> Glissez une note pour la changer de hauteur ou de temps. <i>Clic droit</i> sur une note pour la supprimer.</li>
-            <li><b>Magnétisme (Snap) :</b> Utilisez le menu déroulant en haut du Piano Roll pour caler vos notes à la double-croche (1/16), à la croche (1/8), à la noire (1/4), etc.</li>
-        </ul>
-
-        <h3 style="color: #34d399;">4. L'Éditeur Audio</h3>
-        <ul>
-            <li>Double-cliquez sur un bloc Audio pour afficher sa forme d'onde en temps réel.</li>
-            <li>Cliquez sur <b>📁 Importer fichier WAV...</b> pour charger un échantillon, une prise de son ou une piste d'accompagnement. La durée du bloc s'ajuste automatiquement au fichier audio.</li>
-            <li>Ajustez le fader de gain pour équilibrer le volume du sample.</li>
-        </ul>
-
-        <h3 style="color: #34d399;">5. La Barre de Transport Inférieure</h3>
-        <ul>
-            <li>Située en bas au centre pour un accès naturel :
-                <ul>
-                    <li><b>⏮ Début :</b> Retourne directement au tout début (Mesure 1).</li>
-                    <li><b>⏪ Reculer :</b> Recule d'une mesure, ou rembobine en continu si maintenu.</li>
-                    <li><b>■ Stop :</b> Arrête la lecture et replace la tête de lecture.</li>
-                    <li><b>▶ Play :</b> Lance la lecture (raccourci <i>Espace</i>).</li>
-                    <li><b>⏩ Avancer :</b> Avance d'une mesure, ou avance rapidement en continu si maintenu.</li>
-                    <li><b>⏭ Fin :</b> Se positionne après le dernier bloc du projet.</li>
-                    <li><b>🔁 Boucle :</b> Boucle en continu sur l'intervalle sélectionné.</li>
-                </ul>
-            </li>
-            <li><b>Minimisation (▼ / ▲) :</b> Cliquez sur la flèche en haut à droite des onglets (ou appuyez sur <b>F3</b>) pour replier la zone inférieure et ne garder que la vue de vos pistes.</li>
-        </ul>
-
-        <h3 style="color: #34d399;">6. Sauvegarde et Exportation</h3>
-        <ul>
-            <li><b>Format propriétaire (.ndaw) :</b> Enregistrez votre projet avec <i>Ctrl + S</i> pour conserver toutes vos pistes, réglages, volumes et notes MIDI.</li>
-            <li><b>Export Audio (WAV) :</b> Utilisez le menu <b>Fichier ➔ Exporter Mixage Audio (WAV)...</b> (ou <i>Ctrl + E</i>) pour générer un fichier audio stéréo 44.1 kHz de votre morceau complet !</li>
-        </ul>
-
-        <h3 style="color: #34d399;">7. Rack de Plugins & VST Instruments / Effets (F11)</h3>
-        <ul>
-            <li><b>Fenêtre Flottante (F11) :</b> Appuyez sur <b>F11</b> ou cliquez sur <b>🎛️ Plugins (F11)</b> pour ouvrir le Rack de Plugins flottant dédié inspiré de Cubase Pro.</li>
-            <li><b>Stay on Top (📌) :</b> Le rack peut rester épinglé au premier plan pendant que vous éditez vos notes ou arrangez vos pistes.</li>
-            <li><b>Slots interactifs :</b> Cliquez directement sur le bouton <i>+ Cliquer pour charger un plugin</i> au bas de la pile pour ajouter un synthétiseur ou un effet. Activez/désactivez chaque slot en un clic avec le bouton <b>⏻ Bypass</b>.</li>
-            <li><b>Routage MIDI type Cubase :</b> Sur chaque piste MIDI, le sélecteur d'instrument liste vos plugins du Rack (ex: <i>🎹 [Rack #01] Kontakt</i>). Le signal MIDI de la piste est envoyé dans le plugin du rack qui génère l'audio.</li>
-            <li><b>Détection automatique transparente :</b> NovaDAW scanne automatiquement tous les dossiers standards de votre ordinateur en arrière-plan sans ralentir le démarrage. Les plugins VST3 64-bit sont chargés nativement, et les anciens plugins VST 2.4 sont identifiés avec un diagnostic clair.</li>
-        </ul>
-        """
-        browser.setHtml(html_content)
-        layout.addWidget(browser)
-        return widget
-
-    def _create_about_tab(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
-
-        # En-tête avec logo supernova
-        header_h = QHBoxLayout()
-        header_h.setSpacing(16)
-
-        logo_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "nova_icon.png"))
-        if os.path.exists(logo_path):
-            lbl_logo = QLabel()
-            pix = QPixmap(logo_path).scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            lbl_logo.setPixmap(pix)
-            header_h.addWidget(lbl_logo)
-
-        v_titles = QVBoxLayout()
-        v_titles.setSpacing(4)
-        lbl_app = QLabel("NovaDAW Pro")
-        lbl_app.setStyleSheet("font-size: 26px; font-weight: bold; color: #38bdf8;")
-        v_titles.addWidget(lbl_app)
-
-        lbl_sub = QLabel("Version 1.1 Pro — Digital Audio Workstation Open-Source & Pilotable par IA")
-        lbl_sub.setStyleSheet("font-size: 13px; color: #94a3b8; font-weight: 600;")
-        v_titles.addWidget(lbl_sub)
-
-        header_h.addLayout(v_titles)
-        header_h.addStretch()
-        layout.addLayout(header_h)
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("color: #282a38;")
-        layout.addWidget(sep)
-
-        about_text = QLabel(
-            "<b>NovaDAW</b> est une station de travail audio numérique professionnelle, libre et gratuite, "
-            "développée en Python avec PySide6 (Qt 6), NumPy, SciPy, sounddevice et Pedalboard.<br><br>"
-            "<b>Nouvelles Fonctionnalités Majeures (v1.1) :</b><br>"
-            " • <b>Section Périphériques Audio & Graphiques :</b> Détection et sélection des cartes graphiques (GPU NVIDIA, AMD, Intel) et des pilotes audio (ASIO, WASAPI, DirectSound, MME).<br>"
-            " • <b>Importateur Audio Universel :</b> Prise en charge native de tous les formats audio (WAV, MP3, FLAC, OGG, AIFF, M4A...) avec calcul automatique des durées et calage temporel.<br>"
-            " • <b>Pilotabilité Intégrale par Agent IA (FastMCP & TCP IPC) :</b> 31 actions et outils permettant à un agent (Antigravity, Claude, Cursor, Codex) de composer, manipuler les faders, égaliseurs et compresseurs en direct.<br>"
-            " • <b>Identité Visuelle Supernova :</b> Nouvelle icône et logo haute définition intégrés dans l'interface et sur le bureau.<br><br>"
-            "<i>Tous les composants utilisent des licences libres et hautement permissives (MIT, BSD-3, Apache 2.0).</i>"
-        )
-        about_text.setTextFormat(Qt.RichText)
-        about_text.setStyleSheet("color: #cbd5e1; font-size: 12px; line-height: 1.6;")
-        about_text.setWordWrap(True)
-        layout.addWidget(about_text)
-
-        layout.addStretch()
-        return widget
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        compact = self.width() < 700
+        self.topics.setVisible(not compact)
+        self.compact_topics.setVisible(compact)

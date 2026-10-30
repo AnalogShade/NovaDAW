@@ -13,7 +13,7 @@ class EditingToolbar(QWidget):
     """
     Barre d'outils d'édition complète :
     - Palette d'outils exclusifs : Pointeur [1], Ciseaux / Scission [2], Gomme [3]
-    - Découpe instantanée : Scinder à la tête de lecture [Ctrl+K / S]
+    - Découpe instantanée : Scinder à la tête de lecture [Ctrl+B / S]
     - Presse-papier : Copier [Ctrl+C], Couper [Ctrl+X], Coller [Ctrl+V], Dupliquer [Ctrl+D], Supprimer [Suppr]
     - Grille BPM & Aimantage : Aimantage Snap (On/Off), Sélecteur de résolution (1 Mesure à 1/32, Off)
     - Zoom de l'arrangement : Dézoomer, Zoomer, Zoom 100%
@@ -159,8 +159,8 @@ class EditingToolbar(QWidget):
         layout.addWidget(self._create_sep())
 
         # --- 2. ACTION SCISSION DIRECTE À LA TÊTE ---
-        self.btn_split_playhead = QPushButton("⚡ Scinder Tête (Ctrl+K)")
-        self.btn_split_playhead.setToolTip("Action instantanée : Scinder le clip sous la tête de lecture à sa position actuelle [Ctrl+K ou S]")
+        self.btn_split_playhead = QPushButton("⚡ Scinder Tête (Ctrl+B)")
+        self.btn_split_playhead.setToolTip("Scinder le clip sélectionné à la tête de lecture [Ctrl+B ; S dans la grille]")
         self.btn_split_playhead.setProperty("class", "action_btn")
         self.btn_split_playhead.clicked.connect(self.split_playhead_requested.emit)
         layout.addWidget(self.btn_split_playhead)

@@ -17,7 +17,7 @@ L'interface de NovaDAW est inspirée des standards professionnels de **Cubase Pr
 ### 1.2. Agencement Tri-Zones & Hiérarchie Visuelle
 - **Zone Supérieure (Upper Zone)** :
   - **Barre de marque** (`#nova_brand_bar`, hauteur 38 px) : Logo cosmique Supernova, libellé `NOVADAW`, badge `PRO`, boutons d'accès rapide (`+ Piste`, `Mixeur`, `Plugins F11`, `Périphériques Ctrl+,`) et indicateur d'état IA MCP (`#34d399`).
-  - **Barre d'outils d'édition** (`EditingToolbar`) : Outils Pointeur (`1`), Ciseaux (`2`), Gomme (`3`), Scinder curseur (`Ctrl+K`), Dupliquer (`Ctrl+D`), Snap (`J`), Résolution de grille, Zoom.
+  - **Barre d'outils d'édition** (`EditingToolbar`) : Outils Pointeur (`1`), Ciseaux (`2`), Gomme (`3`), Scinder curseur (`Ctrl+B`), Dupliquer (`Ctrl+D`), Snap (`J`), Résolution de grille, Zoom.
 - **Zone Centrale (Arranger Zone)** :
   - **Inspecteur de Piste à gauche** (`TrackInspector`, largeur ~325 px, bascule via `F2` ou bouton `◀`) : Présente les propriétés de la piste sélectionnée, routage, inserts d'effets, fader de volume et pan.
   - **Panneau des En-têtes** (`TrackHeaderWidget`, min 260 px, max 550 px) : Boutons Mute (`M`), Solo (`S`), Enregistrement (`R`), Volume slider, Pan, couleur de piste, nom éditable.
@@ -47,7 +47,8 @@ Les raccourcis suivants sont standardisés pour préserver les automatismes de l
 - `Ctrl + M` : Inspecter la piste Master.
 - `Ctrl + S` / `Ctrl + O` : Enregistrer / Ouvrir un projet.
 - `Ctrl + I` / `Ctrl + E` : Importer un fichier audio / Exporter le mixage en WAV.
-- `Ctrl + K` : Scinder le clip sous la tête de lecture.
+- `Ctrl + B` : Scinder le clip sous la tête de lecture (`S` dans la grille).
+- `Ctrl + K` : Afficher / masquer le clavier musical virtuel. Un gestionnaire local historique de timeline reconnaît aussi cette combinaison pour scinder ; utiliser `Ctrl+B` pour éviter le conflit.
 - `Ctrl + D` : Dupliquer le clip sélectionné.
 - `J` : Activer / Désactiver l'aimantage magnétique (Snap).
 

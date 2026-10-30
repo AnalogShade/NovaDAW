@@ -439,6 +439,13 @@ class MainWindow(QMainWindow):
         act_doc.triggered.connect(self.show_help_dialog)
         menu_help.addAction(act_doc)
 
+        act_quickstart = QAction("Mon premier morceau…", self)
+        act_quickstart.triggered.connect(lambda: self.show_help_dialog(topic_id="quickstart"))
+        menu_help.addAction(act_quickstart)
+        act_shortcuts = QAction("Raccourcis clavier et gestes…", self)
+        act_shortcuts.triggered.connect(lambda: self.show_help_dialog(topic_id="shortcuts"))
+        menu_help.addAction(act_shortcuts)
+
         menu_help.addSeparator()
 
         act_about = QAction("ℹ️ À &propos de NovaDAW...", self)
@@ -553,6 +560,13 @@ class MainWindow(QMainWindow):
         self.lbl_mcp_badge.setToolTip("Le serveur MCP local est actif et à l'écoute des agents IA (Antigravity, Cursor, Codex)")
         self.lbl_mcp_badge.setStyleSheet("color: #34d399; font-size: 11px; font-weight: 600; padding: 2px 8px; background: #06281e; border: 1px solid #059669; border-radius: 4px;")
         bb_layout.addWidget(self.lbl_mcp_badge)
+
+        self.btn_quick_help = QPushButton("Aide F1")
+        self.btn_quick_help.setFixedHeight(26)
+        self.btn_quick_help.setAccessibleName("Ouvrir le manuel Nova DAW")
+        self.btn_quick_help.setToolTip("Manuel hors ligne, démarrage guidé et raccourcis (F1)")
+        self.btn_quick_help.clicked.connect(self.show_help_dialog)
+        bb_layout.addWidget(self.btn_quick_help)
 
         main_layout.addWidget(brand_bar)
 
@@ -2840,14 +2854,18 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Erreur d'exportation", f"Erreur lors de l'export WAV :\n{e}")
 
-    def show_help_dialog(self, initial_tab=0):
-        dlg = HelpDialog(self)
-        if initial_tab != 0:
-            # Sélecteur d'onglet direct si demandé
-            tab_widget = dlg.findChild(QTabWidget)
-            if tab_widget:
-                tab_widget.setCurrentIndex(initial_tab)
-        dlg.exec()
+    def show_help_dialog(self, initial_tab=0, *, topic_id=None):
+        self._show_help_topic(topic_id or ("about" if initial_tab == 2 else None))
+
+    def _show_help_topic(self, topic_id=None):
+        # Une fenêtre réutilisée permet de suivre les étapes dans le logiciel.
+        if not hasattr(self, "_help_dialog"):
+            self._help_dialog = HelpDialog(self)
+        if topic_id:
+            self._help_dialog.show_topic(topic_id)
+        self._help_dialog.show()
+        self._help_dialog.raise_()
+        self._help_dialog.activateWindow()
 
     def show_about_dialog(self):
         self.show_help_dialog(initial_tab=2)

@@ -111,7 +111,7 @@ Inspirés de la palette d'outils de Cubase Pro :
 | **Gomme (Erase)** | `3` | 🗑️ | Supprime en un clic le clip survolé. |
 
 ### Raccourcis d'Édition Universels :
-- `Ctrl + K` : **Scinder à la tête de lecture** (coupe le clip sélectionné exactement sous le curseur de lecture).
+- `Ctrl + B` : **Scinder à la tête de lecture** (coupe le clip sélectionné exactement sous le curseur de lecture). `S` fonctionne aussi dans la grille. `Ctrl+K` ouvre le clavier musical global ; son ancien alias local de scission ne doit pas être privilégié.
 - `Ctrl + D` : **Dupliquer** (crée une copie consécutive immédiate du clip sélectionné).
 - `Ctrl + C` / `Ctrl + X` / `Ctrl + V` : **Copier / Couper / Coller** à la position de la tête de lecture.
 - `Delete` : Supprime le ou les clips sélectionnés.

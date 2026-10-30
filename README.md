@@ -1,5 +1,17 @@
 # NovaDAW 🌌 - Digital Audio Workstation Open-Source & Pilotée par IA
 
+## Manuel intégré hors ligne
+
+Ouvrez **Aide → Documentation** ou **F1**, ou le bouton **Aide F1** en haut à droite.
+Le manuel français comprend un parcours « Mon premier morceau », 23 chapitres,
+une recherche insensible aux accents, une table des matières et les raccourcis
+classés par contexte. Il reste ouvert pendant que vous pratiquez dans Nova DAW.
+Le contenu embarqué vérifie aussi les limites actuelles de l’export, des médias
+référencés, de la récupération et de l’automatisation.
+
+Voir [l’audit et la validation du manuel](doc/help_audit.md) pour les sources,
+la couverture et les limites des vérifications.
+
 **NovaDAW** est un logiciel de production et de création musicale (DAW) libre, modulaire et open-source conçu en Python et PySide6 (Qt 6), inspiré de l'ergonomie et du design professionnel de Cubase Pro.
 
 Il intègre une architecture avancée de plugins DSP, un importateur audio universel, un gestionnaire complet des cartes graphiques et des pilotes audio (ASIO/WASAPI), ainsi qu'une **intégration complète avec le Model Context Protocol (MCP)** permettant à un agent IA (Google Antigravity, Claude, Codex) de composer, mixer et sculpter le son en direct avec vous.
