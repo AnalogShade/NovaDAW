@@ -5,13 +5,41 @@ from ctypes import (
     c_float, c_double, c_char, c_ubyte, c_wchar_p, POINTER, Structure, byref
 )
 import multiprocessing
+from multiprocessing import shared_memory
 import os
 import struct
 import subprocess
 import sys
 import threading
 import time
+from typing import Optional
 import numpy as np
+
+
+_MAX_SHM_FRAMES = 16384
+_MAX_SHM_CHANNELS = 2
+_MAX_SHM_MIDI = 128
+_SHM_HDR_FMT = "<iiiiidii"  # op, status, num_frames, num_channels, num_midi, sample_rate, reset_flag, err_len
+_SHM_HDR_STRUCT = struct.Struct(_SHM_HDR_FMT)
+_SHM_MIDI_STRUCT = struct.Struct("<iBBBB")  # sample_idx, b0, b1, b2, pad
+_SHM_HEADER_SIZE = 64
+_SHM_MIDI_OFFSET = _SHM_HEADER_SIZE
+_SHM_MIDI_BYTES = _MAX_SHM_MIDI * _SHM_MIDI_STRUCT.size
+_SHM_IN_OFFSET = _SHM_MIDI_OFFSET + _SHM_MIDI_BYTES
+_SHM_AUDIO_BYTES = _MAX_SHM_CHANNELS * _MAX_SHM_FRAMES * 4
+_SHM_OUT_OFFSET = _SHM_IN_OFFSET + _SHM_AUDIO_BYTES
+_SHM_ERR_OFFSET = _SHM_OUT_OFFSET + _SHM_AUDIO_BYTES
+_SHM_ERR_SIZE = 512
+_SHM_TOTAL_SIZE = _SHM_ERR_OFFSET + _SHM_ERR_SIZE
+
+_SHM_OP_IDLE = 0
+_SHM_OP_RENDER_MIDI = 1
+_SHM_OP_RENDER_AUDIO = 2
+_SHM_OP_QUIT = 3
+
+_SHM_STATUS_PENDING = 0
+_SHM_STATUS_OK = 1
+_SHM_STATUS_ERROR = 2
 
 
 def _get_pe_machine(file_path: str) -> int:
@@ -363,6 +391,38 @@ class VST2Plugin64:
         self.parameters = {str(i): i for i in range(self.parameters_count)}
         self.name = base_name
 
+        self._scratch_capacity = 0
+        self._scratch_n_in = 0
+        self._scratch_n_out = 0
+        self._c_in_bufs = None
+        self._c_out_bufs = None
+        self._c_in_ptrs = None
+        self._c_out_ptrs = None
+        self._in_views = None
+        self._out_views = None
+        self._max_vst_events = 128
+        self._midi_ev_arr = (_VstMidiEvent * self._max_vst_events)()
+        for i in range(self._max_vst_events):
+            ev = self._midi_ev_arr[i]
+            ev.type = 1
+            ev.byteSize = ctypes.sizeof(_VstMidiEvent)
+            ev.flags = 1
+            ev.noteLength = 0
+            ev.noteOffset = 0
+            ev.midiData[3] = 0
+
+        class _VstEventsFixed(Structure):
+            _fields_ = [
+                ("numEvents", c_int32),
+                ("reserved", c_ssize_t),
+                ("events", c_void_p * self._max_vst_events),
+            ]
+
+        self._vst_events_cls = _VstEventsFixed
+        self._vst_events = _VstEventsFixed(numEvents=0, reserved=0)
+        for i in range(self._max_vst_events):
+            self._vst_events.events[i] = ctypes.addressof(self._midi_ev_arr[i])
+
         if not probe_only:
             eff.dispatcher(self._eff_ptr, 0, 0, 0, None, 0.0)  # effOpen
             eff.dispatcher(self._eff_ptr, 10, 0, 0, None, float(self._sample_rate))  # effSetSampleRate
@@ -379,6 +439,8 @@ class VST2Plugin64:
             if eff_name:
                 self.name = eff_name
 
+            self._ensure_scratch_buffers(max(2, self.num_inputs), max(2, self.num_outputs), 8192)
+
             # Warmup default program, chunk & initial audio blocks so synths (e.g. Omnisphere, FM8, Absynth 5)
             # complete their lazy STEAM/patch initialization before the first user MIDI note arrives.
             try:
@@ -391,6 +453,28 @@ class VST2Plugin64:
                 self._flush_silent_blocks(6)
             except Exception:
                 pass
+
+    def _ensure_scratch_buffers(self, n_in: int, n_out: int, capacity: int):
+        """Pre-allocate C float buffers and numpy views to avoid per-block heap allocations."""
+        if (
+            self._c_in_bufs is not None
+            and n_in <= self._scratch_n_in
+            and n_out <= self._scratch_n_out
+            and capacity <= self._scratch_capacity
+        ):
+            return
+        new_in = max(n_in, self._scratch_n_in, 2)
+        new_out = max(n_out, self._scratch_n_out, 2)
+        new_cap = max(capacity, self._scratch_capacity, 8192)
+        self._c_in_bufs = [(c_float * new_cap)() for _ in range(new_in)]
+        self._c_out_bufs = [(c_float * new_cap)() for _ in range(new_out)]
+        self._c_in_ptrs = (POINTER(c_float) * new_in)(*[ctypes.cast(b, POINTER(c_float)) for b in self._c_in_bufs])
+        self._c_out_ptrs = (POINTER(c_float) * new_out)(*[ctypes.cast(b, POINTER(c_float)) for b in self._c_out_bufs])
+        self._in_views = [np.ctypeslib.as_array(b) for b in self._c_in_bufs]
+        self._out_views = [np.ctypeslib.as_array(b) for b in self._c_out_bufs]
+        self._scratch_n_in = new_in
+        self._scratch_n_out = new_out
+        self._scratch_capacity = new_cap
 
     def _flush_silent_blocks(self, num_blocks: int = 4):
         """Run silent processReplacing blocks so lazy-init synths (Omnisphere STEAM) finish internal voice resets."""
@@ -495,14 +579,17 @@ class VST2Plugin64:
                 for i, v in enumerate(vals):
                     eff.setParameter(self._eff_ptr, i, float(v))
 
-    def __call__(self, *args, **kwargs):
-        sample_rate = float(kwargs.get("sample_rate", self._sample_rate))
-        reset_flag = bool(kwargs.get("reset", False))
-        num_channels = int(kwargs.get("num_channels", 2))
-
-        first_arg = args[0] if args else kwargs.get("input_array", kwargs.get("midi_messages"))
-        is_midi_input = isinstance(first_arg, list) or "duration" in kwargs
-
+    def render_into_planar(
+        self,
+        midi_events,
+        total_frames: int,
+        sample_rate: float,
+        num_channels: int,
+        reset_flag: bool,
+        in_planar: np.ndarray | None,
+        out_planar: np.ndarray,
+    ):
+        """Render audio/MIDI directly into a caller-provided planar float32 array (zero intermediate allocations)."""
         with self._lock:
             eff = self._eff_ptr.contents
             if sample_rate > 0 and sample_rate != self._sample_rate:
@@ -512,34 +599,16 @@ class VST2Plugin64:
             if reset_flag:
                 self.reset()
 
-            if is_midi_input:
-                duration = float(kwargs.get("duration", args[1] if len(args) > 1 else 1.0))
-                total_frames = max(1, int(round(duration * self._sample_rate)))
-                midi_events = _normalize_midi_messages(first_arg, self._sample_rate)
-                in_planar = None
-            else:
-                arr = np.asarray(first_arg, dtype=np.float32)
-                if arr.ndim == 1:
-                    in_planar = np.vstack([arr, arr])
-                elif arr.shape[0] <= 16 and (arr.shape[1] > arr.shape[0] or arr.shape[0] <= 2):
-                    in_planar = np.ascontiguousarray(arr, dtype=np.float32)
-                else:
-                    in_planar = np.ascontiguousarray(arr.T, dtype=np.float32)
-                num_channels = in_planar.shape[0]
-                total_frames = in_planar.shape[1]
-                midi_events = []
-
             out_ch = max(1, num_channels)
-            out_planar = np.zeros((out_ch, total_frames), dtype=np.float32)
-
             n_in = max(2, self.num_inputs, out_ch)
             n_out = max(2, self.num_outputs, out_ch)
             block_size = self._block_size
 
-            in_bufs = [(c_float * block_size)() for _ in range(n_in)]
-            out_bufs = [(c_float * block_size)() for _ in range(n_out)]
-            in_ptrs = (POINTER(c_float) * n_in)(*[ctypes.cast(b, POINTER(c_float)) for b in in_bufs])
-            out_ptrs = (POINTER(c_float) * n_out)(*[ctypes.cast(b, POINTER(c_float)) for b in out_bufs])
+            self._ensure_scratch_buffers(n_in, n_out, block_size)
+            in_ptrs = self._c_in_ptrs
+            out_ptrs = self._c_out_ptrs
+            in_views = self._in_views
+            out_views = self._out_views
 
             midi_idx = 0
             num_midi = len(midi_events)
@@ -549,51 +618,37 @@ class VST2Plugin64:
                 block = min(block_size, total_frames - pos)
 
                 if in_planar is not None:
+                    src_rows = in_planar.shape[0]
                     for c in range(n_in):
-                        src_c = c if c < in_planar.shape[0] else 0
-                        slice_arr = np.ascontiguousarray(in_planar[src_c, pos : pos + block], dtype=np.float32)
-                        ctypes.memmove(in_bufs[c], slice_arr.ctypes.data, block * 4)
+                        src_c = c if c < src_rows else 0
+                        in_views[c][:block] = in_planar[src_c, pos : pos + block]
                 else:
                     for c in range(n_in):
-                        ctypes.memset(in_bufs[c], 0, block * 4)
+                        in_views[c][:block].fill(0.0)
 
                 for c in range(n_out):
-                    ctypes.memset(out_bufs[c], 0, block * 4)
+                    out_views[c][:block].fill(0.0)
 
-                # Collect MIDI events in [pos, pos + block)
-                block_events = []
+                ev_count = 0
                 while midi_idx < num_midi and midi_events[midi_idx][0] < pos + block:
-                    ev_sample, b0, b1, b2 = midi_events[midi_idx]
-                    delta = max(0, min(block - 1, ev_sample - pos))
-                    mev = _VstMidiEvent(
-                        type=1,
-                        byteSize=ctypes.sizeof(_VstMidiEvent),
-                        deltaFrames=delta,
-                        flags=1,
-                        noteLength=0,
-                        noteOffset=0,
-                    )
-                    mev.midiData[0] = b0
-                    mev.midiData[1] = b1
-                    mev.midiData[2] = b2
-                    mev.midiData[3] = 0
-                    block_events.append(mev)
+                    if ev_count < self._max_vst_events:
+                        ev_sample, b0, b1, b2 = midi_events[midi_idx]
+                        delta = ev_sample - pos
+                        if delta < 0:
+                            delta = 0
+                        elif delta >= block:
+                            delta = block - 1
+                        mev = self._midi_ev_arr[ev_count]
+                        mev.deltaFrames = delta
+                        mev.midiData[0] = b0
+                        mev.midiData[1] = b1
+                        mev.midiData[2] = b2
+                        ev_count += 1
                     midi_idx += 1
 
-                if block_events:
-                    ev_count = len(block_events)
-
-                    class _VstEventsDyn(Structure):
-                        _fields_ = [
-                            ("numEvents", c_int32),
-                            ("reserved", c_ssize_t),
-                            ("events", c_void_p * ev_count),
-                        ]
-
-                    ev_container = _VstEventsDyn(numEvents=ev_count, reserved=0)
-                    for i, mev in enumerate(block_events):
-                        ev_container.events[i] = ctypes.addressof(mev)
-                    eff.dispatcher(self._eff_ptr, 25, 0, 0, byref(ev_container), 0.0)
+                if ev_count:
+                    self._vst_events.numEvents = ev_count
+                    eff.dispatcher(self._eff_ptr, 25, 0, 0, byref(self._vst_events), 0.0)
 
                 self._in_process = True
                 try:
@@ -611,12 +666,48 @@ class VST2Plugin64:
 
                 for c in range(out_ch):
                     if c < n_out:
-                        out_view = np.ctypeslib.as_array(out_bufs[c])[:block]
-                        out_planar[c, pos : pos + block] = out_view
+                        out_planar[c, pos : pos + block] = out_views[c][:block]
 
                 pos += block
 
-            return out_planar
+    def __call__(self, *args, **kwargs):
+        sample_rate = float(kwargs.get("sample_rate", self._sample_rate))
+        reset_flag = bool(kwargs.get("reset", False))
+        num_channels = int(kwargs.get("num_channels", 2))
+
+        first_arg = args[0] if args else kwargs.get("input_array", kwargs.get("midi_messages"))
+        is_midi_input = isinstance(first_arg, list) or "duration" in kwargs
+
+        if is_midi_input:
+            duration = float(kwargs.get("duration", args[1] if len(args) > 1 else 1.0))
+            eff_sr = sample_rate if sample_rate > 0 else self._sample_rate
+            total_frames = max(1, int(round(duration * eff_sr)))
+            midi_events = _normalize_midi_messages(first_arg, eff_sr)
+            in_planar = None
+        else:
+            arr = np.asarray(first_arg, dtype=np.float32)
+            if arr.ndim == 1:
+                in_planar = np.vstack([arr, arr])
+            elif arr.shape[0] <= 16 and (arr.shape[1] > arr.shape[0] or arr.shape[0] <= 2):
+                in_planar = np.ascontiguousarray(arr, dtype=np.float32)
+            else:
+                in_planar = np.ascontiguousarray(arr.T, dtype=np.float32)
+            num_channels = in_planar.shape[0]
+            total_frames = in_planar.shape[1]
+            midi_events = []
+
+        out_ch = max(1, num_channels)
+        out_planar = np.zeros((out_ch, total_frames), dtype=np.float32)
+        self.render_into_planar(
+            midi_events=midi_events,
+            total_frames=total_frames,
+            sample_rate=sample_rate,
+            num_channels=out_ch,
+            reset_flag=reset_flag,
+            in_planar=in_planar,
+            out_planar=out_planar,
+        )
+        return out_planar
 
     def show_editor(self, close_event: threading.Event):
         if sys.platform != "win32":
@@ -721,36 +812,35 @@ class VST2Plugin64:
         last_rect_check = time.monotonic()
         try:
             while not close_event.is_set() and not self._window_closed_by_user:
-                with self._lock:
-                    msg_count = 0
-                    while msg_count < 32 and user32.PeekMessageW(byref(msg), None, 0, 0, 1):
-                        if msg.message == 0x0012:  # WM_QUIT
-                            self._window_closed_by_user = True
-                            break
-                        if msg.message in (0x0100, 0x0101) and _global_vst_key_callback:
-                            try:
-                                _global_vst_key_callback(msg.wParam, msg.message == 0x0100)
-                            except Exception:
-                                pass
-                        user32.TranslateMessage(byref(msg))
-                        user32.DispatchMessageW(byref(msg))
-                        msg_count += 1
-
-                    if self._window_closed_by_user or close_event.is_set():
+                msg_count = 0
+                while msg_count < 32 and user32.PeekMessageW(byref(msg), None, 0, 0, 1):
+                    if msg.message == 0x0012:  # WM_QUIT
+                        self._window_closed_by_user = True
                         break
+                    if msg.message in (0x0100, 0x0101) and _global_vst_key_callback:
+                        try:
+                            _global_vst_key_callback(msg.wParam, msg.message == 0x0100)
+                        except Exception:
+                            pass
+                    user32.TranslateMessage(byref(msg))
+                    user32.DispatchMessageW(byref(msg))
+                    msg_count += 1
 
-                    eff.dispatcher(self._eff_ptr, 19, 0, 0, None, 0.0)  # effEditIdle
-                    now = time.monotonic()
-                    if now - last_rect_check > 0.25:
-                        last_rect_check = now
-                        er_cur = POINTER(_ERect)()
-                        eff.dispatcher(self._eff_ptr, 13, 0, 0, byref(er_cur), 0.0)
-                        if er_cur:
-                            cw = er_cur.contents.right - er_cur.contents.left
-                            ch = er_cur.contents.bottom - er_cur.contents.top
-                            if cw > 0 and ch > 0 and (cw, ch) != (w, h):
-                                w, h = cw, ch
-                                self._resize_editor_window(w, h)
+                if self._window_closed_by_user or close_event.is_set():
+                    break
+
+                eff.dispatcher(self._eff_ptr, 19, 0, 0, None, 0.0)  # effEditIdle
+                now = time.monotonic()
+                if now - last_rect_check > 0.25:
+                    last_rect_check = now
+                    er_cur = POINTER(_ERect)()
+                    eff.dispatcher(self._eff_ptr, 13, 0, 0, byref(er_cur), 0.0)
+                    if er_cur:
+                        cw = er_cur.contents.right - er_cur.contents.left
+                        ch = er_cur.contents.bottom - er_cur.contents.top
+                        if cw > 0 and ch > 0 and (cw, ch) != (w, h):
+                            w, h = cw, ch
+                            self._resize_editor_window(w, h)
 
                 time.sleep(0.012)
         finally:
@@ -980,7 +1070,97 @@ def _load_any_plugin(path: str, probe_only: bool = False):
     return plugin
 
 
-def _host(connection, path, probe_only=False):
+def _init_win32_sync_api():
+    """Bind Win32 Event/Wait kernel32 functions with strict 64-bit pointer types."""
+    if sys.platform != "win32":
+        return None
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateEventW.argtypes = [c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
+    k32.CreateEventW.restype = c_void_p
+    k32.SetEvent.argtypes = [c_void_p]
+    k32.SetEvent.restype = wintypes.BOOL
+    k32.WaitForSingleObject.argtypes = [c_void_p, wintypes.DWORD]
+    k32.WaitForSingleObject.restype = wintypes.DWORD
+    k32.WaitForMultipleObjects.argtypes = [wintypes.DWORD, POINTER(c_void_p), wintypes.BOOL, wintypes.DWORD]
+    k32.WaitForMultipleObjects.restype = wintypes.DWORD
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = c_void_p
+    k32.CloseHandle.argtypes = [c_void_p]
+    k32.CloseHandle.restype = wintypes.BOOL
+    k32.GetCurrentThread.argtypes = []
+    k32.GetCurrentThread.restype = c_void_p
+    k32.SetThreadPriority.argtypes = [c_void_p, ctypes.c_int]
+    k32.SetThreadPriority.restype = wintypes.BOOL
+    return k32
+
+
+class _SharedRenderChannel:
+    """Zero-pickle SharedMemory + Win32 Event channel for low-latency audio/MIDI rendering."""
+
+    def __init__(self, shm_tag: str, create: bool, child_pid: Optional[int] = None):
+        self.shm_tag = shm_tag
+        self.create = create
+        self._k32 = _init_win32_sync_api()
+        self._closed = False
+        self._shm = shared_memory.SharedMemory(name=shm_tag, create=create, size=_SHM_TOTAL_SIZE if create else 0)
+        self._buf = self._shm.buf
+        self._in_view = np.ndarray((_MAX_SHM_CHANNELS, _MAX_SHM_FRAMES), dtype=np.float32, buffer=self._buf, offset=_SHM_IN_OFFSET)
+        self._out_view = np.ndarray((_MAX_SHM_CHANNELS, _MAX_SHM_FRAMES), dtype=np.float32, buffer=self._buf, offset=_SHM_OUT_OFFSET)
+
+        self._req_evt = self._k32.CreateEventW(None, False, False, f"Local\\{shm_tag}_req")
+        self._resp_evt = self._k32.CreateEventW(None, False, False, f"Local\\{shm_tag}_resp")
+        self._proc_handle = self._k32.OpenProcess(0x00100000, False, int(child_pid)) if (create and child_pid) else None
+
+        if self._proc_handle:
+            self._wait_handles = (c_void_p * 2)(self._resp_evt, self._proc_handle)
+            self._wait_count = 2
+        else:
+            self._wait_handles = (c_void_p * 1)(self._resp_evt)
+            self._wait_count = 1
+
+    def write_header(self, op: int, status: int, num_frames: int, num_channels: int, num_midi: int, sample_rate: float, reset_flag: int, err_len: int = 0):
+        _SHM_HDR_STRUCT.pack_into(self._buf, 0, op, status, num_frames, num_channels, num_midi, float(sample_rate), reset_flag, err_len)
+
+    def read_header(self):
+        return _SHM_HDR_STRUCT.unpack_from(self._buf, 0)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self.create and self._req_evt and self._k32:
+                self.write_header(_SHM_OP_QUIT, _SHM_STATUS_PENDING, 0, 0, 0, 44100.0, 0, 0)
+                self._k32.SetEvent(self._req_evt)
+        except Exception:
+            pass
+        self._in_view = None
+        self._out_view = None
+        self._buf = None
+        if self._shm is not None:
+            try:
+                self._shm.close()
+            except Exception:
+                pass
+            if self.create:
+                try:
+                    self._shm.unlink()
+                except Exception:
+                    pass
+            self._shm = None
+        if self._k32:
+            for h_attr in ("_req_evt", "_resp_evt", "_proc_handle"):
+                h = getattr(self, h_attr, None)
+                if h:
+                    try:
+                        self._k32.CloseHandle(h)
+                    except Exception:
+                        pass
+                    setattr(self, h_attr, None)
+
+
+def _host(connection, path, probe_only=False, shm_tag=None):
     if sys.platform == "win32":
         try:
             ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
@@ -1011,6 +1191,126 @@ def _host(connection, path, probe_only=False):
     close = threading.Event()
     stop = threading.Event()
     editor = {"open": False, "error": None}
+
+    shm_channel = None
+    if shm_tag and sys.platform == "win32":
+        try:
+            shm_channel = _SharedRenderChannel(shm_tag, create=False)
+        except Exception:
+            shm_channel = None
+
+    def _shm_serve():
+        if shm_channel is None:
+            return
+        k32 = shm_channel._k32
+        try:
+            # Raise child audio worker priority (THREAD_PRIORITY_TIME_CRITICAL = 15, fallback HIGHEST = 2)
+            cur_thr = k32.GetCurrentThread()
+            if not k32.SetThreadPriority(cur_thr, 15):
+                k32.SetThreadPriority(cur_thr, 2)
+        except Exception:
+            pass
+
+        has_fast_vst2 = hasattr(plugin, "render_into_planar")
+        buf = shm_channel._buf
+        in_view = shm_channel._in_view
+        out_view = shm_channel._out_view
+        req_evt = shm_channel._req_evt
+        resp_evt = shm_channel._resp_evt
+
+        while not stop.is_set():
+            wait_res = k32.WaitForSingleObject(req_evt, 250)
+            if wait_res == 0x00000102:  # WAIT_TIMEOUT
+                continue
+            if wait_res != 0 or stop.is_set():
+                break
+            op, _status, num_frames, num_channels, num_midi, sample_rate, reset_flag, _ = shm_channel.read_header()
+            if op == _SHM_OP_QUIT:
+                break
+            try:
+                out_ch = max(1, min(_MAX_SHM_CHANNELS, int(num_channels)))
+                frames = max(1, min(_MAX_SHM_FRAMES, int(num_frames)))
+                n_midi = max(0, min(_MAX_SHM_MIDI, int(num_midi)))
+
+                if op == _SHM_OP_RENDER_MIDI:
+                    midi_events = []
+                    if n_midi:
+                        for i in range(n_midi):
+                            s_idx, b0, b1, b2, _ = _SHM_MIDI_STRUCT.unpack_from(buf, _SHM_MIDI_OFFSET + i * _SHM_MIDI_STRUCT.size)
+                            midi_events.append((s_idx, b0, b1, b2))
+                        midi_events.sort(key=lambda x: x[0])
+
+                    if has_fast_vst2:
+                        plugin.render_into_planar(
+                            midi_events=midi_events,
+                            total_frames=frames,
+                            sample_rate=sample_rate,
+                            num_channels=out_ch,
+                            reset_flag=bool(reset_flag),
+                            in_planar=None,
+                            out_planar=out_view[:, :frames],
+                        )
+                    else:
+                        sr_f = float(sample_rate) if sample_rate > 0 else 44100.0
+                        midi_msgs = [(bytes([b0, b1, b2]), s_idx / sr_f) for s_idx, b0, b1, b2 in midi_events]
+                        res = plugin(
+                            midi_msgs,
+                            duration=frames / sr_f,
+                            sample_rate=sr_f,
+                            num_channels=out_ch,
+                            reset=bool(reset_flag),
+                        )
+                        out_view[:out_ch, :frames].fill(0.0)
+                        if res is not None and res.size > 0:
+                            if res.ndim == 1:
+                                n = min(frames, len(res))
+                                out_view[0, :n] = res[:n]
+                                if out_ch > 1:
+                                    out_view[1, :n] = res[:n]
+                            else:
+                                rows = min(out_ch, res.shape[0])
+                                n = min(frames, res.shape[1])
+                                out_view[:rows, :n] = res[:rows, :n]
+                                if rows == 1 and out_ch > 1:
+                                    out_view[1, :n] = res[0, :n]
+
+                elif op == _SHM_OP_RENDER_AUDIO:
+                    if has_fast_vst2:
+                        plugin.render_into_planar(
+                            midi_events=[],
+                            total_frames=frames,
+                            sample_rate=sample_rate,
+                            num_channels=out_ch,
+                            reset_flag=bool(reset_flag),
+                            in_planar=in_view[:out_ch, :frames],
+                            out_planar=out_view[:out_ch, :frames],
+                        )
+                    else:
+                        res = plugin(
+                            in_view[:out_ch, :frames].copy(),
+                            sample_rate=float(sample_rate),
+                            reset=bool(reset_flag),
+                        )
+                        out_view[:out_ch, :frames].fill(0.0)
+                        if res is not None and res.size > 0:
+                            if res.ndim == 1:
+                                n = min(frames, len(res))
+                                out_view[0, :n] = res[:n]
+                                if out_ch > 1:
+                                    out_view[1, :n] = res[:n]
+                            else:
+                                rows = min(out_ch, res.shape[0])
+                                n = min(frames, res.shape[1])
+                                out_view[:rows, :n] = res[:rows, :n]
+                                if rows == 1 and out_ch > 1:
+                                    out_view[1, :n] = res[0, :n]
+
+                shm_channel.write_header(op, _SHM_STATUS_OK, frames, out_ch, 0, sample_rate, 0, 0)
+            except Exception as exc:
+                err_b = str(exc).encode("utf-8", errors="ignore")[:_SHM_ERR_SIZE]
+                buf[_SHM_ERR_OFFSET : _SHM_ERR_OFFSET + len(err_b)] = err_b
+                shm_channel.write_header(op, _SHM_STATUS_ERROR, 0, 0, 0, sample_rate, 0, len(err_b))
+            k32.SetEvent(resp_evt)
 
     def serve():
         try:
@@ -1052,6 +1352,8 @@ def _host(connection, path, probe_only=False):
             stop.set()
             show.set()
 
+    if shm_channel is not None:
+        threading.Thread(target=_shm_serve, daemon=True, name="NovaDAW-VST-SHM").start()
     threading.Thread(target=serve, daemon=True).start()
     while not stop.is_set():
         show.wait()
@@ -1064,6 +1366,8 @@ def _host(connection, path, probe_only=False):
             editor["error"] = str(exc)
         finally:
             editor["open"] = False
+    if shm_channel is not None:
+        shm_channel.close()
     if hasattr(plugin, "dispose"):
         try:
             plugin.dispose()
@@ -1099,16 +1403,35 @@ class IsolatedPlugin:
     def __init__(self, path, timeout=60, worker=_host, probe_only=False):
         self._lock = threading.RLock()
         self._failure = None
+        self._shm: Optional[_SharedRenderChannel] = None
+        shm_tag = None
+        use_shm = (not probe_only) and (worker is _host or getattr(worker, "_supports_shm", False)) and sys.platform == "win32"
+        if use_shm:
+            shm_tag = f"novadaw_vst_{os.getpid()}_{id(self)}_{time.monotonic_ns()}"
+            try:
+                self._shm = _SharedRenderChannel(shm_tag, create=True)
+            except Exception:
+                self._shm = None
+                shm_tag = None
+
         context = multiprocessing.get_context("spawn")
         self._connection, child = context.Pipe()
-        if worker is _host:
-            self._process = context.Process(target=worker, args=(child, path, probe_only), daemon=True)
+        if worker is _host or getattr(worker, "_supports_shm", False):
+            self._process = context.Process(target=worker, args=(child, path, probe_only, shm_tag), daemon=True)
         else:
             self._process = context.Process(target=worker, args=(child, path), daemon=True)
         self._process.start()
         child.close()
         if not probe_only and getattr(self._process, "pid", None):
             register_plugin_pid(self._process.pid)
+            if self._shm is not None and self._shm._k32:
+                try:
+                    self._shm._proc_handle = self._shm._k32.OpenProcess(0x00100000, False, int(self._process.pid))
+                    if self._shm._proc_handle:
+                        self._shm._wait_handles = (c_void_p * 2)(self._shm._resp_evt, self._shm._proc_handle)
+                        self._shm._wait_count = 2
+                except Exception:
+                    pass
         try:
             metadata = self._receive(timeout, dismiss_popups=probe_only)
             self.__dict__.update(metadata)
@@ -1150,7 +1473,116 @@ class IsolatedPlugin:
                 raise RuntimeError(self._failure) from exc
             return self._receive(timeout)
 
+    def _shm_render_midi(self, midi_messages, num_frames: int, sample_rate: float, num_channels: int, reset_flag: bool, timeout_ms: int = 5000):
+        shm = self._shm
+        buf = shm._buf
+        k32 = shm._k32
+        sr = float(sample_rate) if sample_rate > 0 else 44100.0
+        ev_count = 0
+        if midi_messages:
+            for item in midi_messages:
+                if ev_count >= _MAX_SHM_MIDI:
+                    break
+                if isinstance(item, (tuple, list)) and len(item) >= 2:
+                    raw_bytes, ts = item[0], float(item[1])
+                else:
+                    raw_bytes = getattr(item, "data", b"")
+                    ts = float(getattr(item, "timestamp", 0.0))
+                if not raw_bytes:
+                    continue
+                b = bytes(raw_bytes)
+                b0 = b[0] if len(b) > 0 else 0
+                b1 = b[1] if len(b) > 1 else 0
+                b2 = b[2] if len(b) > 2 else 0
+                sample_idx = max(0, int(round(ts * sr)))
+                _SHM_MIDI_STRUCT.pack_into(buf, _SHM_MIDI_OFFSET + ev_count * _SHM_MIDI_STRUCT.size, sample_idx, b0, b1, b2, 0)
+                ev_count += 1
+
+        shm.write_header(_SHM_OP_RENDER_MIDI, _SHM_STATUS_PENDING, num_frames, num_channels, ev_count, sr, 1 if reset_flag else 0, 0)
+        k32.SetEvent(shm._req_evt)
+        wait_res = k32.WaitForMultipleObjects(shm._wait_count, shm._wait_handles, False, int(timeout_ms))
+        if wait_res != 0:
+            self._failure = "Le processus du plugin s'est arrêté ou ne répond plus."
+            self.dispose()
+            raise RuntimeError(self._failure)
+        _, status, _, _, _, _, _, err_len = shm.read_header()
+        if status == _SHM_STATUS_ERROR:
+            msg = bytes(buf[_SHM_ERR_OFFSET : _SHM_ERR_OFFSET + min(_SHM_ERR_SIZE, err_len)]).decode("utf-8", errors="ignore")
+            raise RuntimeError(msg or "Erreur de rendu VST.")
+        return shm._out_view[:num_channels, :num_frames]
+
+    def _shm_render_audio(self, in_planar: np.ndarray, num_frames: int, sample_rate: float, num_channels: int, reset_flag: bool, timeout_ms: int = 5000):
+        shm = self._shm
+        buf = shm._buf
+        k32 = shm._k32
+        rows = min(num_channels, in_planar.shape[0])
+        shm._in_view[:rows, :num_frames] = in_planar[:rows, :num_frames]
+        if rows < num_channels:
+            shm._in_view[rows:num_channels, :num_frames] = in_planar[0, :num_frames]
+        shm.write_header(_SHM_OP_RENDER_AUDIO, _SHM_STATUS_PENDING, num_frames, num_channels, 0, float(sample_rate), 1 if reset_flag else 0, 0)
+        k32.SetEvent(shm._req_evt)
+        wait_res = k32.WaitForMultipleObjects(shm._wait_count, shm._wait_handles, False, int(timeout_ms))
+        if wait_res != 0:
+            self._failure = "Le processus du plugin s'est arrêté ou ne répond plus."
+            self.dispose()
+            raise RuntimeError(self._failure)
+        _, status, _, _, _, _, _, err_len = shm.read_header()
+        if status == _SHM_STATUS_ERROR:
+            msg = bytes(buf[_SHM_ERR_OFFSET : _SHM_ERR_OFFSET + min(_SHM_ERR_SIZE, err_len)]).decode("utf-8", errors="ignore")
+            raise RuntimeError(msg or "Erreur de rendu VST.")
+        return shm._out_view[:num_channels, :num_frames]
+
+    def render_live_block(self, midi_messages, num_frames: int, sample_rate: float, out_stereo: np.ndarray) -> bool:
+        """
+        Zero-allocation live block render directly into caller's (num_frames, 2) float32 buffer.
+        Returns False if lock is busy (e.g. during preset save) so the real-time callback never stalls.
+        """
+        if self._shm is None or num_frames > _MAX_SHM_FRAMES:
+            return False
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            if self._failure or self._shm is None:
+                return False
+            out_planar = self._shm_render_midi(midi_messages, num_frames, sample_rate, 2, False, timeout_ms=2000)
+            out_stereo[:num_frames, 0] = out_planar[0, :num_frames]
+            out_stereo[:num_frames, 1] = out_planar[1, :num_frames]
+            return True
+        finally:
+            self._lock.release()
+
     def __call__(self, *args, **kwargs):
+        if self._shm is not None:
+            sample_rate = float(kwargs.get("sample_rate", 44100.0))
+            reset_flag = bool(kwargs.get("reset", False))
+            num_channels = int(kwargs.get("num_channels", 2))
+            first_arg = args[0] if args else kwargs.get("input_array", kwargs.get("midi_messages"))
+            is_midi_input = isinstance(first_arg, list) or "duration" in kwargs
+
+            if is_midi_input:
+                duration = float(kwargs.get("duration", args[1] if len(args) > 1 else 1.0))
+                total_frames = max(1, int(round(duration * sample_rate)))
+                if total_frames <= _MAX_SHM_FRAMES and 1 <= num_channels <= _MAX_SHM_CHANNELS:
+                    with self._lock:
+                        if self._failure:
+                            raise RuntimeError(self._failure)
+                        return self._shm_render_midi(first_arg, total_frames, sample_rate, num_channels, reset_flag).copy()
+            elif first_arg is not None:
+                arr = np.asarray(first_arg, dtype=np.float32)
+                if arr.ndim == 1:
+                    in_planar = np.vstack([arr, arr])
+                elif arr.shape[0] <= 16 and (arr.shape[1] > arr.shape[0] or arr.shape[0] <= 2):
+                    in_planar = np.ascontiguousarray(arr, dtype=np.float32)
+                else:
+                    in_planar = np.ascontiguousarray(arr.T, dtype=np.float32)
+                in_ch = min(_MAX_SHM_CHANNELS, in_planar.shape[0])
+                total_frames = in_planar.shape[1]
+                if 1 <= total_frames <= _MAX_SHM_FRAMES and 1 <= in_ch <= _MAX_SHM_CHANNELS:
+                    with self._lock:
+                        if self._failure:
+                            raise RuntimeError(self._failure)
+                        return self._shm_render_audio(in_planar, total_frames, sample_rate, in_ch, reset_flag).copy()
+
         return self.request("render", *args, **kwargs)
 
     def reset(self):
@@ -1165,10 +1597,20 @@ class IsolatedPlugin:
         self.request("restore", value)
 
     def dispose(self):
+        if getattr(self, "_shm", None) is not None:
+            try:
+                self._shm.close()
+            except Exception:
+                pass
+            self._shm = None
         if getattr(self, "_process", None):
             if getattr(self._process, "pid", None):
                 unregister_plugin_pid(self._process.pid)
             if self._process.is_alive():
                 self._process.terminate()
             self._process.join(timeout=1)
-        self._connection.close()
+        if getattr(self, "_connection", None):
+            try:
+                self._connection.close()
+            except Exception:
+                pass

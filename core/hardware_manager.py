@@ -43,9 +43,10 @@ class HardwareManager:
                 "input_device_name": None,
                 "input_device_index": None,
                 "sample_rate": 44100,
-                "buffer_size": 256,
+                "buffer_size": 128,
                 "record_offset_samples": 0,
                 "asio_guard_enabled": True,
+                "wasapi_exclusive": True,
                 "release_driver_background": False,
             },
             "graphics": {
@@ -257,6 +258,17 @@ class HardwareManager:
             return 0.0
         return round((buffer_size / sample_rate) * 1000.0, 2)
 
+    def is_wasapi_device(self, device_index: Optional[int]) -> bool:
+        """Retourne True si le périphérique audio utilise l'API Windows WASAPI."""
+        if not HAS_SOUNDDEVICE or device_index is None or device_index < 0:
+            return False
+        try:
+            d = sd.query_devices(device_index)
+            api_info = sd.query_hostapis(d.get("hostapi", 0))
+            return "wasapi" in api_info.get("name", "").lower()
+        except Exception:
+            return False
+
     def get_device_latencies(
         self,
         output_device_index: Optional[int] = None,
@@ -274,6 +286,10 @@ class HardwareManager:
         buf = int(kwargs.get("buffer_size", buffer_size))
         out_idx = kwargs.get("output_device_index", output_device_index)
         in_idx = kwargs.get("input_device_index", input_device_index)
+        wasapi_excl = kwargs.get(
+            "wasapi_exclusive",
+            self.settings.get("audio", {}).get("wasapi_exclusive", True)
+        )
 
         sr = max(1, sr)
         base_buf_ms = (buf / sr) * 1000.0
@@ -287,7 +303,10 @@ class HardwareManager:
                     d = sd.query_devices(out_idx)
                     hw_low = d.get("default_low_output_latency", 0.0)
                     if hw_low > 0:
-                        out_lat_ms = max(base_buf_ms, hw_low * 1000.0)
+                        if wasapi_excl and self.is_wasapi_device(out_idx):
+                            out_lat_ms = max(base_buf_ms, min(base_buf_ms * 1.5, hw_low * 1000.0))
+                        else:
+                            out_lat_ms = max(base_buf_ms, hw_low * 1000.0)
                 if in_idx is not None and in_idx >= 0:
                     d_in = sd.query_devices(in_idx)
                     hw_in_low = d_in.get("default_low_input_latency", 0.0)
@@ -548,7 +567,7 @@ class HardwareManager:
         except Exception:
             return None
 
-    def get_optimal_sample_rate(self, device_index: Optional[int], is_input: bool = False) -> int:
+    def get_optimal_sample_rate(self, device_index: Optional[int], is_input: bool = False, extra_settings: Any = None) -> int:
         """
         Détecte et valide automatiquement la fréquence d'échantillonnage compatible avec le matériel,
         sans émettre de son ni provoquer d'erreur PortAudio.
@@ -565,7 +584,10 @@ class HardwareManager:
             check_func = sd.check_input_settings if is_input else sd.check_output_settings
             for candidate in ordered_candidates:
                 try:
-                    check_func(device=device_index, samplerate=candidate)
+                    if extra_settings is not None:
+                        check_func(device=device_index, samplerate=candidate, channels=2, dtype="float32", extra_settings=extra_settings)
+                    else:
+                        check_func(device=device_index, samplerate=candidate)
                     return candidate
                 except Exception:
                     continue
@@ -583,12 +605,12 @@ class HardwareManager:
             api_info = sd.query_hostapis(host_api_idx)
             api_name = api_info.get("name", "").lower()
 
-            # Pilotes faible latence (ASIO, WASAPI) : 256 ou 512 échantillons
+            # Pilotes faible latence (ASIO, WASAPI) : 128 échantillons pour jeu temps réel optimal
             if "asio" in api_name:
-                return 256
+                return 128
             elif "wasapi" in api_name:
                 low_lat = d.get("default_low_output_latency", 0.01)
-                return 256 if low_lat <= 0.005 else 512
+                return 128 if low_lat <= 0.01 else 256
             else:
                 return 512
         except Exception:
@@ -625,7 +647,15 @@ class HardwareManager:
             except Exception:
                 pass
 
-        sample_rate = self.get_optimal_sample_rate(out_idx, is_input=False)
+        wasapi_excl = bool(self.settings.get("audio", {}).get("wasapi_exclusive", True))
+        extra = None
+        if wasapi_excl and HAS_SOUNDDEVICE and "wasapi" in host_api_name.lower() and hasattr(sd, "WasapiSettings"):
+            try:
+                extra = sd.WasapiSettings(exclusive=True)
+            except Exception:
+                extra = None
+
+        sample_rate = self.get_optimal_sample_rate(out_idx, is_input=False, extra_settings=extra)
         buffer_size = self.get_optimal_buffer_size(out_idx, sample_rate)
 
         audio_cfg = self.settings.setdefault("audio", {})
@@ -636,6 +666,7 @@ class HardwareManager:
         audio_cfg["input_device_index"] = in_idx
         audio_cfg["sample_rate"] = sample_rate
         audio_cfg["buffer_size"] = buffer_size
+        audio_cfg["wasapi_exclusive"] = wasapi_excl
 
         self.save_settings()
         return audio_cfg

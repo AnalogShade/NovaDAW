@@ -5,6 +5,7 @@ Permet de jouer des notes MIDI en temps réel directement avec les touches du cl
 Activé et désactivé par le raccourci global Ctrl+K.
 """
 import sys
+import threading
 from typing import Optional, Dict, Set
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -375,6 +376,13 @@ class VirtualKeyboardDialog(QDialog):
     """
     visibility_toggled = Signal(bool)
     remote_key_event = Signal(int, bool)  # (key_code, is_press)
+    remote_visual_event = Signal(int, bool, int)  # (key_code, is_press, pitch)
+
+    _CONTROL_KEYS = {
+        Qt.Key_Z, Qt.Key_X, Qt.Key_C, Qt.Key_V,
+        Qt.Key_BracketLeft, Qt.Key_BracketRight,
+        Qt.Key_Up, Qt.Key_Down,
+    }
 
     def __init__(self, audio_engine: AudioEngine, parent=None):
         super().__init__(parent)
@@ -385,6 +393,8 @@ class VirtualKeyboardDialog(QDialog):
         self.base_pitch = 48  # C3 par défaut
         self.velocity = 100   # Vélocité par défaut
         self.held_keys_pitches: Dict[int, int] = {}  # key_code -> pitch
+        self._fast_key_lock = threading.Lock()
+        self._fast_held_pitches: Dict[int, int] = {}
 
         self.setWindowTitle("🎹 Clavier Musical Virtuel (Musical Typing) — [Ctrl+K]")
         self.setWindowFlags(Qt.Tool | Qt.WindowStaysOnTopHint | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
@@ -433,6 +443,7 @@ class VirtualKeyboardDialog(QDialog):
 
         # Connexion pour les événements distants (threads externes, éditeurs VST Win32)
         self.remote_key_event.connect(self._on_remote_key_event)
+        self.remote_visual_event.connect(self._on_remote_visual_event)
 
         # Démarrage du hook bas niveau Windows global (WH_KEYBOARD_LL)
         try:
@@ -442,7 +453,7 @@ class VirtualKeyboardDialog(QDialog):
                 set_text_editing_focused,
             )
             start_global_keyboard_hook(
-                key_callback=lambda qt_k, is_d: self.remote_key_event.emit(qt_k, is_d),
+                key_callback=self._dispatch_remote_key,
                 toggle_callback=lambda: self.remote_key_event.emit(-1, True),
                 window_focus_callback=self._on_win32_window_focused,
             )
@@ -481,6 +492,34 @@ class VirtualKeyboardDialog(QDialog):
         """Indique si la saisie musicale avec les touches de l'ordinateur est actuellement active."""
         return self._is_active
 
+    def _dispatch_remote_key(self, qt_key: int, is_down: bool):
+        """
+        Chemin rapide direct (thread hook / VST -> AudioEngine) :
+        Déclenche immédiatement la note audio sans attendre la file d'événements GUI Qt,
+        puis notifie l'UI de manière asynchrone pour l'affichage visuel des touches.
+        """
+        if not self._is_active:
+            return
+        if qt_key not in self._CONTROL_KEYS and qt_key in KEY_NOTE_MAP:
+            if is_down:
+                pitch = None
+                with self._fast_key_lock:
+                    if qt_key not in self._fast_held_pitches:
+                        offset, _ = KEY_NOTE_MAP[qt_key]
+                        pitch = self.base_pitch + offset
+                        self._fast_held_pitches[qt_key] = pitch
+                if pitch is not None:
+                    self._play_note(pitch)
+                    self.remote_visual_event.emit(qt_key, True, pitch)
+            else:
+                with self._fast_key_lock:
+                    pitch = self._fast_held_pitches.pop(qt_key, None)
+                if pitch is not None:
+                    self._stop_note(pitch, min_gate_sec=0.0)
+                    self.remote_visual_event.emit(qt_key, False, pitch)
+            return
+        self.remote_key_event.emit(qt_key, is_down)
+
     def _vst_raw_key_callback(self, vk_code: int, is_down: bool):
         """Callback invoqué depuis le thread de messagerie de l'éditeur VST Win32."""
         if not self._is_active:
@@ -497,7 +536,18 @@ class VirtualKeyboardDialog(QDialog):
                 self.remote_key_event.emit(-1, True)
             return
         qt_key = win_vk_to_qt_key(vk_code)
-        self.remote_key_event.emit(qt_key, is_down)
+        self._dispatch_remote_key(qt_key, is_down)
+
+    def _on_remote_visual_event(self, key_code: int, is_down: bool, pitch: int):
+        """Met à jour uniquement l'état visuel du clavier après déclenchement audio direct."""
+        if not self._is_active and is_down:
+            return
+        if is_down:
+            self.held_keys_pitches[key_code] = pitch
+            self.piano_widget.set_pitch_active(pitch, True)
+        else:
+            old_pitch = self.held_keys_pitches.pop(key_code, pitch)
+            self.piano_widget.set_pitch_active(old_pitch, False)
 
     def _on_remote_key_event(self, key_code: int, is_down: bool):
         """Gère un événement de touche distant sur le thread UI principal."""
@@ -629,14 +679,26 @@ class VirtualKeyboardDialog(QDialog):
         if self.audio_engine:
             self.audio_engine.start_live_note(pitch, velocity=self.velocity, track=self.current_track)
 
-    def _stop_note(self, pitch: int):
+    def _stop_note(self, pitch: int, min_gate_sec: Optional[float] = None):
         if self.audio_engine:
-            self.audio_engine.stop_live_note(pitch, track=self.current_track)
+            try:
+                self.audio_engine.stop_live_note(pitch, track=self.current_track, min_gate_sec=min_gate_sec)
+            except TypeError:
+                self.audio_engine.stop_live_note(pitch, track=self.current_track)
 
     def _release_all_held_notes(self):
+        with self._fast_key_lock:
+            fast_copy = dict(self._fast_held_pitches)
+            self._fast_held_pitches.clear()
+        released_pitches = set()
         for key, pitch in list(self.held_keys_pitches.items()):
-            self._stop_note(pitch)
+            self._stop_note(pitch, min_gate_sec=0.0)
             self.piano_widget.set_pitch_active(pitch, False)
+            released_pitches.add((key, pitch))
+        for key, pitch in fast_copy.items():
+            if (key, pitch) not in released_pitches:
+                self._stop_note(pitch, min_gate_sec=0.0)
+                self.piano_widget.set_pitch_active(pitch, False)
         self.held_keys_pitches.clear()
         self.piano_widget.clear_active_pitches()
 
@@ -659,8 +721,12 @@ class VirtualKeyboardDialog(QDialog):
         # Notes musicales
         if key_code in KEY_NOTE_MAP:
             offset, _ = KEY_NOTE_MAP[key_code]
-            pitch = self.base_pitch + offset
-            if key_code not in self.held_keys_pitches:
+            pitch = None
+            with self._fast_key_lock:
+                if key_code not in self._fast_held_pitches and key_code not in self.held_keys_pitches:
+                    pitch = self.base_pitch + offset
+                    self._fast_held_pitches[key_code] = pitch
+            if pitch is not None:
                 self.held_keys_pitches[key_code] = pitch
                 self.piano_widget.set_pitch_active(pitch, True)
                 self._play_note(pitch)
@@ -669,10 +735,13 @@ class VirtualKeyboardDialog(QDialog):
         return False
 
     def handle_key_release(self, key_code: int) -> bool:
-        if key_code in self.held_keys_pitches:
-            pitch = self.held_keys_pitches.pop(key_code)
+        with self._fast_key_lock:
+            fast_pitch = self._fast_held_pitches.pop(key_code, None)
+        ui_pitch = self.held_keys_pitches.pop(key_code, None)
+        pitch = ui_pitch if ui_pitch is not None else fast_pitch
+        if pitch is not None:
             self.piano_widget.set_pitch_active(pitch, False)
-            self._stop_note(pitch)
+            self._stop_note(pitch, min_gate_sec=0.0)
             return True
         return False
 

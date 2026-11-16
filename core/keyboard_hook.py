@@ -129,6 +129,10 @@ class LowLevelKeyboardHook:
         self._toggle_callback: Optional[Callable[[], None]] = None
         self._window_focus_callback: Optional[Callable[[int], None]] = None
         self._last_fg_hwnd: int = 0
+        self._cached_hwnd: int = 0
+        self._cached_hwnd_ok: bool = False
+        self._cached_hwnd_ts: float = 0.0
+        self._main_pid: int = os.getpid()
 
         self._init_win32_api()
 
@@ -186,44 +190,54 @@ class LowLevelKeyboardHook:
         """Détermine si la fenêtre spécifiée appartient à NovaDAW ou à l'un de ses plugins VST externes."""
         if not hwnd or sys.platform != "win32":
             return False
+        now = time.monotonic()
+        if hwnd == self._cached_hwnd and (now - self._cached_hwnd_ts) < 0.30:
+            return self._cached_hwnd_ok
+        res = False
         try:
             fg_pid = wintypes.DWORD()
             self._user32.GetWindowThreadProcessId(hwnd, ctypes.byref(fg_pid))
             pid = fg_pid.value
 
             # 1. Processus principal de NovaDAW
-            if pid == os.getpid():
-                return True
+            if pid == self._main_pid:
+                res = True
+            else:
+                # 2. Processus enfants isolés de plugins VST (Omnisphere, Serum, etc.)
+                try:
+                    from core.vst_host import _ACTIVE_PLUGIN_PIDS
+                    if pid in _ACTIVE_PLUGIN_PIDS:
+                        res = True
+                except Exception:
+                    pass
 
-            # 2. Processus enfants isolés de plugins VST (Omnisphere, Serum, etc.)
-            try:
-                from core.vst_host import get_active_plugin_pids
-                if pid in get_active_plugin_pids():
-                    return True
-            except Exception:
-                pass
+                if not res:
+                    try:
+                        from core.plugin_manager import global_plugin_manager
+                        if pid in getattr(global_plugin_manager, "track_id_by_pid", {}):
+                            res = True
+                    except Exception:
+                        pass
 
-            try:
-                from core.plugin_manager import global_plugin_manager
-                if pid in getattr(global_plugin_manager, "track_id_by_pid", {}):
-                    return True
-            except Exception:
-                pass
-
-            # 3. Vérification du titre de la fenêtre et de sa fenêtre racine parente
-            for h in (hwnd, self._user32.GetAncestor(hwnd, GA_ROOT)):
-                if not h:
-                    continue
-                length = self._user32.GetWindowTextLengthW(h)
-                if length > 0:
-                    buf = ctypes.create_unicode_buffer(length + 1)
-                    self._user32.GetWindowTextW(h, buf, length + 1)
-                    title = buf.value.lower()
-                    if "novadaw" in title or "omnisphere" in title:
-                        return True
+                # 3. Vérification du titre de la fenêtre et de sa fenêtre racine parente
+                if not res:
+                    for h in (hwnd, self._user32.GetAncestor(hwnd, GA_ROOT)):
+                        if not h:
+                            continue
+                        length = self._user32.GetWindowTextLengthW(h)
+                        if length > 0:
+                            buf = ctypes.create_unicode_buffer(length + 1)
+                            self._user32.GetWindowTextW(h, buf, length + 1)
+                            title = buf.value.lower()
+                            if "novadaw" in title or "omnisphere" in title:
+                                res = True
+                                break
         except Exception:
             pass
-        return False
+        self._cached_hwnd = hwnd
+        self._cached_hwnd_ok = res
+        self._cached_hwnd_ts = now
+        return res
 
     def _hook_procedure(self, nCode, wParam, lParam):
         """Procédure de rappel appelée par Windows pour chaque événement clavier du système."""

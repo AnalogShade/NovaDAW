@@ -364,6 +364,12 @@ class DeviceSettingsDialog(QDialog):
         self.chk_asio_guard.setToolTip("Garantit une lecture fluide même avec des dizaines de pistes et instruments virtuels")
         grp_perf_l.addWidget(self.chk_asio_guard)
 
+        self.chk_wasapi_exclusive = QCheckBox("Mode WASAPI Exclusif (Latence minimale type ASIO — contourne le mixeur Windows)")
+        self.chk_wasapi_exclusive.setChecked(True)
+        self.chk_wasapi_exclusive.setToolTip("Accès direct au matériel audio sous Windows WASAPI pour éliminer le tampon du mixeur Windows (repli auto en mode partagé si occupé)")
+        self.chk_wasapi_exclusive.stateChanged.connect(lambda _s: self._update_latency_label())
+        grp_perf_l.addWidget(self.chk_wasapi_exclusive)
+
         self.chk_release_background = QCheckBox("Libérer le pilote audio lorsque NovaDAW est en arrière-plan")
         self.chk_release_background.setChecked(False)
         self.chk_release_background.setToolTip("Permet à d'autres applications (lecteur média, navigateur) d'accéder au périphérique audio quand NovaDAW est minimisé")
@@ -564,6 +570,10 @@ class DeviceSettingsDialog(QDialog):
         if hasattr(self, "chk_asio_guard"):
             self.chk_asio_guard.setChecked(asio_guard)
 
+        wasapi_excl = hardware_manager.settings.get("audio", {}).get("wasapi_exclusive", True)
+        if hasattr(self, "chk_wasapi_exclusive"):
+            self.chk_wasapi_exclusive.setChecked(wasapi_excl)
+
         rel_bg = hardware_manager.settings.get("audio", {}).get("release_driver_background", False)
         if hasattr(self, "chk_release_background"):
             self.chk_release_background.setChecked(rel_bg)
@@ -617,11 +627,15 @@ class DeviceSettingsDialog(QDialog):
         self.combo_output.addItem(f"Périphérique de sortie par défaut du système ({def_out_name})", -1)
 
         cur_out_dev = getattr(self.audio_engine, "output_device", None)
+        saved_out_name = hardware_manager.settings.get("audio", {}).get("output_device_name", "") or ""
+        saved_out_clean = saved_out_name.split("(")[0].strip().lower()
         sel_out_idx = 0
 
         for idx, d in enumerate(devices["outputs"]):
             self.combo_output.addItem(f"{d['name']} ({d['max_outputs']} canaux)", d["index"])
             if cur_out_dev is not None and d["index"] == cur_out_dev:
+                sel_out_idx = idx + 1
+            elif sel_out_idx == 0 and saved_out_clean and saved_out_clean in d["name"].lower() and "défaut" not in saved_out_clean:
                 sel_out_idx = idx + 1
 
         self.combo_output.setCurrentIndex(sel_out_idx)
@@ -665,11 +679,13 @@ class DeviceSettingsDialog(QDialog):
         out_dev = out_idx if out_idx is not None and out_idx >= 0 else None
         in_dev = in_idx if in_idx is not None and in_idx >= 0 else None
 
+        wasapi_excl = self.chk_wasapi_exclusive.isChecked() if hasattr(self, "chk_wasapi_exclusive") else True
         latencies = hardware_manager.get_device_latencies(
             input_device_index=in_dev,
             output_device_index=out_dev,
             buffer_size=buf,
-            sample_rate=sr
+            sample_rate=sr,
+            wasapi_exclusive=wasapi_excl,
         )
 
         in_ms = latencies.get("input_ms", latencies.get("input_latency_ms", 0.0))
@@ -711,6 +727,7 @@ class DeviceSettingsDialog(QDialog):
         buf = self.combo_buffer_size.currentData()
         rec_offset = self.spin_record_offset.value() if hasattr(self, "spin_record_offset") else 0
         asio_guard = self.chk_asio_guard.isChecked() if hasattr(self, "chk_asio_guard") else True
+        wasapi_excl = self.chk_wasapi_exclusive.isChecked() if hasattr(self, "chk_wasapi_exclusive") else True
 
         success = self.audio_engine.configure_device(
             output_device=out_dev_idx if out_dev_idx >= 0 else None,
@@ -718,7 +735,8 @@ class DeviceSettingsDialog(QDialog):
             sample_rate=sr,
             block_size=buf,
             record_offset_samples=rec_offset,
-            asio_guard=asio_guard
+            asio_guard=asio_guard,
+            wasapi_exclusive=wasapi_excl,
         )
         if hasattr(self, "lbl_control_panel_status"):
             if success:
@@ -756,6 +774,7 @@ class DeviceSettingsDialog(QDialog):
         buf = self.combo_buffer_size.currentData()
         rec_offset = self.spin_record_offset.value() if hasattr(self, "spin_record_offset") else 0
         asio_guard = self.chk_asio_guard.isChecked() if hasattr(self, "chk_asio_guard") else True
+        wasapi_excl = self.chk_wasapi_exclusive.isChecked() if hasattr(self, "chk_wasapi_exclusive") else True
         rel_bg = self.chk_release_background.isChecked() if hasattr(self, "chk_release_background") else False
 
         # Application au moteur audio
@@ -765,7 +784,8 @@ class DeviceSettingsDialog(QDialog):
             sample_rate=sr,
             block_size=buf,
             record_offset_samples=rec_offset,
-            asio_guard=asio_guard
+            asio_guard=asio_guard,
+            wasapi_exclusive=wasapi_excl,
         )
 
         # 2. Sauvegarde dans HardwareManager
@@ -778,6 +798,7 @@ class DeviceSettingsDialog(QDialog):
         hardware_manager.settings["audio"]["buffer_size"] = buf
         hardware_manager.settings["audio"]["record_offset_samples"] = rec_offset
         hardware_manager.settings["audio"]["asio_guard_enabled"] = asio_guard
+        hardware_manager.settings["audio"]["wasapi_exclusive"] = wasapi_excl
         hardware_manager.settings["audio"]["release_driver_background"] = rel_bg
 
         # 3. Réglages graphiques

@@ -78,10 +78,12 @@ class AudioEngine:
         global _global_audio_engine
         _global_audio_engine = self
 
+        self._wasapi_exclusive: bool = True
         # Configuration automatique universelle du matériel audio
         try:
             from core.hardware_manager import hardware_manager
             audio_cfg = hardware_manager.settings.get("audio", {})
+            self._wasapi_exclusive = bool(audio_cfg.get("wasapi_exclusive", True))
             out_idx = audio_cfg.get("output_device_index") if output_device is None else output_device
 
             # Valider si le périphérique sauvegardé existe encore ou lancer l'auto-configuration
@@ -96,7 +98,13 @@ class AudioEngine:
             if self.input_device is None:
                 self.input_device = hardware_manager.get_default_input_device_index()
 
-            optimal_sr = hardware_manager.get_optimal_sample_rate(self.output_device)
+            extra = None
+            if self._wasapi_exclusive and HAS_SOUNDDEVICE and hardware_manager.is_wasapi_device(self.output_device) and hasattr(sd, "WasapiSettings"):
+                try:
+                    extra = sd.WasapiSettings(exclusive=True)
+                except Exception:
+                    extra = None
+            optimal_sr = hardware_manager.get_optimal_sample_rate(self.output_device, extra_settings=extra)
             self.sample_rate = int(audio_cfg.get("sample_rate", optimal_sr)) if sample_rate is None else sample_rate
             optimal_buf = hardware_manager.get_optimal_buffer_size(self.output_device, self.sample_rate)
             self.block_size = int(audio_cfg.get("buffer_size", optimal_buf)) if block_size is None else block_size
@@ -153,6 +161,10 @@ class AudioEngine:
         self._live_active_notes: Dict[tuple[str, int], Dict[str, Any]] = {}
         self._live_active_track: Optional[Track] = None
         self._live_tail_until: float = 0.0
+        self._live_last_audible_time: float = 0.0
+        self._live_direct_active: bool = False
+        self._cb_out_buf: Optional[np.ndarray] = None
+        self._live_vst_buf: Optional[np.ndarray] = None
         self._live_vst_event = threading.Event()
         self._live_vst_thread: Optional[threading.Thread] = None
 
@@ -170,7 +182,7 @@ class AudioEngine:
 
         self._start_stream()
 
-    def configure_device(self, output_device: Optional[int] = None, input_device: Optional[int] = None, sample_rate: Optional[int] = None, block_size: Optional[int] = None, buffer_size: Optional[int] = None, record_offset_samples: Optional[int] = None, asio_guard: Optional[bool] = None) -> bool:
+    def configure_device(self, output_device: Optional[int] = None, input_device: Optional[int] = None, sample_rate: Optional[int] = None, block_size: Optional[int] = None, buffer_size: Optional[int] = None, record_offset_samples: Optional[int] = None, asio_guard: Optional[bool] = None, wasapi_exclusive: Optional[bool] = None) -> bool:
         """Modifie le périphérique audio, la fréquence d'échantillonnage ou la taille du buffer et redémarre le flux."""
         self.close()
         effective_buffer = buffer_size if buffer_size is not None else block_size
@@ -186,6 +198,8 @@ class AudioEngine:
             self.record_latency_compensation_samples = int(record_offset_samples)
         if asio_guard is not None:
             self._asio_guard_enabled = bool(asio_guard)
+        if wasapi_exclusive is not None:
+            self._wasapi_exclusive = bool(wasapi_exclusive)
         self._start_stream()
         return self._stream is not None or os.environ.get("NOVADAW_SILENT_TESTS") == "1"
 
@@ -271,39 +285,62 @@ class AudioEngine:
         if target_device is not None and target_device < 0:
             target_device = None
 
-        # Valider dynamiquement la fréquence optimale acceptée par le périphérique cible
-        valid_sr = hardware_manager.get_optimal_sample_rate(target_device)
-        candidate_srs = [valid_sr, self.sample_rate, 44100, 48000]
-        seen = set()
-        candidate_srs = [x for x in candidate_srs if not (x in seen or seen.add(x))]
+        is_wasapi = hardware_manager.is_wasapi_device(target_device)
+        wasapi_excl_settings = None
+        if is_wasapi and self._wasapi_exclusive and HAS_SOUNDDEVICE and hasattr(sd, "WasapiSettings"):
+            try:
+                wasapi_excl_settings = sd.WasapiSettings(exclusive=True)
+            except Exception:
+                wasapi_excl_settings = None
+
+        # Préparer les essais d'ouverture : WASAPI Exclusif d'abord (si actif), puis Partagé en repli
+        extra_modes = [wasapi_excl_settings, None] if wasapi_excl_settings is not None else [None]
 
         opened = False
-        for sr in candidate_srs:
-            try:
-                # Tester d'abord la validité matérielle sans émettre d'erreur
-                if target_device is not None:
-                    sd.check_output_settings(device=target_device, samplerate=sr)
-                else:
-                    sd.check_output_settings(samplerate=sr)
+        for extra in extra_modes:
+            valid_sr = hardware_manager.get_optimal_sample_rate(target_device, extra_settings=extra)
+            candidate_srs = [self.sample_rate, valid_sr, 44100, 48000] if extra is None else [valid_sr, self.sample_rate, 44100, 48000]
+            seen = set()
+            candidate_srs = [x for x in candidate_srs if not (x in seen or seen.add(x))]
+            block_trials = [self.block_size, 0] if extra is not None else [self.block_size]
 
-                kwargs = {
-                    "samplerate": sr,
-                    "blocksize": self.block_size,
-                    "channels": 2,
-                    "dtype": "float32",
-                    "callback": self._audio_callback
-                }
-                if target_device is not None:
-                    kwargs["device"] = target_device
+            for sr in candidate_srs:
+                for blk in block_trials:
+                    try:
+                        if target_device is not None:
+                            if extra is not None:
+                                sd.check_output_settings(device=target_device, samplerate=sr, channels=2, dtype="float32", extra_settings=extra)
+                            else:
+                                sd.check_output_settings(device=target_device, samplerate=sr)
+                        else:
+                            sd.check_output_settings(samplerate=sr)
 
-                self._stream = sd.OutputStream(**kwargs)
-                self._stream.start()
-                self.sample_rate = sr
-                opened = True
-                print(f"[AudioEngine] Flux audio démarré avec succès (device={target_device}, sr={sr}, block={self.block_size})")
+                        kwargs = {
+                            "samplerate": sr,
+                            "blocksize": blk,
+                            "channels": 2,
+                            "dtype": "float32",
+                            "latency": "low",
+                            "callback": self._audio_callback,
+                        }
+                        if target_device is not None:
+                            kwargs["device"] = target_device
+                        if extra is not None:
+                            kwargs["extra_settings"] = extra
+
+                        self._stream = sd.OutputStream(**kwargs)
+                        self._stream.start()
+                        self.sample_rate = sr
+                        opened = True
+                        mode_lbl = "WASAPI Exclusif" if extra is not None else "Standard"
+                        print(f"[AudioEngine] Flux audio démarré ({mode_lbl}, device={target_device}, sr={sr}, block={blk})")
+                        break
+                    except Exception:
+                        continue
+                if opened:
+                    break
+            if opened:
                 break
-            except Exception:
-                continue
 
         # Si le périphérique a échoué (ex: débranché ou invalide), déclencher l'auto-détection universelle
         if not opened:
@@ -312,13 +349,14 @@ class AudioEngine:
                 new_cfg = hardware_manager.auto_configure_audio(force=True)
                 new_dev = new_cfg.get("output_device_index")
                 new_sr = new_cfg.get("sample_rate", 44100)
-                new_buf = new_cfg.get("buffer_size", 512)
+                new_buf = new_cfg.get("buffer_size", 128)
 
                 kwargs = {
                     "samplerate": new_sr,
                     "blocksize": new_buf,
                     "channels": 2,
                     "dtype": "float32",
+                    "latency": "low",
                     "callback": self._audio_callback
                 }
                 if new_dev is not None and new_dev >= 0:
@@ -711,7 +749,9 @@ class AudioEngine:
         if native_inst is None and target_track and target_track.plugin_path:
             vst_plugin = self.get_track_plugin(target_track)
             if self._can_render_vst_offline(vst_plugin):
-                self._ensure_live_vst_streamer()
+                use_direct = hasattr(vst_plugin, "render_live_block") and getattr(vst_plugin, "_shm", None) is not None
+                if not use_direct:
+                    self._ensure_live_vst_streamer()
                 now = time.time()
                 vel = max(1, min(127, int(velocity)))
                 with self._live_midi_lock:
@@ -735,8 +775,10 @@ class AudioEngine:
                     }
                     q.append((bytes([self._midi_status(0x90, track), pitch, vel]), 0.0))
                     self._live_active_track = target_track
+                    self._live_direct_active = use_direct
                     self._live_tail_until = max(self._live_tail_until, now + 4.0)
-                self._live_vst_event.set()
+                if not use_direct:
+                    self._live_vst_event.set()
                 return
 
         # Instruments natifs (NovaSynth, Nova Drums) ou SynthVoice par défaut
@@ -801,12 +843,27 @@ class AudioEngine:
                 "releasing": is_drum,
             })
 
-    def stop_live_note(self, pitch: int, track: Optional[Track] = None):
+    def _flush_scheduled_live_note_offs(self, now: float):
+        """Convertit les Note-Off différés arrivés à échéance en messages MIDI immédiats."""
+        with self._live_midi_lock:
+            if not self._live_scheduled_note_offs:
+                return
+            still_waiting = []
+            for rel_ts, tid, p, channel in self._live_scheduled_note_offs:
+                if now >= rel_ts:
+                    self._live_midi_queue.setdefault(tid, []).append((bytes([0x80 | channel, p, 0]), 0.0))
+                    self._live_tail_until = max(self._live_tail_until, now + 4.0)
+                else:
+                    still_waiting.append((rel_ts, tid, p, channel))
+            self._live_scheduled_note_offs = still_waiting
+
+    def stop_live_note(self, pitch: int, track: Optional[Track] = None, min_gate_sec: Optional[float] = None):
         """
         Relâche une note démarrée avec start_live_note (Note-Off) avec maintien minimal
-        pour les clics rapides et queue de résonance naturelle sans coupure.
+        optionnel (0.35 s pour les clics souris, 0.0 s pour le clavier d'ordinateur).
         """
         now = time.time()
+        gate_sec = 0.35 if min_gate_sec is None else max(0.0, float(min_gate_sec))
         target_track = track
         if track and getattr(track, "synth_route_track_id", None) and self.project:
             routed = self.project.get_track(track.synth_route_track_id)
@@ -819,9 +876,8 @@ class AudioEngine:
                 note_info = self._live_active_notes.pop((target_track.id, int(pitch)), None)
                 if note_info is not None:
                     held_sec = max(0.05, now - float(note_info.get("press_time", now)))
-                    min_gate_sec = 0.35
-                    if held_sec < min_gate_sec:
-                        release_at = float(note_info.get("press_time", now)) + min_gate_sec
+                    if gate_sec > 0.0 and held_sec < gate_sec:
+                        release_at = float(note_info.get("press_time", now)) + gate_sec
                         self._live_scheduled_note_offs.append((release_at, target_track.id, int(pitch), note_info.get("channel", 0)))
                         self._live_tail_until = max(self._live_tail_until, release_at + 4.0)
                     else:
@@ -829,7 +885,8 @@ class AudioEngine:
                         q.append((bytes([0x80 | note_info.get("channel", 0), int(pitch), 0]), 0.0))
                         self._live_tail_until = max(self._live_tail_until, now + 4.0)
             if note_info is not None:
-                self._live_vst_event.set()
+                if not self._live_direct_active:
+                    self._live_vst_event.set()
                 rec_track = note_info.get("record_track") or track
                 if self.is_recording and rec_track and rec_track.track_type == "midi" and getattr(rec_track, "armed", False):
                     bpm = self.project.bpm if self.project else 120.0
@@ -854,7 +911,7 @@ class AudioEngine:
                     matched_info = item
                     buf = item["buffer"]
                     cur = item["cursor"]
-                    min_gate_frames = int(0.30 * self.sample_rate)
+                    min_gate_frames = int((0.30 if min_gate_sec is None else gate_sec) * self.sample_rate)
                     release_start = max(cur, min(len(buf), min_gate_frames))
                     rem = len(buf) - release_start
                     if rem > 0:
@@ -879,42 +936,126 @@ class AudioEngine:
                         velocity=int(matched_info.get("velocity", 100))
                     ))
 
+    def _render_live_vst_direct(self, frames: int, out: np.ndarray, block_track_peaks: Dict[str, tuple[float, float]]) -> bool:
+        """
+        Rendu VST live synchrone bloc-à-bloc sans FIFO intermédiaire (latence minimale).
+        Retourne True si le chemin direct SHM a traité le bloc (ou s'il n'y a rien à streamer).
+        Retourne False uniquement si un repli sur le thread FIFO (_live_vst_loop) est requis.
+        """
+        now = time.time()
+        self._flush_scheduled_live_note_offs(now)
+
+        if self.is_playing:
+            self._live_direct_active = False
+            return True
+
+        with self._live_midi_lock:
+            has_active_notes = bool(self._live_active_notes) or bool(self._live_scheduled_note_offs)
+            has_pending_midi = any(bool(events) for events in self._live_midi_queue.values())
+            active_track = self._live_active_track
+            tail_active = (now < self._live_tail_until) or (now - self._live_last_audible_time < 1.2)
+
+        open_editor_plugin = None
+        open_editor_track: Optional[Track] = None
+        from core.plugin_manager import global_plugin_manager
+        if global_plugin_manager.open_editors:
+            for ed_key, ed_evt in list(global_plugin_manager.open_editors.items()):
+                if ed_evt.is_set():
+                    continue
+                inst = global_plugin_manager.active_instances.get(ed_key)
+                if inst and getattr(inst, "is_instrument", False):
+                    open_editor_plugin = inst
+                    if self.project:
+                        for t in self.project.tracks:
+                            if ed_key == f"track:{t.id}:instrument:{t.plugin_path}" or t.plugin_path == ed_key:
+                                open_editor_track = t
+                                break
+                    break
+
+        if not (has_pending_midi or has_active_notes or tail_active or open_editor_plugin is not None):
+            self._live_direct_active = False
+            return True
+
+        target_track = active_track or open_editor_track
+        vst_plugin = None
+        if target_track is not None:
+            vst_plugin = self.get_track_plugin(target_track)
+        if vst_plugin is None and open_editor_plugin is not None:
+            vst_plugin = open_editor_plugin
+
+        if not self._can_render_vst_offline(vst_plugin):
+            self._live_direct_active = False
+            return True
+
+        # Utiliser le pont mémoire partagée synchrone si disponible (0 bloc de FIFO supplémentaire)
+        if not (hasattr(vst_plugin, "render_live_block") and getattr(vst_plugin, "_shm", None) is not None):
+            self._live_direct_active = False
+            self._live_vst_event.set()
+            return False
+
+        self._live_direct_active = True
+        midi_msgs: List[tuple[bytes, float]] = []
+        with self._live_midi_lock:
+            if target_track and target_track.id in self._live_midi_queue:
+                midi_msgs = list(self._live_midi_queue.pop(target_track.id, []))
+            elif self._live_midi_queue:
+                for tid in list(self._live_midi_queue.keys()):
+                    midi_msgs.extend(self._live_midi_queue.pop(tid, []))
+
+        if self._live_vst_buf is None or self._live_vst_buf.shape != (frames, 2):
+            self._live_vst_buf = np.zeros((frames, 2), dtype=np.float32)
+
+        wave = self._live_vst_buf
+        if not vst_plugin.render_live_block(midi_msgs, frames, self.sample_rate, wave):
+            return True
+
+        peak = float(np.max(np.abs(wave)))
+        if peak > 1e-4:
+            self._live_last_audible_time = now
+            with self._live_midi_lock:
+                if self._live_tail_until > 0.0:
+                    self._live_tail_until = max(self._live_tail_until, now + 1.2)
+
+        if target_track is not None:
+            processed = self._process_track_effects_isolated(target_track, wave, None)
+            vol = float(getattr(target_track, "volume", 0.8))
+            pan = max(-1.0, min(1.0, float(getattr(target_track, "pan", 0.0))))
+            left_gain = vol * (1.0 - max(0.0, pan))
+            right_gain = vol * (1.0 + min(0.0, pan))
+            processed[:, 0] *= left_gain
+            processed[:, 1] *= right_gain
+            out += processed
+            if len(processed) > 0:
+                pk_l = float(np.max(np.abs(processed[:, 0])))
+                pk_r = float(np.max(np.abs(processed[:, 1])))
+                if target_track.id not in block_track_peaks:
+                    block_track_peaks[target_track.id] = (pk_l, pk_r)
+                else:
+                    old_l, old_r = block_track_peaks[target_track.id]
+                    block_track_peaks[target_track.id] = (max(old_l, pk_l), max(old_r, pk_r))
+        else:
+            out += wave
+        return True
+
     def _live_vst_loop(self):
         """
-        Thread de streaming temps réel continu pour les instruments VST (VST2 / VST3) lorsque
-        le transport est à l'arrêt :
-        - Maintient le flux audio sans limite de durée tant qu'une note est enfoncée au Piano Roll
-        - Laisse résonner toute la queue de release/réverb après Note-Off tant que le signal est audible
-        - Alimente également le flux audio lorsqu'une fenêtre d'éditeur VST (ex: Omnisphere Patch Browser)
-          est ouverte afin que le bouton d'aperçu interne du plugin fonctionne en direct.
+        Thread de streaming temps réel de secours (pour bridges sans mémoire partagée comme VST2 32-bit).
+        Lorsque le pont mémoire partagée est actif, _render_live_vst_direct gère le rendu synchrone sans FIFO.
         """
         from core.plugin_manager import global_plugin_manager
         last_audible_time = 0.0
 
         while not self._cache_closed:
-            now = time.time()
-
-            # Gérer les Note-Off différés (clics courts)
-            due_note_offs: List[tuple[str, int, int]] = []
-            with self._live_midi_lock:
-                if self._live_scheduled_note_offs:
-                    still_waiting = []
-                    for rel_ts, tid, p, channel in self._live_scheduled_note_offs:
-                        if now >= rel_ts:
-                            due_note_offs.append((tid, p, channel))
-                        else:
-                            still_waiting.append((rel_ts, tid, p, channel))
-                    self._live_scheduled_note_offs = still_waiting
-                    for tid, p, channel in due_note_offs:
-                        self._live_midi_queue.setdefault(tid, []).append((bytes([0x80 | channel, p, 0]), 0.0))
-                        self._live_tail_until = max(self._live_tail_until, now + 4.0)
-
-            if self.is_playing:
+            if self._live_direct_active or self.is_playing:
                 with self._live_stream_lock:
-                    self._live_stream_chunks.clear()
-                self._live_vst_event.wait(timeout=0.015)
+                    if self._live_stream_chunks:
+                        self._live_stream_chunks.clear()
+                self._live_vst_event.wait(timeout=0.025)
                 self._live_vst_event.clear()
                 continue
+
+            now = time.time()
+            self._flush_scheduled_live_note_offs(now)
 
             # Identifier les cibles VST actives (notes jouées, queue de release, ou éditeur VST ouvert)
             active_track: Optional[Track] = None
@@ -952,12 +1093,29 @@ class AudioEngine:
                 self._live_vst_event.clear()
                 continue
 
-            # Vérifier la profondeur actuelle du FIFO de streaming temps réel
-            chunk_frames = max(512, int(self.block_size))
-            target_buffered_frames = chunk_frames * 3
+            target_track = active_track or open_editor_track
+            vst_plugin = None
+            if target_track is not None:
+                vst_plugin = self.get_track_plugin(target_track)
+            if vst_plugin is None and open_editor_plugin is not None:
+                vst_plugin = open_editor_plugin
+
+            if not self._can_render_vst_offline(vst_plugin):
+                self._live_vst_event.wait(timeout=0.015)
+                self._live_vst_event.clear()
+                continue
+
+            # Si le plugin supporte le mode synchrone mémoire partagée, laisser _audio_callback le gérer directement
+            if hasattr(vst_plugin, "render_live_block") and getattr(vst_plugin, "_shm", None) is not None:
+                self._live_vst_event.wait(timeout=0.020)
+                self._live_vst_event.clear()
+                continue
+
+            # File d'attente minimale (1 seul bloc) pour le fallback 32-bit
+            chunk_frames = max(128, int(self.block_size))
+            target_buffered_frames = chunk_frames
             with self._live_stream_lock:
                 if has_note_on and self._live_stream_chunks:
-                    # Purger les blocs silencieux d'attente pour une attaque immédiate (< 11 ms)
                     kept = []
                     for c in self._live_stream_chunks:
                         rem_buf = c["buffer"][c["cursor"]:]
@@ -968,18 +1126,6 @@ class AudioEngine:
 
             if queued_frames >= target_buffered_frames:
                 self._live_vst_event.wait(timeout=0.004)
-                self._live_vst_event.clear()
-                continue
-
-            target_track = active_track or open_editor_track
-            vst_plugin = None
-            if target_track is not None:
-                vst_plugin = self.get_track_plugin(target_track)
-            if vst_plugin is None and open_editor_plugin is not None:
-                vst_plugin = open_editor_plugin
-
-            if not self._can_render_vst_offline(vst_plugin):
-                self._live_vst_event.wait(timeout=0.015)
                 self._live_vst_event.clear()
                 continue
 
@@ -1018,7 +1164,7 @@ class AudioEngine:
                                 self._live_tail_until = max(self._live_tail_until, last_audible_time + 1.0)
 
                     if target_track is not None:
-                        wave = self._process_track_effects_isolated(target_track, wave.copy(), None)
+                        wave = self._process_track_effects_isolated(target_track, wave, None)
                         vol = float(getattr(target_track, "volume", 0.8))
                         pan = max(-1.0, min(1.0, float(getattr(target_track, "pan", 0.0))))
                         left_gain = vol * (1.0 - max(0.0, pan))
@@ -1124,6 +1270,21 @@ class AudioEngine:
         """
         if track is None or audio is None or len(audio) == 0:
             return audio
+
+        has_inserts = bool(getattr(track, "insert_effects", None)) and any(track.insert_effects)
+        has_native_fx = False
+        if getattr(track, "plugins", None):
+            for p in track.plugins:
+                if p is native_inst or getattr(p, "is_instrument", False):
+                    continue
+                if getattr(p, "enabled", True):
+                    has_native_fx = True
+                    break
+
+        if not has_inserts and not has_native_fx:
+            if audio.ndim == 1:
+                return np.column_stack((audio, audio)).astype(np.float32)
+            return audio if audio.dtype == np.float32 else audio.astype(np.float32)
 
         # S'assurer d'avoir un buffer float32 stéréo modifiable
         if audio.ndim == 1:
@@ -1250,8 +1411,12 @@ class AudioEngine:
         return True
 
     def _audio_callback(self, outdata, frames, time_info, status):
-        # Buffer de sortie initialisé à 0
-        out = np.zeros((frames, 2), dtype=np.float32)
+        # Buffer de sortie pré-alloué (évite les allocations temps réel)
+        if self._cb_out_buf is None or self._cb_out_buf.shape != (frames, 2):
+            self._cb_out_buf = np.zeros((frames, 2), dtype=np.float32)
+        else:
+            self._cb_out_buf.fill(0.0)
+        out = self._cb_out_buf
 
         # Collecte des niveaux de crête post-fader par piste pour ce bloc audio
         block_track_peaks: Dict[str, tuple[float, float]] = {}
@@ -1284,37 +1449,39 @@ class AudioEngine:
                     active_previews.append(item)
             self._preview_buffers = active_previews
 
-        # 1.bis Consommer le flux FIFO continu du streamer VST temps réel (Omnisphere / VSTi en direct)
-        need_wake = False
-        with self._live_stream_lock:
-            written = 0
-            while written < frames and self._live_stream_chunks:
-                head = self._live_stream_chunks[0]
-                buf = head["buffer"]
-                cur = head["cursor"]
-                avail = len(buf) - cur
-                take = min(frames - written, avail)
-                if take > 0:
-                    slice_data = buf[cur:cur + take]
-                    out[written:written + take] += slice_data
-                    head["cursor"] = cur + take
-                    written += take
+        # 1.bis Rendu VST live synchrone (mémoire partagée, 0 bloc de FIFO) ou fallback FIFO
+        handled_direct = self._render_live_vst_direct(frames, out, block_track_peaks)
+        if not handled_direct or self._live_stream_chunks:
+            need_wake = False
+            with self._live_stream_lock:
+                written = 0
+                while written < frames and self._live_stream_chunks:
+                    head = self._live_stream_chunks[0]
+                    buf = head["buffer"]
+                    cur = head["cursor"]
+                    avail = len(buf) - cur
+                    take = min(frames - written, avail)
+                    if take > 0:
+                        slice_data = buf[cur:cur + take]
+                        out[written:written + take] += slice_data
+                        head["cursor"] = cur + take
+                        written += take
 
-                    tid = head.get("track_id")
-                    if tid and len(slice_data) > 0:
-                        pk_l = float(np.max(np.abs(slice_data[:, 0])))
-                        pk_r = float(np.max(np.abs(slice_data[:, 1])))
-                        if tid not in block_track_peaks:
-                            block_track_peaks[tid] = (pk_l, pk_r)
-                        else:
-                            old_l, old_r = block_track_peaks[tid]
-                            block_track_peaks[tid] = (max(old_l, pk_l), max(old_r, pk_r))
+                        tid = head.get("track_id")
+                        if tid and len(slice_data) > 0:
+                            pk_l = float(np.max(np.abs(slice_data[:, 0])))
+                            pk_r = float(np.max(np.abs(slice_data[:, 1])))
+                            if tid not in block_track_peaks:
+                                block_track_peaks[tid] = (pk_l, pk_r)
+                            else:
+                                old_l, old_r = block_track_peaks[tid]
+                                block_track_peaks[tid] = (max(old_l, pk_l), max(old_r, pk_r))
 
-                if head["cursor"] >= len(buf):
-                    self._live_stream_chunks.pop(0)
-                    need_wake = True
-        if need_wake:
-            self._live_vst_event.set()
+                    if head["cursor"] >= len(buf):
+                        self._live_stream_chunks.pop(0)
+                        need_wake = True
+            if need_wake and not handled_direct:
+                self._live_vst_event.set()
 
         # 2. Si le transport est en lecture, mixer les pistes du projet
         if self.is_playing and self.project:
@@ -2244,11 +2411,23 @@ class AudioEngine:
 
         return track_buf, native_inst
 
+    def _is_track_live_active(self, track_id: str) -> bool:
+        """Indique si la piste reçoit des notes live en cours (pour contourner le cache ASIO-Guard)."""
+        if self._live_active_track is not None and getattr(self._live_active_track, "id", None) == track_id:
+            if time.time() < self._live_tail_until:
+                return True
+        if track_id in self._live_midi_queue and self._live_midi_queue[track_id]:
+            return True
+        for tid, _p in self._live_active_notes:
+            if tid == track_id:
+                return True
+        return False
+
     def _render_track_slice(self, track: Track, start_b: float, end_b: float, frames: int, bpm: float) -> Optional[np.ndarray]:
         track_buf = None
         native_inst = None
-        # 0. ASIO-Guard Cache Hit: Si la piste n'est pas armée pour l'enregistrement et dispose d'un cache générateur valide
-        if self._asio_guard_enabled and not getattr(track, "armed", False):
+        # 0. ASIO-Guard Cache Hit: Si la piste n'est pas armée/live et dispose d'un cache générateur valide
+        if self._asio_guard_enabled and not getattr(track, "armed", False) and not self._is_track_live_active(track.id):
             track_buf = self._get_cached_track_slice(track, start_b, end_b, frames, bpm)
 
         if track_buf is None:
