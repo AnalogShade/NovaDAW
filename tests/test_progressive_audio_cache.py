@@ -258,3 +258,41 @@ def test_progressive_native_matches_live_synth_render(engine):
         for offset in range(0, 88200, 4096)
     ])
     np.testing.assert_allclose(blocks[-1][0], expected, atol=1e-6)
+
+
+def test_live_instrument_parameter_change_switches_to_realtime_immediately(engine):
+    engine._asio_guard_enabled = True
+    track = add_track(engine, native=True)
+    engine._ensure_tracks_cached()
+    assert track.id in engine._track_audio_caches
+
+    # 1. Lecture depuis le cache RAM
+    cached_slice = engine._render_track_slice(track, 0.0, 0.016, 64, 120.0)
+    assert cached_slice is not None
+    rms_before = float(np.sqrt(np.mean(cached_slice ** 2)))
+    assert rms_before > 1e-4
+
+    # 2. Modification en direct d'un paramètre du synthé pendant le playback
+    native = engine.get_native_instrument(track)
+    native.master_volume = 0.1
+    live_slice = engine._render_track_slice(track, 0.0, 0.016, 64, 120.0)
+    rms_after = float(np.sqrt(np.mean(live_slice ** 2)))
+
+    # Le changement est entendu immédiatement en temps réel sans attendre le re-rendu complet
+    assert rms_after < rms_before * 0.4
+
+
+def test_refresh_modified_tracks_cache_preserves_unchanged_tracks(engine):
+    t1 = add_track(engine, "Track 1", native=True)
+    t2 = add_track(engine, "Track 2", native=True)
+    engine._ensure_tracks_cached()
+    assert t1.id in engine._track_audio_caches
+    assert t2.id in engine._track_audio_caches
+
+    # Modifier uniquement Track 1
+    t1.clips[0].notes.append(MidiNote(pitch=67, start_beat=1.0, duration=1.0, velocity=100))
+    engine.refresh_modified_tracks_cache(trigger_async=False)
+
+    assert t1.id not in engine._track_audio_caches
+    assert t2.id in engine._track_audio_caches
+

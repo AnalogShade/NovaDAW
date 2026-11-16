@@ -1704,10 +1704,12 @@ class NovaSynthGUI(QWidget):
         self.combo_presets.blockSignals(False)
 
     def _invalidate_note_cache(self):
-        """Invalide le cache des notes pré-calculées quand un paramètre est modifié."""
+        """Invalide le cache des notes pré-calculées quand un paramètre est modifié et notifie le moteur audio temps réel."""
         self._cache_generation += 1
         with self._cache_lock:
             self._note_cache.clear()
+        if hasattr(self, "plugin") and hasattr(self.plugin, "notify_modified"):
+            self.plugin.notify_modified()
         # Debounce : évite de recalculer des notes lourdes pendant que l'utilisateur déplace un curseur ou un point 2D
         self._prewarm_timer.start(180)
 

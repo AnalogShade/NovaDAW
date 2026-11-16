@@ -752,7 +752,7 @@ class TrackInspector(QFrame):
         """Ouvre ou bascule l'interface d'un plugin spécifique de la pile"""
         if not plugin:
             return
-        open_native_plugin_editor(plugin, self)
+        open_native_plugin_editor(plugin, self, track=self.current_track)
         self._rebuild_plugin_stack()
 
     def _on_open_instrument_editor(self):
@@ -771,9 +771,9 @@ class TrackInspector(QFrame):
                 if native_plugin:
                     self.current_track.plugins.insert(0, native_plugin)
             if native_plugin:
-                open_native_plugin_editor(native_plugin, self)
+                open_native_plugin_editor(native_plugin, self, track=self.current_track)
         elif self.current_track.plugin_path:
-            open_plugin_editor_gui(self.current_track.plugin_path, self, f"track:{self.current_track.id}:instrument:{self.current_track.plugin_path}")
+            open_plugin_editor_gui(self.current_track.plugin_path, self, f"track:{self.current_track.id}:instrument:{self.current_track.plugin_path}", track=self.current_track)
 
     def _show_add_plugin_menu(self):
         """Affiche le menu de sélection de plugin à empiler sur la piste"""
@@ -848,7 +848,7 @@ class TrackInspector(QFrame):
                 self._populate_instrument_combo()
             self._rebuild_plugin_stack()
             self.track_modified.emit()
-            open_native_plugin_editor(synth, self)
+            open_native_plugin_editor(synth, self, track=self.current_track)
 
     def _add_drum_plugin(self):
         if not self.current_track:
@@ -864,7 +864,7 @@ class TrackInspector(QFrame):
                 self._populate_instrument_combo()
             self._rebuild_plugin_stack()
             self.track_modified.emit()
-            open_native_plugin_editor(drums, self)
+            open_native_plugin_editor(drums, self, track=self.current_track)
 
     def _add_equalizer_plugin(self):
         if not self.current_track:
@@ -876,7 +876,7 @@ class TrackInspector(QFrame):
             self.project.add_rack_plugin("novadaw.equalizer", "Égaliseur Paramétrique", "effect")
             self._rebuild_plugin_stack()
             self.track_modified.emit()
-            open_native_plugin_editor(eq, self)
+            open_native_plugin_editor(eq, self, track=self.current_track)
 
     def _add_compressor_plugin(self):
         if not self.current_track:
@@ -888,7 +888,7 @@ class TrackInspector(QFrame):
             self.project.add_rack_plugin("novadaw.compressor", "Compresseur Dynamique", "effect")
             self._rebuild_plugin_stack()
             self.track_modified.emit()
-            open_native_plugin_editor(comp, self)
+            open_native_plugin_editor(comp, self, track=self.current_track)
 
     def _add_mixer_plugin(self):
         if not self.current_track:
@@ -902,7 +902,7 @@ class TrackInspector(QFrame):
             self.project.add_rack_plugin("novadaw.mixer", "Mixeur de Pistes", "effect")
             self._rebuild_plugin_stack()
             self.track_modified.emit()
-            open_native_plugin_editor(mixer, self)
+            open_native_plugin_editor(mixer, self, track=self.current_track)
 
     def _add_vst_plugin(self, file_path: str):
         if not self.current_track:
@@ -1124,12 +1124,12 @@ class TrackInspector(QFrame):
                         }
                     """)
                     btn_open.setToolTip(f"Ouvrir l'interface graphique VST de '{fx_name}' [e]")
-                btn_open.clicked.connect(lambda _, p=fx_path, key=f"track:{self.current_track.id}:effect:{fx_path}": open_plugin_editor_gui(p, self, key))
+                btn_open.clicked.connect(lambda _, p=fx_path, key=f"track:{self.current_track.id}:effect:{fx_path}": open_plugin_editor_gui(p, self, key, track=self.current_track))
                 card.btn_e = btn_open
                 card.btn_open = btn_open
                 row.addWidget(btn_open)
 
-                card.mouseDoubleClickEvent = lambda _, p=fx_path, key=f"track:{self.current_track.id}:effect:{fx_path}": open_plugin_editor_gui(p, self, key)
+                card.mouseDoubleClickEvent = lambda _, p=fx_path, key=f"track:{self.current_track.id}:effect:{fx_path}": open_plugin_editor_gui(p, self, key, track=self.current_track)
 
                 btn_del = QPushButton("✕")
                 btn_del.setFixedSize(16, 20)

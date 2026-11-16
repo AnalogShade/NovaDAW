@@ -1086,7 +1086,18 @@ class NovaSynthPlugin(BasePlugin):
                     l.from_dict(ld)
                     self.layers.append(l)
 
+            self.notify_modified()
             return True
+
+    def notify_modified(self) -> None:
+        """Notifie le moteur audio global lorsqu'un paramètre ou preset du synthétiseur est modifié."""
+        try:
+            from core.audio_engine import get_global_audio_engine
+            engine = get_global_audio_engine()
+            if engine is not None and hasattr(engine, "notify_plugin_modified"):
+                engine.notify_plugin_modified(self)
+        except Exception:
+            pass
 
     # -------------------------------------------------------------------------
     # Rendu Audio Temps Réel & Multi-Sorties
@@ -1138,20 +1149,6 @@ class NovaSynthPlugin(BasePlugin):
         if not self.enabled or frames <= 0:
             return np.zeros((frames, 2), dtype=np.float32)
 
-        if target_delay is None:
-            target_delay = self.delay
-        if target_reverb is None:
-            target_reverb = self.reverb
-        if voice_svf_dict is None:
-            voice_svf_dict = self._voice_svfs
-
-        # Matrice des 10 sorties stéréo
-        buses = [np.zeros((frames, 2), dtype=np.float32) for _ in range(self.NUM_OUTPUT_BUSES)]
-
-        dur_sec = frames / sample_rate
-        slice_start_sec = start_b / beats_per_sec
-        slice_end_sec = end_b / beats_per_sec
-
         # Déterminer les couches actives
         active_layers = [l for l in self.layers if l.enabled and not l.muted]
         solos = [l for l in active_layers if l.soloed]
@@ -1160,6 +1157,20 @@ class NovaSynthPlugin(BasePlugin):
 
         if not active_layers or not notes:
             return np.zeros((frames, 2), dtype=np.float32)
+
+        if target_delay is None:
+            target_delay = self.delay
+        if target_reverb is None:
+            target_reverb = self.reverb
+        if voice_svf_dict is None:
+            voice_svf_dict = self._voice_svfs
+
+        # Allocation paresseuse des bus de sortie réellement sollicités
+        buses: Dict[int, np.ndarray] = {}
+
+        dur_sec = frames / sample_rate
+        slice_start_sec = start_b / beats_per_sec
+        slice_end_sec = end_b / beats_per_sec
 
         active_keys = set()
         max_rel = max((l.release for l in active_layers), default=0.5)
@@ -1181,7 +1192,7 @@ class NovaSynthPlugin(BasePlugin):
             active_candidates = active_candidates[:6]
 
         # Vecteur de base normalisé précalculé une seule fois pour tout le bloc
-        t_base = np.arange(frames, dtype=np.float64) / sample_rate
+        t_base = np.arange(frames, dtype=np.float64) / sample_rate if active_candidates else None
 
         # Rendu note par note
         for note, note_start_sec, note_off_sec, note_start_b, note_dur_b in active_candidates:
@@ -1213,6 +1224,8 @@ class NovaSynthPlugin(BasePlugin):
                     continue
 
                 bus_dest = max(0, min(9, layer.output_bus))
+                if bus_index is not None and bus_dest != bus_index:
+                    continue
                 voice_key = (pitch, round(note_start_b, 4), layer.layer_id)
                 active_keys.add(voice_key)
 
@@ -1296,8 +1309,12 @@ class NovaSynthPlugin(BasePlugin):
                 voice_out_l = filtered[:, 0] * amp_env * gain_l
                 voice_out_r = filtered[:, 1] * amp_env * gain_r
 
-                buses[bus_dest][:, 0] += voice_out_l
-                buses[bus_dest][:, 1] += voice_out_r
+                bus_buf = buses.get(bus_dest)
+                if bus_buf is None:
+                    bus_buf = np.zeros((frames, 2), dtype=np.float32)
+                    buses[bus_dest] = bus_buf
+                bus_buf[:, 0] += voice_out_l
+                bus_buf[:, 1] += voice_out_r
 
         # Nettoyage automatique des voix éteintes pour libérer la mémoire et éviter tout résidu sonore au redémarrage
         if use_live_state and len(voice_svf_dict) > len(active_keys):
@@ -1307,7 +1324,9 @@ class NovaSynthPlugin(BasePlugin):
 
         # Multi-Sorties : si un bus précis est demandé
         if bus_index is not None and 0 <= bus_index < self.NUM_OUTPUT_BUSES:
-            bus_audio = buses[bus_index]
+            bus_audio = buses.get(bus_index)
+            if bus_audio is None:
+                return np.zeros((frames, 2), dtype=np.float32)
             if np.max(np.abs(bus_audio)) > 1e-5:
                 if target_delay.enabled:
                     bus_audio = target_delay.process(bus_audio)
@@ -1316,9 +1335,12 @@ class NovaSynthPlugin(BasePlugin):
             return (bus_audio * self.master_volume).astype(np.float32)
 
         # Mixeur général : Sommation de tous les bus actifs vers la sortie Principale
-        master_mix = np.zeros((frames, 2), dtype=np.float32)
-        for b in buses:
-            master_mix += b
+        if len(buses) == 1:
+            master_mix = next(iter(buses.values()))
+        else:
+            master_mix = np.zeros((frames, 2), dtype=np.float32)
+            for b in buses.values():
+                master_mix += b
 
         # Soft limiting & polyphony headroom scaling pour un son riche et propre sans saturation agressive
         total_active_sources = max(1, len(notes) * len(active_layers))

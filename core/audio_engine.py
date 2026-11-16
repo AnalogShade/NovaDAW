@@ -1030,6 +1030,7 @@ class AudioEngine:
                         self._live_stream_chunks.append({
                             "buffer": np.ascontiguousarray(wave, dtype=np.float32),
                             "cursor": 0,
+                            "track_id": target_track.id if target_track else None,
                         })
             except Exception:
                 self._live_vst_event.wait(timeout=0.015)
@@ -1096,7 +1097,9 @@ class AudioEngine:
         with self._preview_lock:
             self._preview_buffers.append({
                 "buffer": np.ascontiguousarray(wave, dtype=np.float32),
-                "cursor": 0
+                "cursor": 0,
+                "record_track": track,
+                "track_id": track.id if track else None,
             })
 
         # Enregistrement des notes MIDI si l'enregistrement est actif sur une piste MIDI armée
@@ -1191,10 +1194,16 @@ class AudioEngine:
         """Retrouve la piste qui héberge le plugin donné."""
         if not self.project:
             return None
+        target_inst_id = getattr(plugin, "instance_id", None)
+        target_type_id = getattr(plugin, "plugin_type_id", None)
         for t in self.project.tracks:
             if hasattr(t, "plugins") and plugin in t.plugins:
                 return t
-            if t.plugin_path == getattr(plugin, "plugin_type_id", None):
+            if target_inst_id and hasattr(t, "plugins"):
+                for p in t.plugins:
+                    if getattr(p, "instance_id", None) == target_inst_id:
+                        return t
+            if target_type_id and t.plugin_path == target_type_id:
                 return t
         return None
 
@@ -1234,7 +1243,9 @@ class AudioEngine:
             self._preview_buffers.append({
                 "buffer": np.ascontiguousarray(wave, dtype=np.float32),
                 "cursor": 0,
-                "choke_group": choke_group
+                "choke_group": choke_group,
+                "record_track": track,
+                "track_id": track.id if track else None,
             })
         return True
 
@@ -1242,7 +1253,10 @@ class AudioEngine:
         # Buffer de sortie initialisé à 0
         out = np.zeros((frames, 2), dtype=np.float32)
 
-        # 1. Mixer les sons de prévisualisation (clics clavier piano)
+        # Collecte des niveaux de crête post-fader par piste pour ce bloc audio
+        block_track_peaks: Dict[str, tuple[float, float]] = {}
+
+        # 1. Mixer les sons de prévisualisation (clics clavier piano, synthétiseur live)
         with self._preview_lock:
             active_previews = []
             for item in self._preview_buffers:
@@ -1251,8 +1265,21 @@ class AudioEngine:
                 avail = len(buf) - cur
                 to_copy = min(frames, avail)
                 if to_copy > 0:
-                    out[:to_copy] += buf[cur:cur + to_copy]
+                    slice_data = buf[cur:cur + to_copy]
+                    out[:to_copy] += slice_data
                     item["cursor"] += to_copy
+
+                    rec_track = item.get("record_track")
+                    tid = getattr(rec_track, "id", None) if rec_track else item.get("track_id")
+                    if tid and len(slice_data) > 0:
+                        pk_l = float(np.max(np.abs(slice_data[:, 0])))
+                        pk_r = float(np.max(np.abs(slice_data[:, 1])))
+                        if tid not in block_track_peaks:
+                            block_track_peaks[tid] = (pk_l, pk_r)
+                        else:
+                            old_l, old_r = block_track_peaks[tid]
+                            block_track_peaks[tid] = (max(old_l, pk_l), max(old_r, pk_r))
+
                 if item["cursor"] < len(buf):
                     active_previews.append(item)
             self._preview_buffers = active_previews
@@ -1268,9 +1295,21 @@ class AudioEngine:
                 avail = len(buf) - cur
                 take = min(frames - written, avail)
                 if take > 0:
-                    out[written:written + take] += buf[cur:cur + take]
+                    slice_data = buf[cur:cur + take]
+                    out[written:written + take] += slice_data
                     head["cursor"] = cur + take
                     written += take
+
+                    tid = head.get("track_id")
+                    if tid and len(slice_data) > 0:
+                        pk_l = float(np.max(np.abs(slice_data[:, 0])))
+                        pk_r = float(np.max(np.abs(slice_data[:, 1])))
+                        if tid not in block_track_peaks:
+                            block_track_peaks[tid] = (pk_l, pk_r)
+                        else:
+                            old_l, old_r = block_track_peaks[tid]
+                            block_track_peaks[tid] = (max(old_l, pk_l), max(old_r, pk_r))
+
                 if head["cursor"] >= len(buf):
                     self._live_stream_chunks.pop(0)
                     need_wake = True
@@ -1314,6 +1353,15 @@ class AudioEngine:
                     track_signal[:, 1] *= right_gain
                     out += track_signal
 
+                    if len(track_signal) > 0:
+                        pk_l = float(np.max(np.abs(track_signal[:, 0])))
+                        pk_r = float(np.max(np.abs(track_signal[:, 1])))
+                        if track.id not in block_track_peaks:
+                            block_track_peaks[track.id] = (pk_l, pk_r)
+                        else:
+                            old_l, old_r = block_track_peaks[track.id]
+                            block_track_peaks[track.id] = (max(old_l, pk_l), max(old_r, pk_r))
+
             # Avancement de la tête de lecture
             if wrapped and self.project.loop_enabled:
                 loop_len = self.project.loop_end_beat - self.project.loop_start_beat
@@ -1328,6 +1376,12 @@ class AudioEngine:
             # Notification UI
             if self.playhead_callback:
                 self.playhead_callback(self.current_beat)
+
+        # Mise à jour des niveaux de crête des pistes dans le mixeur (audio live + lecture)
+        mixer_plugin = self._get_active_mixer_plugin()
+        if mixer_plugin and block_track_peaks:
+            for tid, (pk_l, pk_r) in block_track_peaks.items():
+                mixer_plugin.update_track_peak(tid, pk_l, pk_r)
 
         # 3. Traitement de la piste Master et de sa pile de plugins (Mixeur, EQ, Compresseur)
         has_active_mixer = False
@@ -1436,6 +1490,96 @@ class AudioEngine:
                 self._track_audio_caches.clear()
         if trigger_async:
             self._schedule_debounce_caching()
+
+    def refresh_modified_tracks_cache(self, trigger_async: bool = True):
+        """Invalide chirurgicalement uniquement les pistes dont le contenu ou l'instrument a réellement changé."""
+        if not self.project:
+            return
+        bpm = max(20.0, self.project.bpm)
+        sr = self.sample_rate
+        valid_ids = {t.id for t in self.project.tracks}
+        changed = False
+        with self._track_cache_lock:
+            for cached_id in list(self._track_audio_caches.keys()):
+                if cached_id not in valid_ids:
+                    self._track_audio_caches.pop(cached_id, None)
+                    changed = True
+            for track in self.project.tracks:
+                cache = self._track_audio_caches.get(track.id)
+                if cache is None:
+                    changed = True
+                    continue
+                thash = self._compute_track_hash(track, bpm, sr)
+                if cache.get("version_hash") != thash or cache.get("bpm") != bpm or cache.get("sample_rate") != sr:
+                    self._track_audio_caches.pop(track.id, None)
+                    changed = True
+            if changed:
+                self._cache_generation += 1
+        if trigger_async and changed:
+            self._schedule_debounce_caching()
+
+    def notify_plugin_modified(self, plugin: Any):
+        """Notifie le moteur qu'un instrument ou plugin a été modifié en direct (bascule temps réel immédiate < 10 ms)."""
+        if not self.project or plugin is None:
+            return
+        plugin_inst_id = getattr(plugin, "instance_id", None)
+        matched_track_ids = []
+        for track in self.project.tracks:
+            for p in getattr(track, "plugins", []):
+                if p is plugin or (plugin_inst_id and getattr(p, "instance_id", None) == plugin_inst_id):
+                    matched_track_ids.append(track.id)
+                    break
+        for tid in matched_track_ids:
+            self.invalidate_track_cache(tid, trigger_async=True)
+
+    def _fast_inst_signature(self, track: Track) -> Any:
+        """Empreinte ultra-légère (~1 µs) de l'état de l'instrument natif pour détecter les changements live."""
+        if getattr(track, "track_type", "midi") != "midi":
+            return None
+        target_track = None
+        if getattr(track, "synth_route_track_id", None) and self.project:
+            target_track = self.project.get_track(track.synth_route_track_id)
+        inst = self.get_native_instrument(target_track) if target_track else self.get_native_instrument(track)
+        if inst is None:
+            return None
+        ptype = getattr(inst, "plugin_type_id", None)
+        if ptype == "novadaw.synth":
+            d = getattr(inst, "delay", None)
+            r = getattr(inst, "reverb", None)
+            return (
+                getattr(inst, "enabled", True),
+                round(getattr(inst, "master_volume", 1.0), 4),
+                getattr(inst, "preset_name", ""),
+                (d.enabled, round(d.time_sec, 4), round(d.feedback, 4), round(d.mix, 4)) if d else None,
+                (r.enabled, round(r.room_size, 4), round(r.damping, 4), round(r.mix, 4)) if r else None,
+                tuple(
+                    (
+                        l.enabled, l.muted, l.soloed, l.waveform,
+                        round(l.volume, 4), round(l.pan, 4), l.octave, l.semitone, round(l.fine_tune, 2),
+                        l.filter_type, round(l.cutoff, 1), round(l.resonance, 3), round(l.drive, 3),
+                        round(l.attack, 4), round(l.decay, 4), round(l.sustain, 4), round(l.release, 4),
+                        l.lfo_enabled, round(l.lfo_rate, 3), round(l.lfo_depth, 3), l.lfo_target,
+                        l.output_bus
+                    )
+                    for l in getattr(inst, "layers", [])
+                ),
+            )
+        if ptype == "novadaw.drum_machine":
+            r = getattr(inst, "reverb", None)
+            return (
+                getattr(inst, "enabled", True),
+                round(getattr(inst, "master_volume", 1.0), 4),
+                getattr(inst, "preset_name", ""),
+                (r.enabled, round(r.room_size, 4), round(r.damping, 4), round(r.wet_mix, 4)) if r else None,
+                tuple(
+                    (
+                        p.muted, p.soloed, round(p.volume, 4), round(p.pan, 4),
+                        round(p.tune, 2), round(p.decay, 4), round(p.reverb_send, 4), p.sample_filename
+                    )
+                    for p in getattr(inst, "pads", [])
+                ),
+            )
+        return None
 
     def invalidate_all_track_caches(self, trigger_async: bool = False):
         """Vide l'intégralité du cache RAM ASIO-Guard."""
@@ -1592,7 +1736,13 @@ class AudioEngine:
                 chunk_frames = 4096
                 # Mixed MIDI/audio tracks are published only after audio has been added.
                 progressive = not any(isinstance(c, AudioClip) for c in track.clips)
+                max_note_end_beat = max(
+                    (n.start_beat + n.duration + release_tail_beats for n in all_midi_notes),
+                    default=0.0,
+                )
                 for f_idx in range(0, total_frames, chunk_frames):
+                    if not all_midi_notes:
+                        break
                     n = min(chunk_frames, total_frames - f_idx)
                     sb = (f_idx / sample_rate) * beats_per_sec
                     eb = ((f_idx + n) / sample_rate) * beats_per_sec
@@ -1607,8 +1757,13 @@ class AudioEngine:
                         note for note in all_midi_notes
                         if note.start_beat < eb and (note.start_beat + note.duration + release_tail_beats) > sb
                     ]
+                    has_active_drum_voices = is_drum and bool(getattr(native_inst, "_active_voices", None))
 
-                    if chunk_notes:
+                    if not chunk_notes and not has_active_drum_voices and sb >= max_note_end_beat:
+                        # Toutes les notes et leurs queues de résonance sont terminées : le reste du buffer est déjà à zéro
+                        break
+
+                    if chunk_notes or has_active_drum_voices:
                         try:
                             if iso_delay is not None:
                                 rendered = native_inst._render_slice_internal(
@@ -1800,6 +1955,7 @@ class AudioEngine:
                             self._track_audio_caches[track.id] = {
                                 "audio": buf, "bpm": bpm, "sample_rate": sample_rate,
                                 "total_beats": end_beat, "version_hash": thash,
+                                "inst_sig": self._fast_inst_signature(track),
                                 "is_valid": True, "rendered_frames": ready_frames,
                                 "fully_rendered": ready_frames >= total_frames,
                             }
@@ -1823,6 +1979,14 @@ class AudioEngine:
             cache = self._track_audio_caches.get(track.id)
             if cache is None or not cache.get("is_valid", False) or cache.get("audio") is None:
                 return None
+
+            if "inst_sig" in cache:
+                cur_sig = self._fast_inst_signature(track)
+                if cache.get("inst_sig") != cur_sig:
+                    self._track_audio_caches.pop(track.id, None)
+                    self._cache_generation += 1
+                    self._schedule_debounce_caching()
+                    return None
 
             beats_per_sec = bpm / 60.0
             s_start = int((start_b / beats_per_sec) * self.sample_rate)
@@ -2111,11 +2275,15 @@ class AudioEngine:
                     except Exception as e:
                         pass
 
-        # 5. Envoi des niveaux de crête au plugin Mixeur pour les VU-mètres
+        # 5. Envoi des niveaux de crête au plugin Mixeur pour les VU-mètres (post-fader)
         mixer_plugin = self._get_active_mixer_plugin()
         if mixer_plugin and track_buf is not None and len(track_buf) > 0:
-            pk_l = float(np.max(np.abs(track_buf[:, 0])))
-            pk_r = float(np.max(np.abs(track_buf[:, 1])))
+            vol = getattr(track, "volume", 1.0)
+            pan = max(-1.0, min(1.0, getattr(track, "pan", 0.0)))
+            gain_l = vol * (1.0 - max(0.0, pan))
+            gain_r = vol * (1.0 + min(0.0, pan))
+            pk_l = float(np.max(np.abs(track_buf[:, 0]))) * gain_l
+            pk_r = float(np.max(np.abs(track_buf[:, 1]))) * gain_r
             mixer_plugin.update_track_peak(track.id, pk_l, pk_r)
 
         return track_buf

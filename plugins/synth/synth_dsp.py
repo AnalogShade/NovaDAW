@@ -489,50 +489,15 @@ class StereoStudioReverb:
         self.allpass_indices_r = [0] * len(self.allpass_lens_r)
         self._last_room: float = -1.0
         self._last_damp: float = -1.0
-        self._b_comb: Optional[np.ndarray] = None
-        self._a_combs_l: List[np.ndarray] = []
-        self._a_combs_r: List[np.ndarray] = []
-        self._b_aps_l: List[np.ndarray] = []
-        self._a_aps_l: List[np.ndarray] = []
-        self._b_aps_r: List[np.ndarray] = []
-        self._a_aps_r: List[np.ndarray] = []
+        self._b_comb: Optional[np.ndarray] = np.array([1.0], dtype=np.float32)
         self.comb_pole_zi_l = [np.zeros(1, dtype=np.float32) for _ in self.comb_lens_l]
         self.comb_pole_zi_r = [np.zeros(1, dtype=np.float32) for _ in self.comb_lens_r]
-        self._update_coefficients()
+        self._comb_zi_8 = np.zeros((1, 8), dtype=np.float32)
         self.reset()
 
     def _update_coefficients(self):
         """Précalcule les coefficients des filtres de réverbération pour un rendu sans allocation."""
-        if not HAS_SCIPY_SIG:
-            return
-        fb = 0.72 + self.room_size * 0.25
-        damp = self.damping * 0.45
         self._b_comb = np.array([1.0], dtype=np.float32)
-
-        self._b_aps_l = []
-        self._a_aps_l = []
-        for al in self.allpass_lens_l:
-            b_ap = np.zeros(al + 1, dtype=np.float32)
-            b_ap[0] = -0.5
-            b_ap[al] = 1.0
-            a_ap = np.zeros(al + 1, dtype=np.float32)
-            a_ap[0] = 1.0
-            a_ap[al] = -0.5
-            self._b_aps_l.append(b_ap)
-            self._a_aps_l.append(a_ap)
-
-        self._b_aps_r = []
-        self._a_aps_r = []
-        for ar in self.allpass_lens_r:
-            b_ap = np.zeros(ar + 1, dtype=np.float32)
-            b_ap[0] = -0.5
-            b_ap[ar] = 1.0
-            a_ap = np.zeros(ar + 1, dtype=np.float32)
-            a_ap[0] = 1.0
-            a_ap[ar] = -0.5
-            self._b_aps_r.append(b_ap)
-            self._a_aps_r.append(a_ap)
-
         self._last_room = self.room_size
         self._last_damp = self.damping
 
@@ -547,82 +512,113 @@ class StereoStudioReverb:
         self.allpass_indices_r = [0] * len(self.allpass_lens_r)
         self.comb_pole_zi_l = [np.zeros(1, dtype=np.float32) for _ in self.comb_lens_l]
         self.comb_pole_zi_r = [np.zeros(1, dtype=np.float32) for _ in self.comb_lens_r]
-        self.allpass_zi_l = [np.zeros(al, dtype=np.float32) for al in self.allpass_lens_l]
-        self.allpass_zi_r = [np.zeros(ar, dtype=np.float32) for ar in self.allpass_lens_r]
+        self._comb_zi_8 = np.zeros((1, 8), dtype=np.float32)
 
     def process(self, audio: np.ndarray) -> np.ndarray:
         if not self.enabled or self.mix <= 0.001 or len(audio) == 0:
             return audio
 
         n = len(audio)
-        chunk_size = 256
+        chunk_size = max(16, min(min(self.comb_lens_l), min(self.comb_lens_r)))
         if n > chunk_size:
             out = np.empty_like(audio)
             for c_start in range(0, n, chunk_size):
                 c_end = min(n, c_start + chunk_size)
-                out[c_start:c_end] = self.process(audio[c_start:c_end])
+                out[c_start:c_end] = self._process_chunk(audio[c_start:c_end])
             return out
+        return self._process_chunk(audio)
 
-        mono_in = (audio[:, 0] + audio[:, 1]) * 0.08
+    def _process_chunk(self, audio: np.ndarray) -> np.ndarray:
+        n = len(audio)
+        mono_in = ((audio[:, 0] + audio[:, 1]) * 0.08).astype(np.float32)
+        fb = float(0.72 + self.room_size * 0.25)
+        damp = float(self.damping * 0.45)
 
         if HAS_SCIPY_SIG:
-            if abs(self.room_size - self._last_room) > 0.001 or abs(self.damping - self._last_damp) > 0.001 or self._b_comb is None:
-                self._update_coefficients()
-
-            fb = float(0.72 + self.room_size * 0.25)
-            damp = float(self.damping * 0.45)
-            b_pole = np.array([1.0], dtype=np.float32)
+            b_pole = self._b_comb if self._b_comb is not None else np.array([1.0], dtype=np.float32)
             a_pole = np.array([1.0, -damp], dtype=np.float32)
-            gain_fb = fb * (1.0 - damp)
+            gain_fb = np.float32(fb * (1.0 - damp))
 
-            out_l = np.zeros(n, dtype=np.float32)
-            out_r = np.zeros(n, dtype=np.float32)
+            delayed_8 = np.empty((n, 8), dtype=np.float32)
+            for idx, cl in enumerate(self.comb_lens_l):
+                buf = self.comb_buffers_l[idx]
+                w_idx = self.comb_indices_l[idx]
+                if w_idx + n <= cl:
+                    delayed_8[:, idx] = buf[w_idx:w_idx + n]
+                else:
+                    p1 = cl - w_idx
+                    delayed_8[:p1, idx] = buf[w_idx:]
+                    delayed_8[p1:, idx] = buf[:n - p1]
+
+            for idx, cr in enumerate(self.comb_lens_r):
+                buf = self.comb_buffers_r[idx]
+                w_idx = self.comb_indices_r[idx]
+                col = idx + 4
+                if w_idx + n <= cr:
+                    delayed_8[:, col] = buf[w_idx:w_idx + n]
+                else:
+                    p1 = cr - w_idx
+                    delayed_8[:p1, col] = buf[w_idx:]
+                    delayed_8[p1:, col] = buf[:n - p1]
+
+            out_l = delayed_8[:, 0] + delayed_8[:, 1] + delayed_8[:, 2] + delayed_8[:, 3]
+            out_r = delayed_8[:, 4] + delayed_8[:, 5] + delayed_8[:, 6] + delayed_8[:, 7]
+
+            store_8, self._comb_zi_8 = sig.lfilter(b_pole, a_pole, delayed_8, axis=0, zi=self._comb_zi_8)
+            to_write_8 = mono_in[:, None] + store_8 * gain_fb
 
             for idx, cl in enumerate(self.comb_lens_l):
                 buf = self.comb_buffers_l[idx]
                 w_idx = self.comb_indices_l[idx]
-                zi = self.comb_pole_zi_l[idx]
+                col_data = to_write_8[:, idx]
                 if w_idx + n <= cl:
-                    delayed = buf[w_idx:w_idx + n]
+                    buf[w_idx:w_idx + n] = col_data
                 else:
                     p1 = cl - w_idx
-                    delayed = np.concatenate((buf[w_idx:], buf[:n - p1]))
-                out_l += delayed
-                store, self.comb_pole_zi_l[idx] = sig.lfilter(b_pole, a_pole, delayed, zi=zi)
-                to_write = mono_in + store * gain_fb
-                if w_idx + n <= cl:
-                    buf[w_idx:w_idx + n] = to_write
-                else:
-                    p1 = cl - w_idx
-                    buf[w_idx:] = to_write[:p1]
-                    buf[:n - p1] = to_write[p1:]
+                    buf[w_idx:] = col_data[:p1]
+                    buf[:n - p1] = col_data[p1:]
                 self.comb_indices_l[idx] = (w_idx + n) % cl
 
             for idx, cr in enumerate(self.comb_lens_r):
                 buf = self.comb_buffers_r[idx]
                 w_idx = self.comb_indices_r[idx]
-                zi = self.comb_pole_zi_r[idx]
+                col_data = to_write_8[:, idx + 4]
                 if w_idx + n <= cr:
-                    delayed = buf[w_idx:w_idx + n]
+                    buf[w_idx:w_idx + n] = col_data
                 else:
                     p1 = cr - w_idx
-                    delayed = np.concatenate((buf[w_idx:], buf[:n - p1]))
-                out_r += delayed
-                store, self.comb_pole_zi_r[idx] = sig.lfilter(b_pole, a_pole, delayed, zi=zi)
-                to_write = mono_in + store * gain_fb
-                if w_idx + n <= cr:
-                    buf[w_idx:w_idx + n] = to_write
-                else:
-                    p1 = cr - w_idx
-                    buf[w_idx:] = to_write[:p1]
-                    buf[:n - p1] = to_write[p1:]
+                    buf[w_idx:] = col_data[:p1]
+                    buf[:n - p1] = col_data[p1:]
                 self.comb_indices_r[idx] = (w_idx + n) % cr
 
-            for idx in range(len(self.allpass_lens_l)):
-                out_l, self.allpass_zi_l[idx] = sig.lfilter(self._b_aps_l[idx], self._a_aps_l[idx], out_l, zi=self.allpass_zi_l[idx])
+            # Diffuseurs all-pass vectorisés par sous-tranches sur tampon circulaire (0 lfilter d'ordre élevé)
+            for idx, al in enumerate(self.allpass_lens_l):
+                abl = self.allpass_buffers_l[idx]
+                ail = self.allpass_indices_l[idx]
+                pos = 0
+                while pos < n:
+                    step = min(n - pos, al - ail)
+                    bufout = abl[ail:ail + step].copy()
+                    in_s = out_l[pos:pos + step]
+                    abl[ail:ail + step] = in_s + bufout * 0.5
+                    out_l[pos:pos + step] = bufout - in_s * 0.5
+                    ail = (ail + step) % al
+                    pos += step
+                self.allpass_indices_l[idx] = ail
 
-            for idx in range(len(self.allpass_lens_r)):
-                out_r, self.allpass_zi_r[idx] = sig.lfilter(self._b_aps_r[idx], self._a_aps_r[idx], out_r, zi=self.allpass_zi_r[idx])
+            for idx, ar in enumerate(self.allpass_lens_r):
+                abr = self.allpass_buffers_r[idx]
+                air = self.allpass_indices_r[idx]
+                pos = 0
+                while pos < n:
+                    step = min(n - pos, ar - air)
+                    bufout = abr[air:air + step].copy()
+                    in_s = out_r[pos:pos + step]
+                    abr[air:air + step] = in_s + bufout * 0.5
+                    out_r[pos:pos + step] = bufout - in_s * 0.5
+                    air = (air + step) % ar
+                    pos += step
+                self.allpass_indices_r[idx] = air
         else:
             out_l = np.zeros(n, dtype=np.float32)
             out_r = np.zeros(n, dtype=np.float32)
@@ -675,8 +671,10 @@ class StereoStudioReverb:
                 self.allpass_indices_l[a_idx] = ail
                 self.allpass_indices_r[a_idx] = air
 
-        wet = np.column_stack((out_l, out_r))
+        wet = np.empty((n, 2), dtype=np.float32)
+        wet[:, 0] = out_l
+        wet[:, 1] = out_r
         mix = max(0.0, min(1.0, self.mix))
-        dry_gain = 1.0 - (mix * 0.45)
-        wet_gain = mix * 0.75
+        dry_gain = np.float32(1.0 - (mix * 0.45))
+        wet_gain = np.float32(mix * 0.75)
         return ((audio * dry_gain) + (wet * wet_gain)).astype(np.float32)

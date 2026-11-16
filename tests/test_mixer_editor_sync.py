@@ -297,3 +297,86 @@ def test_master_track_plugins(qapp):
 
     win.close()
 
+
+def test_live_synth_vu_meter_and_db_decimals(qapp):
+    """
+    Vérifie que :
+    1. Le VU-mètre et le label de niveau crête en décibels (avec 1 décimale) réagissent en temps réel.
+    2. Quand une note de synthétiseur est jouée en direct, les niveaux par piste et Master
+       sont transmis au plugin Mixeur via le callback audio.
+    3. Les niveaux décroissent doucement (smooth decay) au fil des ticks d'affichage.
+    """
+    import numpy as np
+    from core.audio_engine import AudioEngine
+
+    # 1. Tranche de piste individuelle et affichage en décibels
+    track = Track(name="NovaSynth", track_type="midi", volume=0.8, pan=0.0)
+    strip = MixerChannelStrip(track)
+
+    # État initial au silence
+    assert strip.lbl_peak_db.text() == "-∞ dB"
+    assert strip.vu_meter.peak_left_db == -60.0
+
+    # Simulation d'un signal audio à -14.2 dB
+    strip.set_levels(-14.2, -15.0)
+    assert strip.vu_meter.peak_left_db == -14.2
+    assert strip.vu_meter.peak_right_db == -15.0
+    assert strip.lbl_peak_db.text() == "-14.2 dB"
+    # Le fader % d'origine reste intact
+    assert strip.lbl_vol_db.text() == "80%"
+
+    # Signal positif avec saturation / écrêtage (> 0 dB)
+    strip.set_levels(1.8, 1.2)
+    assert strip.lbl_peak_db.text() == "+1.8 dB"
+
+    # 2. Console complète de mixage
+    project = Project(name="Live Meter Project")
+    project.add_track(track)
+    master_t = project.ensure_master_track()
+    mixer = next(p for p in master_t.plugins if getattr(p, "plugin_type_id", None) == "novadaw.mixer")
+    console = MixerConsoleWidget(mixer)
+
+    # Injecter des niveaux crête
+    mixer.track_peaks[track.id] = (-8.5, -9.0)
+    mixer.peak_left_db = -8.5
+    mixer.peak_right_db = -9.0
+
+    console._update_meters()
+    assert console.strips[track.id].vu_meter.peak_left_db == -8.5
+    assert console.strips[track.id].lbl_peak_db.text() == "-8.5 dB"
+    assert console.lbl_master_peak_db.text() == "-8.5 dB"
+
+    # Vérifier la décroissance douce (decay)
+    console._update_meters()
+    assert console.strips[track.id].vu_meter.peak_left_db < -8.5
+
+    # 3. Moteur audio et callback temps réel lors du jeu au clavier virtuel
+    engine = AudioEngine()
+    engine.set_project(project)
+    track_strip = console.strips[track.id]
+
+    # Simuler une note de synthétiseur en live (buffer de note prévisualisée)
+    note_audio = np.ones((512, 2), dtype=np.float32) * 0.4
+    engine.play_preview_buffer(note_audio, track=track)
+
+    # Exécuter un bloc de callback audio
+    outdata = np.zeros((256, 2), dtype=np.float32)
+    engine._audio_callback(outdata, 256, None, None)
+
+    # Vérifier que le mixeur a reçu les niveaux du son live de la piste
+    assert track.id in mixer.track_peaks
+    peak_l, peak_r = mixer.track_peaks[track.id]
+    assert peak_l > -20.0
+    assert mixer.peak_left_db > -20.0
+
+    # L'actualisation de la console anime le VU-mètre et met à jour les décimales
+    console._update_meters()
+    assert track_strip.vu_meter.peak_left_db > -20.0
+    assert "dB" in track_strip.lbl_peak_db.text()
+    assert track_strip.lbl_peak_db.text() != "-∞ dB"
+    assert console.lbl_master_peak_db.text() != "-∞ dB"
+
+    engine.close()
+    console.close()
+
+

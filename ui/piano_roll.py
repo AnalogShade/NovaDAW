@@ -939,10 +939,10 @@ class PianoRoll(QWidget):
                 if native_plugin:
                     self.current_track.plugins.insert(0, native_plugin)
             if native_plugin:
-                open_native_plugin_editor(native_plugin, self)
+                open_native_plugin_editor(native_plugin, self, track=self.current_track)
         else:
             from ui.plugin_dialogs import open_plugin_editor_gui
-            open_plugin_editor_gui(self.current_track.plugin_path, self, f"track:{self.current_track.id}:instrument:{self.current_track.plugin_path}")
+            open_plugin_editor_gui(self.current_track.plugin_path, self, f"track:{self.current_track.id}:instrument:{self.current_track.plugin_path}", track=self.current_track)
 
     def clear(self):
         """Réinitialise le piano roll à un état vide."""

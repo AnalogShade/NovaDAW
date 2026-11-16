@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QMessageBox, QFileDialog, QFrame, QAbstractItemView,
     QComboBox, QInputDialog
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QThread
+from PySide6.QtCore import Qt, Signal, QTimer, QThread, QEvent
 from PySide6.QtGui import QColor
 
 from core.preset_manager import global_preset_manager
@@ -204,7 +204,44 @@ class EditorStatusWorker(QThread):
         self.checked.emit(result)
 
 
-def open_plugin_editor_gui(file_path: str, parent=None, instance_key=None):
+def _find_main_window(widget=None):
+    """Récupère l'instance de MainWindow associée à un widget ou à l'application."""
+    p = widget
+    while p:
+        if hasattr(p, "virtual_keyboard_dialog"):
+            return p
+        p = p.parent() if hasattr(p, "parent") else None
+
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app:
+        for w in app.topLevelWidgets():
+            if hasattr(w, "virtual_keyboard_dialog") and w.isVisible():
+                return w
+        for w in app.topLevelWidgets():
+            if hasattr(w, "virtual_keyboard_dialog"):
+                return w
+    return None
+
+
+def sync_track_focus(track, parent=None):
+    """Synchronise la piste active avec le Clavier Musical Virtuel et l'interface."""
+    main_win = _find_main_window(parent)
+    if track and main_win:
+        if hasattr(main_win, "selected_track_id") and getattr(main_win, "selected_track_id", None) != track.id:
+            main_win.selected_track_id = track.id
+            if hasattr(main_win, "inspector"):
+                main_win.inspector.set_track(track)
+            if hasattr(main_win, "piano_roll"):
+                main_win.piano_roll.set_active_track(track)
+        if hasattr(main_win, "virtual_keyboard_dialog") and main_win.virtual_keyboard_dialog:
+            main_win.virtual_keyboard_dialog.set_active_track(track)
+
+
+_sync_track_focus = sync_track_focus
+
+
+def open_plugin_editor_gui(file_path: str, parent=None, instance_key=None, track=None):
     """Open the editor in its isolated host, leaving Qt responsive."""
     if not file_path or not os.path.exists(file_path):
         QMessageBox.warning(parent, "Plugin introuvable", f"Plugin introuvable :\n{file_path}")
@@ -226,6 +263,15 @@ def open_plugin_editor_gui(file_path: str, parent=None, instance_key=None):
     if not ensure_plugin_loaded(file_path, parent, key):
         return
     plugin = global_plugin_manager.active_instances[key]
+
+    # Synchroniser la sélection de piste et le clavier musical virtuel
+    resolved_track = track
+    if not resolved_track and parent:
+        resolved_track = getattr(parent, "track", None) or getattr(parent, "current_track", None)
+    if resolved_track:
+        sync_track_focus(resolved_track, parent)
+        if hasattr(plugin, "_process") and getattr(plugin._process, "pid", None):
+            global_plugin_manager.track_id_by_pid[plugin._process.pid] = resolved_track.id
     try:
         global_plugin_manager.saved_states[key] = plugin.request("editor")
     except Exception as exc:
@@ -263,11 +309,43 @@ def open_plugin_editor_gui(file_path: str, parent=None, instance_key=None):
 _open_native_editors: dict = {}
 
 
+def find_track_for_plugin(plugin, parent=None):
+    """Retrouve la piste associée à une instance de plugin natif."""
+    if not plugin:
+        return None
+    # 1. Vérifier si parent possède une piste
+    if parent:
+        t = getattr(parent, "track", None) or getattr(parent, "current_track", None)
+        if t:
+            return t
+        proj = getattr(parent, "project", None)
+        if proj and hasattr(proj, "tracks"):
+            for trk in proj.tracks:
+                if plugin in getattr(trk, "plugins", []):
+                    return trk
+                if getattr(trk, "plugin_path", None) == getattr(plugin, "plugin_type_id", None):
+                    return trk
+    # 2. Chercher dans les fenêtres de premier niveau
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app:
+        for w in app.topLevelWidgets():
+            proj = getattr(w, "project", None)
+            if proj and hasattr(proj, "tracks"):
+                for trk in proj.tracks:
+                    if plugin in getattr(trk, "plugins", []):
+                        return trk
+                    if getattr(trk, "plugin_path", None) == getattr(plugin, "plugin_type_id", None):
+                        return trk
+    return None
+
+
 class NativePluginDialog(QDialog):
     """Fenêtre autonome pour héberger l'interface graphique d'un plugin natif NovaDAW avec gestionnaire de presets intégré."""
-    def __init__(self, plugin, parent=None):
+    def __init__(self, plugin, parent=None, track=None):
         super().__init__(parent)
         self.plugin = plugin
+        self.track = track or find_track_for_plugin(plugin, parent)
         self.setWindowTitle(f"{plugin.icon} {plugin.name} - NovaDAW")
         
         # Dimensions par défaut adaptées au type de plugin
@@ -438,8 +516,94 @@ class NativePluginDialog(QDialog):
             if p and hasattr(p, "_on_track_selected") and hasattr(self.editor, "track_selected"):
                 self.editor.track_selected.connect(p._on_track_selected)
 
+        # Raccourci pour basculer le clavier musical virtuel même depuis la fenêtre du plugin
+        from PySide6.QtGui import QShortcut, QKeySequence
+        self.shortcut_musical_typing = QShortcut(QKeySequence("Ctrl+K"), self)
+        self.shortcut_musical_typing.activated.connect(self._toggle_musical_typing)
+
         # Remplir la liste des presets
         self._populate_presets()
+
+    def set_track(self, track):
+        """Met à jour la référence de piste associée au plugin."""
+        self.track = track
+        self._sync_track_focus()
+
+    def _get_main_window(self):
+        """Récupère l'instance de MainWindow associée à cette boîte de dialogue."""
+        return _find_main_window(self.parent())
+
+    def _sync_track_focus(self):
+        """Synchronise la piste active avec le Clavier Musical Virtuel et l'interface."""
+        main_win = self._get_main_window()
+        if not self.track and main_win and hasattr(main_win, "project"):
+            self.track = find_track_for_plugin(self.plugin, main_win)
+        if self.track:
+            sync_track_focus(self.track, main_win or self.parent())
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.ActivationChange and self.isActiveWindow():
+            self._sync_track_focus()
+        super().changeEvent(event)
+
+    def _toggle_musical_typing(self):
+        main_win = self._get_main_window()
+        if main_win and hasattr(main_win, "toggle_musical_typing"):
+            main_win.toggle_musical_typing()
+
+    def keyPressEvent(self, event):
+        if event.modifiers() & (Qt.ControlModifier | Qt.AltModifier):
+            if event.key() == Qt.Key_K and (event.modifiers() & Qt.ControlModifier):
+                self._toggle_musical_typing()
+                event.accept()
+                return
+            super().keyPressEvent(event)
+            return
+
+        from PySide6.QtWidgets import QApplication
+        focus_w = self.focusWidget() or QApplication.focusWidget()
+        from ui.virtual_keyboard import is_text_editing_widget
+        if is_text_editing_widget(focus_w):
+            super().keyPressEvent(event)
+            return
+
+        main_win = self._get_main_window()
+        vk = getattr(main_win, "virtual_keyboard_dialog", None)
+
+        if vk and getattr(vk, "is_active", False):
+            if event.isAutoRepeat():
+                event.accept()
+                return
+            if vk.handle_key_press(event.key()):
+                event.accept()
+                return
+
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.modifiers() & (Qt.ControlModifier | Qt.AltModifier):
+            super().keyReleaseEvent(event)
+            return
+
+        from PySide6.QtWidgets import QApplication
+        focus_w = self.focusWidget() or QApplication.focusWidget()
+        from ui.virtual_keyboard import is_text_editing_widget
+        if is_text_editing_widget(focus_w):
+            super().keyReleaseEvent(event)
+            return
+
+        main_win = self._get_main_window()
+        vk = getattr(main_win, "virtual_keyboard_dialog", None)
+
+        if vk and getattr(vk, "is_active", False):
+            if event.isAutoRepeat():
+                event.accept()
+                return
+            if vk.handle_key_release(event.key()):
+                event.accept()
+                return
+
+        super().keyReleaseEvent(event)
 
     def _populate_presets(self, select_name: Optional[str] = None):
         """Remplit le menu déroulant avec les presets d'usine et utilisateur."""
@@ -634,7 +798,7 @@ def is_native_plugin_editor_open(plugin) -> bool:
     return bool(dlg and dlg.isVisible())
 
 
-def open_native_plugin_editor(plugin, parent=None):
+def open_native_plugin_editor(plugin, parent=None, track=None):
     """Ouvre ou bascule l'interface d'un plugin natif NovaDAW (Égaliseur, Compresseur, Mixeur, NovaSynth)"""
     if not plugin:
         return None
@@ -642,10 +806,15 @@ def open_native_plugin_editor(plugin, parent=None):
     if not instance_id:
         return None
 
+    if track is None:
+        track = find_track_for_plugin(plugin, parent)
+
     p_id = getattr(plugin, "plugin_type_id", "native")
 
     existing = _open_native_editors.get(instance_id)
     if existing:
+        if track:
+            existing.set_track(track)
         if existing.isVisible():
             existing.close()
             return None
@@ -653,12 +822,14 @@ def open_native_plugin_editor(plugin, parent=None):
             existing.show()
             existing.raise_()
             existing.activateWindow()
+            existing._sync_track_focus()
             global_plugin_manager.editor_opened.emit(p_id)
             return existing
 
-    dlg = NativePluginDialog(plugin, parent)
+    dlg = NativePluginDialog(plugin, parent, track=track)
     _open_native_editors[instance_id] = dlg
     dlg.show()
+    dlg._sync_track_focus()
     global_plugin_manager.editor_opened.emit(p_id)
     return dlg
 

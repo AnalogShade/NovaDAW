@@ -996,6 +996,7 @@ class TrackHeaderWidget(QFrame):
             self.btn_edit_plugin.setToolTip("Éditer l'instrument VST (Ouvrir l'interface)")
 
     def _on_open_plugin_editor(self):
+        self.select_requested.emit(self.track.id)
         if self.track.plugin_path in ("novadaw.drum_machine", "novadaw.synth"):
             from ui.plugin_dialogs import open_native_plugin_editor
             from plugins.registry import plugin_registry, ensure_plugins_loaded
@@ -1006,10 +1007,10 @@ class TrackHeaderWidget(QFrame):
                 if native_plugin:
                     self.track.plugins.insert(0, native_plugin)
             if native_plugin:
-                open_native_plugin_editor(native_plugin, self)
+                open_native_plugin_editor(native_plugin, self, track=self.track)
         elif self.track.plugin_path:
             from ui.plugin_dialogs import open_plugin_editor_gui
-            open_plugin_editor_gui(self.track.plugin_path, self, f"track:{self.track.id}:instrument:{self.track.plugin_path}")
+            open_plugin_editor_gui(self.track.plugin_path, self, f"track:{self.track.id}:instrument:{self.track.plugin_path}", track=self.track)
 
     def _show_track_plugins_menu(self, pos):
         from PySide6.QtWidgets import QMenu
@@ -1029,11 +1030,11 @@ class TrackHeaderWidget(QFrame):
             p_name = getattr(p, "name", "Plugin")
             p_icon = getattr(p, "icon", "🎛️")
             act = menu.addAction(f"{p_icon} Éditer : {p_name}")
-            act.triggered.connect(lambda _, inst=p: open_native_plugin_editor(inst, self))
+            act.triggered.connect(lambda _, inst=p: (self.select_requested.emit(self.track.id), open_native_plugin_editor(inst, self, track=self.track)))
 
         for fx_path in insert_effects:
             fx_name = os.path.splitext(os.path.basename(fx_path))[0]
             act = menu.addAction(f"🎛️ Éditer VST : {fx_name}")
-            act.triggered.connect(lambda _, p=fx_path: open_plugin_editor_gui(p, self, f"track:{self.track.id}:effect:{p}"))
+            act.triggered.connect(lambda _, p=fx_path: (self.select_requested.emit(self.track.id), open_plugin_editor_gui(p, self, f"track:{self.track.id}:effect:{p}", track=self.track)))
 
         menu.exec(self.btn_edit_plugin.mapToGlobal(pos))

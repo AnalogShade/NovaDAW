@@ -515,6 +515,7 @@ class PluginManager(QObject):
     scan_updated = Signal()
     editor_opened = Signal(str)  # file_path
     editor_closed = Signal(str)  # file_path
+    track_focus_requested = Signal(str)  # track_id
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -527,6 +528,7 @@ class PluginManager(QObject):
         self.plugins: List[PluginInfo] = []
         self.active_instances: Dict[str, Any] = {}  # file_path -> IsolatedPlugin instance
         self.open_editors: Dict[str, threading.Event] = {}  # file_path -> close_event
+        self.track_id_by_pid: Dict[int, str] = {}  # pid -> track_id
 
         self._loading = set()
         self.saved_states = {}
@@ -805,6 +807,11 @@ class PluginManager(QObject):
                 if state is not None:
                     plugin.raw_state = state
                 self.active_instances[key] = plugin
+                if hasattr(plugin, "_process") and getattr(plugin._process, "pid", None):
+                    if key.startswith("track:"):
+                        parts = key.split(":")
+                        if len(parts) >= 2:
+                            self.track_id_by_pid[plugin._process.pid] = parts[1]
                 return plugin
             except Exception as exc:
                 if plugin is not None:
@@ -849,6 +856,7 @@ class PluginManager(QObject):
             for plugin in self.active_instances.values():
                 plugin.dispose()
             self.active_instances.clear()
+            self.track_id_by_pid.clear()
             self.load_errors.clear()
 
 

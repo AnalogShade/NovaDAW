@@ -27,19 +27,39 @@ class CombFilter:
         self.filter_store = 0.0
 
     def process_block(self, input_signal: np.ndarray, feedback: float, damp: float) -> np.ndarray:
-        output = np.zeros_like(input_signal)
         n = len(input_signal)
+        if n == 0:
+            return np.zeros(0, dtype=np.float32)
+        output = np.empty(n, dtype=np.float32)
         buf = self.buffer
         buf_len = self.size
         idx = self.idx
-        fstore = self.filter_store
-        damp1 = 1.0 - damp
+        fstore = float(self.filter_store)
+        damp1 = float(1.0 - damp)
+        damp_f = float(damp)
+        fb = float(feedback)
+
+        if HAS_SCIPY:
+            b_pole = np.array([damp1], dtype=np.float32)
+            a_pole = np.array([1.0, -damp_f], dtype=np.float32)
+            zi = np.array([fstore * damp_f], dtype=np.float32)
+            pos = 0
+            while pos < n:
+                step = min(n - pos, buf_len - idx)
+                out_slice = buf[idx:idx + step].copy()
+                output[pos:pos + step] = out_slice
+                fstore_vec, zi = sig.lfilter(b_pole, a_pole, out_slice, zi=zi)
+                buf[idx:idx + step] = input_signal[pos:pos + step] + fstore_vec * fb
+                idx = (idx + step) % buf_len
+                pos += step
+            self.idx = idx
+            self.filter_store = float(zi[0] / damp_f) if damp_f > 1e-6 else 0.0
+            return output
 
         for i in range(n):
             out_val = buf[idx]
-            # Filtre d'amortissement passe-bas simple
-            fstore = out_val * damp1 + fstore * damp
-            buf[idx] = input_signal[i] + fstore * feedback
+            fstore = out_val * damp1 + fstore * damp_f
+            buf[idx] = input_signal[i] + fstore * fb
             output[i] = out_val
             idx += 1
             if idx >= buf_len:
@@ -63,21 +83,24 @@ class AllpassFilter:
         self.idx = 0
 
     def process_block(self, input_signal: np.ndarray) -> np.ndarray:
-        output = np.zeros_like(input_signal)
         n = len(input_signal)
+        if n == 0:
+            return np.zeros(0, dtype=np.float32)
+        output = np.empty(n, dtype=np.float32)
         buf = self.buffer
         buf_len = self.size
         idx = self.idx
-        fb = self.feedback
+        fb = np.float32(self.feedback)
 
-        for i in range(n):
-            buf_out = buf[idx]
-            in_val = input_signal[i]
-            output[i] = -in_val + buf_out
-            buf[idx] = in_val + (buf_out * fb)
-            idx += 1
-            if idx >= buf_len:
-                idx = 0
+        pos = 0
+        while pos < n:
+            step = min(n - pos, buf_len - idx)
+            buf_out = buf[idx:idx + step].copy()
+            in_slice = input_signal[pos:pos + step]
+            output[pos:pos + step] = buf_out - in_slice
+            buf[idx:idx + step] = in_slice + (buf_out * fb)
+            idx = (idx + step) % buf_len
+            pos += step
 
         self.idx = idx
         return output

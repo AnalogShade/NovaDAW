@@ -396,7 +396,7 @@ class VstRackWidget(QWidget):
 
             if len(track_instances) == 1:
                 # Une seule piste utilise ce plugin : ouvrir directement son instance !
-                open_native_plugin_editor(track_instances[0][1], self)
+                open_native_plugin_editor(track_instances[0][1], self, track=track_instances[0][0])
             elif len(track_instances) > 1:
                 # Plusieurs pistes utilisent ce plugin : afficher un menu pour choisir
                 menu = QMenu(self)
@@ -406,7 +406,7 @@ class VstRackWidget(QWidget):
                 """)
                 for t, p in track_instances:
                     act = menu.addAction(f"🎛️ Éditer sur : {t.name}")
-                    act.triggered.connect(lambda _, inst=p: open_native_plugin_editor(inst, self))
+                    act.triggered.connect(lambda _, inst=p, trk=t: open_native_plugin_editor(inst, self, track=trk))
                 menu.addSeparator()
                 act_tmpl = menu.addAction("⚙️ Éditer les réglages par défaut du Rack")
                 act_tmpl.triggered.connect(lambda: open_native_plugin_editor(self.project.get_rack_native_plugin(path), self))
@@ -425,7 +425,7 @@ class VstRackWidget(QWidget):
                 if hasattr(t, "insert_effects") and path in t.insert_effects:
                     vst_track_keys.append((t, f"track:{t.id}:effect:{path}"))
             if len(vst_track_keys) == 1:
-                open_plugin_editor_gui(path, self, vst_track_keys[0][1])
+                open_plugin_editor_gui(path, self, vst_track_keys[0][1], track=vst_track_keys[0][0])
             elif len(vst_track_keys) > 1:
                 menu = QMenu(self)
                 menu.setStyleSheet("""
@@ -434,7 +434,7 @@ class VstRackWidget(QWidget):
                 """)
                 for t, k in vst_track_keys:
                     act = menu.addAction(f"🎹 Éditer sur : {t.name}")
-                    act.triggered.connect(lambda _, key=k: open_plugin_editor_gui(path, self, key))
+                    act.triggered.connect(lambda _, key=k, trk=t: open_plugin_editor_gui(path, self, key, track=trk))
                 menu.exec(QCursor.pos())
             else:
                 open_plugin_editor_gui(path, self)

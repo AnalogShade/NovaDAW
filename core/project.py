@@ -478,7 +478,19 @@ class Project:
             except Exception as e:
                 print(f"[Project] Erreur création mixeur master: {e}")
         else:
-            # S'assurer que les plugins du master ont la référence au projet
+            # S'assurer que les plugins du master ont la référence au projet et que le mixeur existe
+            has_mixer = any(getattr(p, "plugin_type_id", None) == "novadaw.mixer" for p in self.master_track.plugins)
+            if not has_mixer:
+                try:
+                    from plugins.registry import plugin_registry, ensure_plugins_loaded
+                    ensure_plugins_loaded()
+                    mixer = plugin_registry.create_plugin("novadaw.mixer")
+                    if mixer and hasattr(mixer, "set_project"):
+                        mixer.set_project(self)
+                    if mixer:
+                        self.master_track.add_plugin(mixer)
+                except Exception as e:
+                    print(f"[Project] Erreur création mixeur master: {e}")
             for p in self.master_track.plugins:
                 if hasattr(p, "set_project"):
                     p.set_project(self)

@@ -244,49 +244,62 @@ class CompressorPlugin(BasePlugin):
 
         cur_pk = self._env_peak
         cur_gr = self._env_gr_db
-        full_gr = np.empty(n_samples, dtype=np.float32)
 
         is_rms = (self.detection_mode == "rms")
         rms_alpha = math.exp(-1.0 / (0.015 * sr))
         om_rms = 1.0 - rms_alpha
 
-        # 4. Boucle temporelle temps réel découplée (sans distorsion)
-        for i in range(n_samples):
-            x = float(sc[i])
-            if is_rms:
-                cur_pk = rms_alpha * cur_pk + om_rms * (x * x)
-                det_val = math.sqrt(max(1e-10, cur_pk))
+        # 4. Détection d'enveloppe vectorisée + boucle temporelle découplée ultra-rapide (sans distorsion)
+        if n_samples > 0:
+            if is_rms and HAS_SCIPY:
+                b_rms = np.array([om_rms], dtype=np.float64)
+                a_rms = np.array([1.0, -rms_alpha], dtype=np.float64)
+                zi_rms = np.array([rms_alpha * cur_pk], dtype=np.float64)
+                pk_arr, _ = scipy.signal.lfilter(b_rms, a_rms, sc.astype(np.float64) ** 2, zi=zi_rms)
+                cur_pk = float(pk_arr[-1])
+                det_arr = np.sqrt(np.maximum(1e-10, pk_arr))
             else:
-                if x > cur_pk:
-                    cur_pk = x
+                sc_list = sc.tolist()
+                det_list = [0.0] * n_samples
+                if is_rms:
+                    math_sqrt = math.sqrt
+                    for i, x in enumerate(sc_list):
+                        cur_pk = rms_alpha * cur_pk + om_rms * (x * x)
+                        det_list[i] = math_sqrt(cur_pk if cur_pk > 1e-10 else 1e-10)
                 else:
-                    cur_pk = alpha_det_rel * cur_pk
-                det_val = cur_pk
+                    for i, x in enumerate(sc_list):
+                        if x > cur_pk:
+                            cur_pk = x
+                        else:
+                            cur_pk = alpha_det_rel * cur_pk
+                        det_list[i] = cur_pk
+                det_arr = np.asarray(det_list, dtype=np.float64)
 
-            if det_val > 1e-5:
-                x_db = log_mult * math_log(det_val)
-            else:
-                x_db = -100.0
-
+            # Calculateur de gain statique vectorisé (Soft-Knee / Hard-Knee)
+            x_db = np.where(det_arr > 1e-5, log_mult * np.log(np.maximum(1e-10, det_arr)), -100.0)
             diff = x_db - t_db
             if knee > 0.1:
-                if diff <= -half_k:
-                    tgt_gr = 0.0
-                elif diff >= half_k:
-                    tgt_gr = slope * diff
+                d_k = diff + half_k
+                tgt_gr_arr = np.where(
+                    diff <= -half_k,
+                    0.0,
+                    np.where(diff >= half_k, slope * diff, slope * (d_k * d_k) / two_k),
+                )
+            else:
+                tgt_gr_arr = np.where(diff > 0.0, slope * diff, 0.0)
+
+            # Lissage de l'enveloppe de réduction de gain (listes Python natives sans overhead NumPy)
+            tgt_list = tgt_gr_arr.tolist()
+            gr_list = [0.0] * n_samples
+            for i, tgt_gr in enumerate(tgt_list):
+                if tgt_gr < cur_gr:
+                    cur_gr = alpha_att * cur_gr + om_att * tgt_gr
                 else:
-                    d_k = diff + half_k
-                    tgt_gr = slope * (d_k * d_k) / two_k
-            else:
-                tgt_gr = slope * diff if diff > 0.0 else 0.0
-
-            # Lissage de l'enveloppe de réduction de gain
-            if tgt_gr < cur_gr:
-                cur_gr = alpha_att * cur_gr + om_att * tgt_gr
-            else:
-                cur_gr = alpha_rel * cur_gr + om_rel * tgt_gr
-
-            full_gr[i] = cur_gr
+                    cur_gr = alpha_rel * cur_gr + om_rel * tgt_gr
+                gr_list[i] = cur_gr
+            full_gr = np.asarray(gr_list, dtype=np.float32)
+        else:
+            full_gr = np.empty(0, dtype=np.float32)
 
         self._env_peak = cur_pk
         self._env_gr_db = cur_gr

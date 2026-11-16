@@ -58,6 +58,8 @@ class DrumPad:
         self._cached_tuned_data: Optional[np.ndarray] = None
         self._cached_tune_val: float = 0.0
 
+    _WAV_FILE_CACHE: Dict[Tuple[str, float], Tuple[np.ndarray, int]] = {}
+
     def load_sample(self, base_dirs: List[Path]) -> bool:
         """Cherche et charge le fichier audio WAV dans les dossiers spécifiés ou depuis un chemin absolu"""
         p_raw = Path(self.sample_filename)
@@ -73,11 +75,18 @@ class DrumPad:
         for p in candidates:
             if p.exists():
                 try:
+                    cache_key = (str(p.resolve()), p.stat().st_mtime)
+                    cached = DrumPad._WAV_FILE_CACHE.get(cache_key)
+                    if cached is not None:
+                        self.sample_data, self.sample_rate = cached
+                        self._cached_tuned_data = None
+                        return True
                     data, sr = sf.read(str(p), dtype="float32")
                     if data.ndim == 1:
                         data = np.column_stack((data, data))
                     elif data.shape[1] > 2:
                         data = data[:, :2]
+                    DrumPad._WAV_FILE_CACHE[cache_key] = (data, sr)
                     self.sample_data = data
                     self.sample_rate = sr
                     self._cached_tuned_data = None
@@ -406,11 +415,18 @@ class DrumMachinePlugin(BasePlugin):
             len(pad.sample_data) if pad.sample_data is not None else 0
         )
 
+    _GLOBAL_RENDER_CACHE: Dict[Tuple, np.ndarray] = {}
+
     def _render_pad_sound_base(self, pad: DrumPad) -> np.ndarray:
         """
         Calcule le rendu acoustique complet du pad (tune, decay, pan, gain master, réverbération) à vélocité max (127).
         Ce buffer est mis en mémoire vive (RAM) pour permettre une écoute 100% instantanée (0 ms).
         """
+        key = self._compute_pad_cache_key(pad)
+        global_hit = DrumMachinePlugin._GLOBAL_RENDER_CACHE.get(key)
+        if global_hit is not None:
+            return global_hit
+
         has_any_solo = any(p.soloed for p in self.pads)
         if pad.muted or (has_any_solo and not pad.soloed):
             return np.zeros((100, 2), dtype=np.float32)
@@ -448,7 +464,11 @@ class DrumMachinePlugin(BasePlugin):
         else:
             out = dry_sound
 
-        return out.astype(np.float32)
+        res = out.astype(np.float32)
+        if len(DrumMachinePlugin._GLOBAL_RENDER_CACHE) > 256:
+            DrumMachinePlugin._GLOBAL_RENDER_CACHE.clear()
+        DrumMachinePlugin._GLOBAL_RENDER_CACHE[key] = res
+        return res
 
     def get_cached_pad_audio(self, pad_id: str, velocity: int = 115) -> np.ndarray:
         """
@@ -491,7 +511,7 @@ class DrumMachinePlugin(BasePlugin):
             _do_warmup()
 
     def invalidate_cache(self, pad_id: Optional[str] = None):
-        """Invalide le cache pour un pad donné ou pour tous les pads"""
+        """Invalide le cache pour un pad donné ou pour tous les pads et notifie le moteur temps réel"""
         with self._cache_lock:
             if pad_id:
                 self._pad_audio_cache.pop(pad_id, None)
@@ -499,6 +519,13 @@ class DrumMachinePlugin(BasePlugin):
             else:
                 self._pad_audio_cache.clear()
                 self._pad_cache_keys.clear()
+        try:
+            from core.audio_engine import get_global_audio_engine
+            engine = get_global_audio_engine()
+            if engine is not None and hasattr(engine, "notify_plugin_modified"):
+                engine.notify_plugin_modified(self)
+        except Exception:
+            pass
 
     @property
     def cache_status(self) -> Tuple[int, int]:

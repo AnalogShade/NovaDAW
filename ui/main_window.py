@@ -93,6 +93,7 @@ class MainWindow(QMainWindow):
         self._is_dirty = False
         self._update_window_title()
         global_plugin_manager.scan_updated.connect(self.refresh_project_ui)
+        global_plugin_manager.track_focus_requested.connect(self._on_track_selected)
 
         # 4. Serveur IPC pour le contrôle distant et protocole MCP (IA)
         self.ipc_server = NovaIpcServer(self)
@@ -850,6 +851,7 @@ class MainWindow(QMainWindow):
         self.virtual_keyboard_dialog.visibility_toggled.connect(self._on_musical_typing_dialog_visibility_changed)
 
         self.shortcut_musical_typing = QShortcut(QKeySequence("Ctrl+K"), self)
+        self.shortcut_musical_typing.setContext(Qt.ApplicationShortcut)
         self.shortcut_musical_typing.activated.connect(self.toggle_musical_typing)
 
     def _init_status_bar(self):
@@ -1110,9 +1112,9 @@ class MainWindow(QMainWindow):
         """Bascule l'activation et l'affichage du Clavier Musical Virtuel (Musical Typing) [Ctrl+K]"""
         if not hasattr(self, "virtual_keyboard_dialog"):
             return
-        is_visible = self.virtual_keyboard_dialog.isVisible()
-        if is_visible:
-            self.virtual_keyboard_dialog.hide()
+        is_active = getattr(self.virtual_keyboard_dialog, "is_active", False)
+        if is_active:
+            self.virtual_keyboard_dialog.set_musical_typing_active(False)
         else:
             # Assigner la piste active
             target = getattr(self.piano_roll, "current_track", None)
@@ -1127,9 +1129,7 @@ class MainWindow(QMainWindow):
                     target = self.project.tracks[0]
 
             self.virtual_keyboard_dialog.set_active_track(target)
-            self.virtual_keyboard_dialog.show()
-            self.virtual_keyboard_dialog.raise_()
-            self.virtual_keyboard_dialog.activateWindow()
+            self.virtual_keyboard_dialog.set_musical_typing_active(True)
             self.statusBar().showMessage(
                 "🎹 Clavier Musical Virtuel ACTIF — Jouez en temps réel avec vos touches [A-K, W-O] (Ctrl+K pour désactiver)",
                 6000
@@ -2060,8 +2060,11 @@ class MainWindow(QMainWindow):
     def _on_project_modified(self):
         self.set_dirty(True)
         self.timeline_grid.update()
-        if hasattr(self, "audio_engine") and hasattr(self.audio_engine, "invalidate_track_cache"):
-            self.audio_engine.invalidate_track_cache(None, trigger_async=True)
+        if hasattr(self, "audio_engine"):
+            if hasattr(self.audio_engine, "refresh_modified_tracks_cache"):
+                self.audio_engine.refresh_modified_tracks_cache(trigger_async=True)
+            elif hasattr(self.audio_engine, "invalidate_track_cache"):
+                self.audio_engine.invalidate_track_cache(None, trigger_async=True)
         if hasattr(self, "piano_roll") and getattr(self, "selected_track_id", None):
             track = self.project.get_track(self.selected_track_id)
             if track:
@@ -2125,17 +2128,9 @@ class MainWindow(QMainWindow):
     def _on_cache_progress(self, current: int, total: int, name: str, progress: float):
         if not hasattr(self, "cache_progress_bar") or not hasattr(self, "lbl_cache_text"):
             return
-        if progress < 1.0 and name != "Prêt":
-            self.cache_progress_bar.setVisible(True)
-            pct = max(0, min(100, int(progress * 100)))
-            self.cache_progress_bar.setValue(pct)
-            self.lbl_cache_text.setStyleSheet("color: #38bdf8; font-weight: 600; font-size: 11px;")
-            self.lbl_cache_text.setText(f"Pré-rendu : {name} ({pct}%)")
-        else:
-            self.cache_progress_bar.setValue(100)
-            self.lbl_cache_text.setStyleSheet("color: #34d399; font-weight: 600; font-size: 11px;")
-            self.lbl_cache_text.setText("ASIO-Guard : Cache prêt (100%)")
-            QTimer.singleShot(2500, self._hide_cache_progress_bar)
+        self.cache_progress_bar.setVisible(False)
+        self.lbl_cache_text.setText("ASIO-Guard : Prêt")
+        self.lbl_cache_text.setStyleSheet("color: #34d399; font-weight: 600; font-size: 11px;")
 
     def _hide_cache_progress_bar(self):
         if hasattr(self, "cache_progress_bar"):
@@ -2605,11 +2600,10 @@ class MainWindow(QMainWindow):
             global_plugin_manager.close_all_editors()
             self.audio_engine.stop()
             if hasattr(self, "cache_progress_bar"):
-                self.cache_progress_bar.setValue(0)
-                self.cache_progress_bar.setVisible(True)
+                self.cache_progress_bar.setVisible(False)
             if hasattr(self, "lbl_cache_text"):
-                self.lbl_cache_text.setStyleSheet("color: #38bdf8; font-weight: 600; font-size: 11px;")
-                self.lbl_cache_text.setText("Chargement du cache audio...")
+                self.lbl_cache_text.setStyleSheet("color: #34d399; font-weight: 600; font-size: 11px;")
+                self.lbl_cache_text.setText("ASIO-Guard : Prêt")
 
             self.project = load_project(file_path)
             self.audio_engine.set_project(self.project)
@@ -2957,6 +2951,11 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
 
+        try:
+            from core.keyboard_hook import stop_global_keyboard_hook
+            stop_global_keyboard_hook()
+        except Exception:
+            pass
         global_plugin_manager.close_all_editors()
         if hasattr(self, "ipc_server"):
             self.ipc_server.stop()

@@ -258,11 +258,41 @@ class MixerChannelStrip(QFrame):
 
         layout.addLayout(fader_row)
 
-        # 5. Label Valeur dB / %
+        # 5. Label Valeur Volume Fader (%) & Niveau de crête dynamique (dB avec 1 décimale)
+        meter_info_layout = QHBoxLayout()
+        meter_info_layout.setContentsMargins(0, 0, 0, 0)
+        meter_info_layout.setSpacing(2)
+
         self.lbl_vol_db = QLabel(f"{vol_val}%")
-        self.lbl_vol_db.setAlignment(Qt.AlignCenter)
+        self.lbl_vol_db.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.lbl_vol_db.setStyleSheet("font-size: 9px; font-weight: bold; color: #38bdf8;")
-        layout.addWidget(self.lbl_vol_db)
+        self.lbl_vol_db.setToolTip(f"Volume Fader : {vol_val}%")
+        meter_info_layout.addWidget(self.lbl_vol_db)
+
+        self.lbl_peak_db = QLabel("-∞ dB")
+        self.lbl_peak_db.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lbl_peak_db.setStyleSheet("font-size: 9px; font-weight: bold; color: #64748b;")
+        self.lbl_peak_db.setToolTip("Niveau de crête réel en direct (dB)")
+        meter_info_layout.addWidget(self.lbl_peak_db)
+
+        layout.addLayout(meter_info_layout)
+
+    def set_levels(self, l_db: float, r_db: float):
+        """Met à jour le VU-mètre et l'indicateur décibels (dB) en direct avec 1 décimale."""
+        self.vu_meter.set_levels(l_db, r_db)
+        pk_max = max(l_db, r_db)
+        if hasattr(self, "lbl_peak_db"):
+            if pk_max <= -50.0:
+                self.lbl_peak_db.setText("-∞ dB")
+                self.lbl_peak_db.setStyleSheet("font-size: 9px; font-weight: bold; color: #64748b;")
+            else:
+                self.lbl_peak_db.setText(f"{pk_max:+.1f} dB" if pk_max > 0.0 else f"{pk_max:.1f} dB")
+                if pk_max > 0.0:
+                    self.lbl_peak_db.setStyleSheet("font-size: 9px; font-weight: bold; color: #ef4444;")
+                elif pk_max > -6.0:
+                    self.lbl_peak_db.setStyleSheet("font-size: 9px; font-weight: bold; color: #f59e0b;")
+                else:
+                    self.lbl_peak_db.setStyleSheet("font-size: 9px; font-weight: bold; color: #38bdf8;")
 
     def _update_pan_tooltip(self, val: int):
         pan_str = "C" if val == 0 else (f"L{abs(val)}" if val < 0 else f"R{val}")
@@ -561,10 +591,24 @@ class MixerConsoleWidget(QWidget):
 
         layout.addLayout(fader_row)
 
+        # Labels Master Volume & Crête en dB avec 1 décimale
+        master_info_layout = QHBoxLayout()
+        master_info_layout.setContentsMargins(0, 0, 0, 0)
+        master_info_layout.setSpacing(2)
+
         self.lbl_master_db = QLabel(f"{master_vol_val}%")
-        self.lbl_master_db.setAlignment(Qt.AlignCenter)
+        self.lbl_master_db.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.lbl_master_db.setStyleSheet("font-size: 10px; font-weight: bold; color: #fbbf24;")
-        layout.addWidget(self.lbl_master_db)
+        self.lbl_master_db.setToolTip(f"Volume Master : {master_vol_val}%")
+        master_info_layout.addWidget(self.lbl_master_db)
+
+        self.lbl_master_peak_db = QLabel("-∞ dB")
+        self.lbl_master_peak_db.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lbl_master_peak_db.setStyleSheet("font-size: 10px; font-weight: bold; color: #64748b;")
+        self.lbl_master_peak_db.setToolTip("Niveau Master réel en direct (dB)")
+        master_info_layout.addWidget(self.lbl_master_peak_db)
+
+        layout.addLayout(master_info_layout)
 
         self._update_master_fx_badges()
         return frame
@@ -784,16 +828,35 @@ class MixerConsoleWidget(QWidget):
             self.btn_dim.blockSignals(False)
 
     def _update_meters(self):
-        """Mise à jour périodique des VU-mètres Master et Pistes"""
-        # Master VU-Meter
+        """Mise à jour périodique des VU-mètres Master et Pistes (30 FPS)"""
+        # Master VU-Meter et affichage dynamique dB avec décimales
         self.master_vu.set_levels(self.mixer.peak_left_db, self.mixer.peak_right_db)
+        m_pk_max = max(self.mixer.peak_left_db, self.mixer.peak_right_db)
+        if hasattr(self, "lbl_master_peak_db"):
+            if m_pk_max <= -50.0:
+                self.lbl_master_peak_db.setText("-∞ dB")
+                self.lbl_master_peak_db.setStyleSheet("font-size: 10px; font-weight: bold; color: #64748b;")
+            else:
+                self.lbl_master_peak_db.setText(f"{m_pk_max:+.1f} dB" if m_pk_max > 0.0 else f"{m_pk_max:.1f} dB")
+                if m_pk_max > 0.0:
+                    self.lbl_master_peak_db.setStyleSheet("font-size: 10px; font-weight: bold; color: #ef4444;")
+                elif m_pk_max > -6.0:
+                    self.lbl_master_peak_db.setStyleSheet("font-size: 10px; font-weight: bold; color: #f59e0b;")
+                else:
+                    self.lbl_master_peak_db.setStyleSheet("font-size: 10px; font-weight: bold; color: #fbbf24;")
 
-        # Décroissance douce des niveaux
-        self.mixer.peak_left_db = max(-60.0, self.mixer.peak_left_db - 1.5)
-        self.mixer.peak_right_db = max(-60.0, self.mixer.peak_right_db - 1.5)
+        # Décroissance douce des niveaux Master (~55 dB/s)
+        self.mixer.peak_left_db = max(-60.0, self.mixer.peak_left_db - 1.8)
+        self.mixer.peak_right_db = max(-60.0, self.mixer.peak_right_db - 1.8)
 
-        # Mettre à jour les pistes individuelles si données disponibles
-        for track_id, (pk_l, pk_r) in list(self.mixer.track_peaks.items()):
-            strip = self.strips.get(track_id)
-            if strip:
-                strip.vu_meter.set_levels(pk_l, pk_r)
+        # Mettre à jour toutes les tranches individuelles
+        for track_id, strip in self.strips.items():
+            if track_id in self.mixer.track_peaks:
+                pk_l, pk_r = self.mixer.track_peaks[track_id]
+                strip.set_levels(pk_l, pk_r)
+                # Décroissance douce pour la piste
+                new_l = max(-60.0, pk_l - 1.8)
+                new_r = max(-60.0, pk_r - 1.8)
+                self.mixer.track_peaks[track_id] = (new_l, new_r)
+            else:
+                strip.set_levels(-60.0, -60.0)

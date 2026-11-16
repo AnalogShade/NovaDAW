@@ -232,6 +232,35 @@ def _normalize_midi_messages(midi_messages, sample_rate: float):
     return parsed
 
 
+_ACTIVE_PLUGIN_PIDS: set = set()
+
+def register_plugin_pid(pid: int):
+    """Enregistre le PID d'un processus de plugin VST externe."""
+    if pid:
+        _ACTIVE_PLUGIN_PIDS.add(int(pid))
+
+def unregister_plugin_pid(pid: int):
+    """Retire le PID d'un processus de plugin VST externe."""
+    if pid:
+        _ACTIVE_PLUGIN_PIDS.discard(int(pid))
+
+def get_active_plugin_pids() -> set:
+    """Retourne l'ensemble des PIDs actifs des plugins VST hébergés."""
+    return set(_ACTIVE_PLUGIN_PIDS)
+
+
+_global_vst_key_callback = None
+
+def register_vst_key_callback(callback):
+    """Enregistre un callback pour relayer les frappes clavier (WM_KEYDOWN/WM_KEYUP) reçues par les fenêtres VST."""
+    global _global_vst_key_callback
+    _global_vst_key_callback = callback
+
+def unregister_vst_key_callback():
+    global _global_vst_key_callback
+    _global_vst_key_callback = None
+
+
 class VST2Plugin64:
     """Native 64-bit VST 2.4 Host wrapper compatible with Pedalboard's plugin API."""
 
@@ -623,6 +652,11 @@ class VST2Plugin64:
             if msg == 0x0010:  # WM_CLOSE
                 self._window_closed_by_user = True
                 return 0
+            if msg in (0x0100, 0x0101) and _global_vst_key_callback:
+                try:
+                    _global_vst_key_callback(wparam, msg == 0x0100)
+                except Exception:
+                    pass
             return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
         self._wnd_proc_ref = WNDPROC(_wnd_proc)
@@ -693,6 +727,11 @@ class VST2Plugin64:
                         if msg.message == 0x0012:  # WM_QUIT
                             self._window_closed_by_user = True
                             break
+                        if msg.message in (0x0100, 0x0101) and _global_vst_key_callback:
+                            try:
+                                _global_vst_key_callback(msg.wParam, msg.message == 0x0100)
+                            except Exception:
+                                pass
                         user32.TranslateMessage(byref(msg))
                         user32.DispatchMessageW(byref(msg))
                         msg_count += 1
@@ -774,6 +813,9 @@ class VST2Plugin32:
             err_msg = self._read_exact(err_len).decode("utf-8", errors="ignore")
             self.dispose()
             raise RuntimeError(err_msg)
+
+        if not probe_only and getattr(self, "_proc", None) and self._proc.pid:
+            register_plugin_pid(self._proc.pid)
 
         hdr = self._read_exact(20)
         is_synth, n_in, n_out, n_params, name_len = struct.unpack("<iiiiI", hdr)
@@ -901,12 +943,15 @@ class VST2Plugin32:
                     pass
 
     def dispose(self):
-        if getattr(self, "_proc", None) and self._proc.poll() is None:
-            try:
-                self._proc.terminate()
-                self._proc.wait(timeout=1)
-            except Exception:
-                pass
+        if getattr(self, "_proc", None):
+            if self._proc.pid:
+                unregister_plugin_pid(self._proc.pid)
+            if self._proc.poll() is None:
+                try:
+                    self._proc.terminate()
+                    self._proc.wait(timeout=1)
+                except Exception:
+                    pass
 
 
 # ============================================================================
@@ -1062,6 +1107,8 @@ class IsolatedPlugin:
             self._process = context.Process(target=worker, args=(child, path), daemon=True)
         self._process.start()
         child.close()
+        if not probe_only and getattr(self._process, "pid", None):
+            register_plugin_pid(self._process.pid)
         try:
             metadata = self._receive(timeout, dismiss_popups=probe_only)
             self.__dict__.update(metadata)
@@ -1118,7 +1165,10 @@ class IsolatedPlugin:
         self.request("restore", value)
 
     def dispose(self):
-        if self._process.is_alive():
-            self._process.terminate()
-        self._process.join(timeout=1)
+        if getattr(self, "_process", None):
+            if getattr(self._process, "pid", None):
+                unregister_plugin_pid(self._process.pid)
+            if self._process.is_alive():
+                self._process.terminate()
+            self._process.join(timeout=1)
         self._connection.close()

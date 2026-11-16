@@ -27,6 +27,42 @@ def pitch_to_name(pitch: int) -> str:
     return f"{name}{octave}"
 
 
+def win_vk_to_qt_key(vk: int) -> int:
+    """Convertit un code de touche virtuelle Windows (VK_*) en code Qt.Key équivalent."""
+    # Lettres A-Z
+    if 0x41 <= vk <= 0x5A:
+        return vk
+    # Chiffres 0-9
+    if 0x30 <= vk <= 0x39:
+        return vk
+    vk_map = {
+        0xBA: Qt.Key_Semicolon,    # VK_OEM_1 (;:)
+        0xDE: Qt.Key_Apostrophe,   # VK_OEM_7 ('")
+        0xDB: Qt.Key_BracketLeft,  # VK_OEM_4 ([{)
+        0xDD: Qt.Key_BracketRight, # VK_OEM_6 (]})
+        0xBC: Qt.Key_Comma,        # VK_OEM_COMMA (<,)
+        0xBE: Qt.Key_Period,       # VK_OEM_PERIOD (>.)
+        0xBF: Qt.Key_Slash,        # VK_OEM_2 (?/)
+        0x26: Qt.Key_Up,           # VK_UP
+        0x28: Qt.Key_Down,         # VK_DOWN
+        0x25: Qt.Key_Left,         # VK_LEFT
+        0x27: Qt.Key_Right,        # VK_RIGHT
+        0x20: Qt.Key_Space,        # VK_SPACE
+    }
+    return vk_map.get(vk, vk)
+
+
+def is_text_editing_widget(widget) -> bool:
+    """Détecte si un widget est un champ de saisie de texte actif."""
+    if widget is None:
+        return False
+    if isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox)):
+        return True
+    if hasattr(widget, "isEditable") and callable(widget.isEditable) and widget.isEditable():
+        return True
+    return False
+
+
 # Mappage des touches du clavier d'ordinateur vers l'offset en demi-tons par rapport à la note de base (C)
 # Supporte à la fois les claviers QWERTY et AZERTY (ex: A/Q, W/Z)
 KEY_NOTE_MAP: Dict[int, tuple[int, str]] = {
@@ -259,6 +295,7 @@ class MusicalTypingEventFilter(QObject):
     Filtre d'événements global pour capturer les frappes du clavier d'ordinateur
     lorsque le Clavier Musical Virtuel est actif, tout en laissant passer les saisies
     dans les champs texte (QLineEdit, etc.) et les raccourcis système (Ctrl+K).
+    Fonctionne même lorsque la fenêtre du clavier virtuel n'a pas le focus (ex: focus sur un plugin).
     """
     def __init__(self, dialog: 'VirtualKeyboardDialog'):
         super().__init__()
@@ -279,7 +316,7 @@ class MusicalTypingEventFilter(QObject):
 
     def eventFilter(self, watched, event):
         try:
-            if not self.active or self.dialog is None or not self.dialog.isVisible():
+            if not self.active or self.dialog is None or not getattr(self.dialog, "is_active", False):
                 return False
         except (RuntimeError, ReferenceError):
             return False
@@ -287,8 +324,7 @@ class MusicalTypingEventFilter(QObject):
         # Ne pas intercepter la saisie si l'utilisateur est dans un champ texte éditable
         from PySide6.QtWidgets import QApplication
         focus_w = QApplication.focusWidget()
-        if isinstance(watched, (QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox)) or \
-           isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox)):
+        if is_text_editing_widget(watched) or is_text_editing_widget(focus_w):
             return False
 
         evt_type = event.type()
@@ -310,14 +346,22 @@ class MusicalTypingEventFilter(QObject):
             # Ignorer la répétition automatique des touches sous Windows
             if event.isAutoRepeat():
                 return True
-            return self.dialog.handle_key_press(event.key())
+            handled = self.dialog.handle_key_press(event.key())
+            if handled:
+                event.accept()
+                return True
+            return False
 
         elif evt_type == QEvent.KeyRelease:
             if event.modifiers() & (Qt.ControlModifier | Qt.AltModifier):
                 return False
             if event.isAutoRepeat():
                 return True
-            return self.dialog.handle_key_release(event.key())
+            handled = self.dialog.handle_key_release(event.key())
+            if handled:
+                event.accept()
+                return True
+            return False
 
         return False
 
@@ -326,15 +370,18 @@ class VirtualKeyboardDialog(QDialog):
     """
     Fenêtre flottante non-bloquante du Clavier Musical Virtuel (Musical Typing).
     Reste au premier plan, affiche la correspondance exacte des touches et permet
-    de jouer en direct avec le clavier de l'ordinateur.
+    de jouer en direct avec le clavier de l'ordinateur, même si le focus se trouve
+    sur une fenêtre d'éditeur de plugin ou une autre zone de l'application.
     """
     visibility_toggled = Signal(bool)
+    remote_key_event = Signal(int, bool)  # (key_code, is_press)
 
     def __init__(self, audio_engine: AudioEngine, parent=None):
         super().__init__(parent)
         self.audio_engine = audio_engine
         self.current_track: Optional[Track] = None
 
+        self._is_active = False
         self.base_pitch = 48  # C3 par défaut
         self.velocity = 100   # Vélocité par défaut
         self.held_keys_pitches: Dict[int, int] = {}  # key_code -> pitch
@@ -380,9 +427,89 @@ class VirtualKeyboardDialog(QDialog):
 
         self._init_ui()
 
-        # Filtre d'événement global (activé dynamiquement lors de l'affichage)
+        # Filtre d'événement global (activé dynamiquement lors de l'activation)
         self.event_filter = MusicalTypingEventFilter(self)
         self._filter_installed = False
+
+        # Connexion pour les événements distants (threads externes, éditeurs VST Win32)
+        self.remote_key_event.connect(self._on_remote_key_event)
+
+        # Démarrage du hook bas niveau Windows global (WH_KEYBOARD_LL)
+        try:
+            from core.keyboard_hook import (
+                start_global_keyboard_hook,
+                set_global_hook_active,
+                set_text_editing_focused,
+            )
+            start_global_keyboard_hook(
+                key_callback=lambda qt_k, is_d: self.remote_key_event.emit(qt_k, is_d),
+                toggle_callback=lambda: self.remote_key_event.emit(-1, True),
+                window_focus_callback=self._on_win32_window_focused,
+            )
+            from PySide6.QtWidgets import QApplication
+            app = QApplication.instance()
+            if app:
+                app.focusChanged.connect(lambda old, new: set_text_editing_focused(is_text_editing_widget(new)))
+        except Exception as e:
+            print(f"[VirtualKeyboard] Avertissement hook clavier : {e}")
+
+        try:
+            from core.vst_host import register_vst_key_callback
+            register_vst_key_callback(self._vst_raw_key_callback)
+        except Exception:
+            pass
+
+    def _on_win32_window_focused(self, hwnd: int):
+        """Appelé lorsqu'une fenêtre Win32 externe (ex: Omnisphere) prend le focus."""
+        if not hwnd or sys.platform != "win32":
+            return
+        try:
+            from ctypes import wintypes
+            import ctypes
+            user32 = ctypes.windll.user32
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            from core.plugin_manager import global_plugin_manager
+            track_id = getattr(global_plugin_manager, "track_id_by_pid", {}).get(pid.value)
+            if track_id:
+                global_plugin_manager.track_focus_requested.emit(track_id)
+        except Exception:
+            pass
+
+    @property
+    def is_active(self) -> bool:
+        """Indique si la saisie musicale avec les touches de l'ordinateur est actuellement active."""
+        return self._is_active
+
+    def _vst_raw_key_callback(self, vk_code: int, is_down: bool):
+        """Callback invoqué depuis le thread de messagerie de l'éditeur VST Win32."""
+        if not self._is_active:
+            # Permettre quand même d'activer/désactiver avec Ctrl+K depuis une fenêtre VST
+            import ctypes
+            if vk_code == 0x4B and (ctypes.windll.user32.GetKeyState(0x11) & 0x8000):
+                if is_down:
+                    self.remote_key_event.emit(-1, True)  # -1 = toggle Ctrl+K
+            return
+        # Vérifier Ctrl+K
+        import ctypes
+        if vk_code == 0x4B and (ctypes.windll.user32.GetKeyState(0x11) & 0x8000):
+            if is_down:
+                self.remote_key_event.emit(-1, True)
+            return
+        qt_key = win_vk_to_qt_key(vk_code)
+        self.remote_key_event.emit(qt_key, is_down)
+
+    def _on_remote_key_event(self, key_code: int, is_down: bool):
+        """Gère un événement de touche distant sur le thread UI principal."""
+        if key_code == -1:
+            self.set_musical_typing_active(not self._is_active)
+            return
+        if not self._is_active:
+            return
+        if is_down:
+            self.handle_key_press(key_code)
+        else:
+            self.handle_key_release(key_code)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -457,8 +584,12 @@ class VirtualKeyboardDialog(QDialog):
         bottom_bar.addStretch()
 
         self.btn_close = QPushButton("✕ Fermer [Ctrl+K]")
-        self.btn_close.clicked.connect(self.hide)
+        self.btn_close.clicked.connect(lambda: self.set_musical_typing_active(False))
         bottom_bar.addWidget(self.btn_close)
+
+        from PySide6.QtGui import QShortcut, QKeySequence
+        self._sc_toggle = QShortcut(QKeySequence("Ctrl+K"), self)
+        self._sc_toggle.activated.connect(lambda: self.set_musical_typing_active(False))
 
         layout.addLayout(bottom_bar)
 
@@ -545,40 +676,47 @@ class VirtualKeyboardDialog(QDialog):
             return True
         return False
 
+    def set_musical_typing_active(self, active: bool):
+        """Active ou désactive la saisie musicale de manière globale."""
+        self._is_active = bool(active)
+        self.event_filter.active = self._is_active
+        try:
+            from core.keyboard_hook import set_global_hook_active
+            set_global_hook_active(self._is_active)
+        except Exception:
+            pass
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if self._is_active:
+            if app and not self._filter_installed:
+                app.installEventFilter(self.event_filter)
+                self._filter_installed = True
+            if not self.isVisible():
+                self.show()
+            self.raise_()
+            self.visibility_toggled.emit(True)
+        else:
+            self._release_all_held_notes()
+            if app and self._filter_installed:
+                try:
+                    app.removeEventFilter(self.event_filter)
+                except Exception:
+                    pass
+                self._filter_installed = False
+            if self.isVisible():
+                self.hide()
+            self.visibility_toggled.emit(False)
+
     def showEvent(self, event):
         super().showEvent(event)
-        from PySide6.QtWidgets import QApplication
-        app = QApplication.instance()
-        if app and not self._filter_installed:
-            app.installEventFilter(self.event_filter)
-            self._filter_installed = True
-        self.event_filter.active = True
-        self.visibility_toggled.emit(True)
+        if not self._is_active:
+            self.set_musical_typing_active(True)
 
     def hideEvent(self, event):
-        self._release_all_held_notes()
-        self.event_filter.active = False
-        from PySide6.QtWidgets import QApplication
-        app = QApplication.instance()
-        if app and self._filter_installed:
-            try:
-                app.removeEventFilter(self.event_filter)
-            except Exception:
-                pass
-            self._filter_installed = False
-        self.visibility_toggled.emit(False)
+        if not self.isVisible():
+            self._release_all_held_notes()
         super().hideEvent(event)
 
     def closeEvent(self, event):
-        self._release_all_held_notes()
-        self.event_filter.active = False
-        from PySide6.QtWidgets import QApplication
-        app = QApplication.instance()
-        if app and self._filter_installed:
-            try:
-                app.removeEventFilter(self.event_filter)
-            except Exception:
-                pass
-            self._filter_installed = False
-        self.visibility_toggled.emit(False)
+        self.set_musical_typing_active(False)
         super().closeEvent(event)
