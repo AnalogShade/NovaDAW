@@ -10,7 +10,8 @@ from PySide6.QtCore import Qt
 from core.project import Project, Track
 from core.audio_engine import AudioEngine
 from plugins.registry import plugin_registry, ensure_plugins_loaded
-from ui.master_fx_rack import MasterFxWidget
+from ui.master_fx_rack import MasterFxWidget, MasterFxSlotCard
+from ui.plugin_dialogs import is_native_plugin_editor_open
 from ui.main_window import MainWindow
 from ui.inspector import TrackInspector
 
@@ -200,3 +201,55 @@ def test_audio_engine_processes_master_fx(qapp):
     processed_comp = comp.process(processed, engine.sample_rate)
     assert processed_comp.shape == (1024, 2)
     assert not np.isnan(processed_comp).any()
+
+
+def test_master_fx_rack_slot_buttons_click(qapp):
+    """Vérifie les clics réels sur les boutons UI (supprimer, bypass, monter/descendre) des cartes Master FX."""
+    ensure_plugins_loaded()
+    project = Project.create_empty()
+    master_t = project.ensure_master_track()
+    rack = MasterFxWidget(project)
+
+    # Ajouter un Égaliseur (ouvre automatiquement son éditeur) puis un Compresseur
+    rack.add_equalizer()
+    rack.add_compressor()
+
+    cards = rack.findChildren(MasterFxSlotCard)
+    assert len(cards) == 2
+
+    eq = rack.get_master_insert_plugins()[0]
+    assert is_native_plugin_editor_open(eq)
+
+    # 1. Clic sur le bouton bypass de la carte #1 (EQ)
+    cards[0].btn_power.click()
+    assert eq.enabled is False
+
+    # 2. Clic sur le bouton Monter de la carte #2 (Compresseur -> passe en #1)
+    cards = rack.findChildren(MasterFxSlotCard)
+    cards[1].btn_up.click()
+    plugins = rack.get_master_insert_plugins()
+    assert plugins[0].plugin_type_id == "novadaw.compressor"
+    assert plugins[1].plugin_type_id == "novadaw.equalizer"
+
+    # 3. Clic sur le bouton Supprimer de la carte #2 (Égaliseur) -> doit retirer l'EQ et fermer son éditeur
+    cards = rack.findChildren(MasterFxSlotCard)
+    cards[1].btn_del.click()
+    plugins = rack.get_master_insert_plugins()
+    assert len(plugins) == 1
+    assert plugins[0].plugin_type_id == "novadaw.compressor"
+    assert not is_native_plugin_editor_open(eq)
+
+    # 4. Clic sur le bouton Supprimer du Compresseur restant -> plus aucun effet
+    cards = rack.findChildren(MasterFxSlotCard)
+    assert len(cards) == 1
+    cards[0].btn_del.click()
+    assert len(rack.get_master_insert_plugins()) == 0
+    assert rack.lbl_status.text() == "Aucun effet inséré"
+
+    # 5. Vérifier aussi la suppression du 2e effet VST3 par clic sur son bouton Supprimer
+    master_t.insert_effects = ["fake_a.vst3", "fake_b.vst3"]
+    rack.refresh_rack()
+    cards = rack.findChildren(MasterFxSlotCard)
+    assert len(cards) == 2
+    cards[1].btn_del.click()
+    assert master_t.insert_effects == ["fake_a.vst3"]

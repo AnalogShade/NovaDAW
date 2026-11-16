@@ -19,7 +19,7 @@ from core.plugin_manager import global_plugin_manager
 from plugins.registry import plugin_registry, ensure_plugins_loaded
 from ui.plugin_dialogs import (
     open_native_plugin_editor, open_plugin_editor_gui,
-    analyze_plugin_file, ensure_plugin_loaded
+    analyze_plugin_file, ensure_plugin_loaded, _open_native_editors
 )
 
 
@@ -64,6 +64,7 @@ class MasterFxSlotCard(QFrame):
         # 1. Bouton Bypass / Power (⏻)
         self.btn_power = QPushButton("⏻")
         self.btn_power.setFixedSize(26, 26)
+        self.btn_power.setCursor(Qt.PointingHandCursor)
         if is_enabled:
             self.btn_power.setStyleSheet("""
                 QPushButton {
@@ -71,6 +72,7 @@ class MasterFxSlotCard(QFrame):
                     color: #34d399;
                     border: 1px solid #059669;
                     border-radius: 13px;
+                    padding: 0px;
                     font-size: 13px;
                     font-weight: bold;
                 }
@@ -86,6 +88,7 @@ class MasterFxSlotCard(QFrame):
                     color: #737373;
                     border: 1px solid #404040;
                     border-radius: 13px;
+                    padding: 0px;
                     font-size: 13px;
                 }
                 QPushButton:hover {
@@ -95,7 +98,8 @@ class MasterFxSlotCard(QFrame):
             """)
             self.btn_power.setToolTip("Effet bypassé (Cliquer pour activer)")
 
-        self.btn_power.clicked.connect(on_toggle_bypass)
+        if on_toggle_bypass:
+            self.btn_power.clicked.connect(lambda _checked=False, cb=on_toggle_bypass: cb())
         layout.addWidget(self.btn_power)
 
         # 2. Numéro du slot (#01, #02...)
@@ -125,6 +129,7 @@ class MasterFxSlotCard(QFrame):
         # 5. Bouton Ouvrir Éditeur [e]
         btn_open = QPushButton("🎛️ Éditeur [e]")
         btn_open.setFixedHeight(26)
+        btn_open.setCursor(Qt.PointingHandCursor)
         btn_open.setStyleSheet("""
             QPushButton {
                 background-color: #1e2230;
@@ -141,13 +146,16 @@ class MasterFxSlotCard(QFrame):
             }
         """)
         btn_open.setToolTip("Ouvrir l'interface graphique de réglages de cet effet")
-        btn_open.clicked.connect(on_open_editor)
+        if on_open_editor:
+            btn_open.clicked.connect(lambda _checked=False, cb=on_open_editor: cb())
+        self.btn_open = btn_open
         layout.addWidget(btn_open)
 
         # 6. Bouton Déplacer vers le haut [▲]
+        self.btn_up = None
         if on_move_up:
             btn_up = QPushButton("▲")
-            btn_up.setFixedSize(22, 26)
+            btn_up.setFixedSize(24, 26)
             btn_up.setEnabled(can_move_up)
             btn_up.setStyleSheet("""
                 QPushButton {
@@ -155,6 +163,7 @@ class MasterFxSlotCard(QFrame):
                     color: #94a3b8;
                     border: 1px solid #334155;
                     border-radius: 3px;
+                    padding: 0px;
                     font-size: 10px;
                 }
                 QPushButton:hover:enabled {
@@ -167,13 +176,15 @@ class MasterFxSlotCard(QFrame):
                 }
             """)
             btn_up.setToolTip("Monter dans la chaîne de mastering")
-            btn_up.clicked.connect(on_move_up)
+            btn_up.clicked.connect(lambda _checked=False, cb=on_move_up: cb())
+            self.btn_up = btn_up
             layout.addWidget(btn_up)
 
         # 7. Bouton Déplacer vers le bas [▼]
+        self.btn_down = None
         if on_move_down:
             btn_down = QPushButton("▼")
-            btn_down.setFixedSize(22, 26)
+            btn_down.setFixedSize(24, 26)
             btn_down.setEnabled(can_move_down)
             btn_down.setStyleSheet("""
                 QPushButton {
@@ -181,6 +192,7 @@ class MasterFxSlotCard(QFrame):
                     color: #94a3b8;
                     border: 1px solid #334155;
                     border-radius: 3px;
+                    padding: 0px;
                     font-size: 10px;
                 }
                 QPushButton:hover:enabled {
@@ -193,20 +205,24 @@ class MasterFxSlotCard(QFrame):
                 }
             """)
             btn_down.setToolTip("Descendre dans la chaîne de mastering")
-            btn_down.clicked.connect(on_move_down)
+            btn_down.clicked.connect(lambda _checked=False, cb=on_move_down: cb())
+            self.btn_down = btn_down
             layout.addWidget(btn_down)
 
         # 8. Bouton Supprimer [🗑️]
+        self.btn_del = None
         if on_remove:
             btn_del = QPushButton("🗑️")
             btn_del.setFixedSize(26, 26)
+            btn_del.setCursor(Qt.PointingHandCursor)
             btn_del.setStyleSheet("""
                 QPushButton {
                     background-color: #26161c;
                     color: #f87171;
                     border: 1px solid #7f1d1d;
                     border-radius: 3px;
-                    font-size: 11px;
+                    padding: 0px;
+                    font-size: 12px;
                 }
                 QPushButton:hover {
                     background-color: #7f1d1d;
@@ -214,7 +230,8 @@ class MasterFxSlotCard(QFrame):
                 }
             """)
             btn_del.setToolTip("Retirer cet effet de la piste Master")
-            btn_del.clicked.connect(on_remove)
+            btn_del.clicked.connect(lambda _checked=False, cb=on_remove: cb())
+            self.btn_del = btn_del
             layout.addWidget(btn_del)
 
 
@@ -396,8 +413,10 @@ class MasterFxWidget(QWidget):
         # Nettoyer les slots actuels
         while self.rack_layout.count() > 1:
             item = self.rack_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget:
+                widget.setParent(None)
+                widget.deleteLater()
 
         master_t = self.get_master_track()
         if not master_t:
@@ -432,11 +451,11 @@ class MasterFxWidget(QWidget):
                 plugin_icon=p_icon,
                 is_enabled=is_enabled,
                 description=p_desc,
-                on_toggle_bypass=lambda p=plugin: self._toggle_plugin_bypass(p),
-                on_open_editor=lambda p=plugin: open_native_plugin_editor(p, self),
-                on_move_up=lambda idx=p_idx: self._move_plugin_up(idx),
-                on_move_down=lambda idx=p_idx: self._move_plugin_down(idx),
-                on_remove=lambda p=plugin: self.remove_native_plugin(p),
+                on_toggle_bypass=lambda _checked=False, p=plugin: self._toggle_plugin_bypass(p),
+                on_open_editor=lambda _checked=False, p=plugin: open_native_plugin_editor(p, self),
+                on_move_up=lambda _checked=False, idx=p_idx: self._move_plugin_up(idx),
+                on_move_down=lambda _checked=False, idx=p_idx: self._move_plugin_down(idx),
+                on_remove=lambda _checked=False, p=plugin: self.remove_native_plugin(p),
                 can_move_up=can_up,
                 can_move_down=can_down,
                 parent=self
@@ -453,13 +472,13 @@ class MasterFxWidget(QWidget):
                 plugin_icon="🎛️",
                 is_enabled=True,
                 description=f"Plugin audio VST3 externe ({os.path.basename(vst_path)})",
-                on_toggle_bypass=lambda: None,
-                on_open_editor=lambda path=vst_path: open_plugin_editor_gui(
+                on_toggle_bypass=lambda _checked=False: None,
+                on_open_editor=lambda _checked=False, path=vst_path: open_plugin_editor_gui(
                     path, self, f"track:{master_t.id}:effect:{path}"
                 ),
                 on_move_up=None,
                 on_move_down=None,
-                on_remove=lambda idx=v_idx: self.remove_vst_effect(idx),
+                on_remove=lambda _checked=False, idx=v_idx: self.remove_vst_effect(idx),
                 can_move_up=False,
                 can_move_down=False,
                 parent=self
@@ -764,8 +783,16 @@ class MasterFxWidget(QWidget):
         if not master_t or not hasattr(master_t, "plugins"):
             return
         instance_id = getattr(plugin, "instance_id", None)
+        removed = False
         if instance_id:
-            master_t.remove_plugin(instance_id)
+            open_dlg = _open_native_editors.get(instance_id)
+            if open_dlg:
+                open_dlg.close()
+            removed = master_t.remove_plugin(instance_id)
+        elif plugin in master_t.plugins:
+            master_t.plugins.remove(plugin)
+            removed = True
+        if removed:
             self.refresh_rack()
             self.fx_changed.emit()
 
