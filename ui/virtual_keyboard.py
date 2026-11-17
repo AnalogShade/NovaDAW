@@ -398,8 +398,8 @@ class VirtualKeyboardDialog(QDialog):
 
         self.setWindowTitle("🎹 Clavier Musical Virtuel (Musical Typing) — [Ctrl+K]")
         self.setWindowFlags(Qt.Tool | Qt.WindowStaysOnTopHint | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
-        self.resize(680, 240)
-        self.setMinimumSize(580, 220)
+        self.resize(820, 250)
+        self.setMinimumSize(800, 236)
 
         self.setStyleSheet("""
             QDialog {
@@ -436,6 +436,10 @@ class VirtualKeyboardDialog(QDialog):
         """)
 
         self._init_ui()
+        # Garantit qu'aucun bouton du bas (Octave / Vélocité / Fermer) ne soit tronqué à l'ouverture
+        min_hint = self.minimumSizeHint()
+        self.setMinimumSize(max(800, min_hint.width()), max(236, min_hint.height()))
+        self.resize(max(820, min_hint.width() + 20), max(250, min_hint.height() + 14))
 
         # Filtre d'événement global (activé dynamiquement lors de l'activation)
         self.event_filter = MusicalTypingEventFilter(self)

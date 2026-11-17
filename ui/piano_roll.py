@@ -700,19 +700,22 @@ class PianoRoll(QWidget):
 
         # Contrôles de Zoom
         self.btn_zoom_out = QPushButton("🔍-")
-        self.btn_zoom_out.setFixedSize(32, 26)
+        self.btn_zoom_out.setFixedSize(48, 26)
+        self.btn_zoom_out.setStyleSheet("padding: 2px 6px;")
         self.btn_zoom_out.setToolTip("Dézoomer (Ctrl + Molette bas)")
         self.btn_zoom_out.clicked.connect(self.zoom_out)
         tb_layout.addWidget(self.btn_zoom_out)
 
         self.btn_zoom_reset = QPushButton("100%")
-        self.btn_zoom_reset.setFixedSize(45, 26)
+        self.btn_zoom_reset.setFixedSize(48, 26)
+        self.btn_zoom_reset.setStyleSheet("padding: 2px 6px;")
         self.btn_zoom_reset.setToolTip("Réinitialiser le zoom (Ctrl + 0)")
         self.btn_zoom_reset.clicked.connect(self.zoom_reset)
         tb_layout.addWidget(self.btn_zoom_reset)
 
         self.btn_zoom_in = QPushButton("🔍+")
-        self.btn_zoom_in.setFixedSize(32, 26)
+        self.btn_zoom_in.setFixedSize(48, 26)
+        self.btn_zoom_in.setStyleSheet("padding: 2px 6px;")
         self.btn_zoom_in.setToolTip("Zoomer (Ctrl + Molette haut)")
         self.btn_zoom_in.clicked.connect(self.zoom_in)
         tb_layout.addWidget(self.btn_zoom_in)
