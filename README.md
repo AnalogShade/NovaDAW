@@ -1,162 +1,172 @@
-# NovaDAW 🌌 - Digital Audio Workstation Open-Source & Pilotée par IA
+# NovaDAW 🌌 — Station de Travail Audio Numérique (DAW)
 
-## Manuel intégré hors ligne
+**NovaDAW** est une station de travail audio numérique (DAW) modulaire conçue en **Python** et **PySide6 (Qt 6)**, inspirée de l'ergonomie de studio professionnelle. Elle combine un moteur audio temps réel **FP32 (32-bit Float)**, une console de mixage, des instruments et effets internes (`NovaSynth`, `Nova Drums`, `NovaEQ`, `NovaCompressor`), l'hébergement isolé de plugins externes **VST3 / VST2 (32 & 64 bits)**, ainsi qu'un serveur **Model Context Protocol (MCP)** pour composer et mixer en collaboration avec un agent IA.
 
-Ouvrez **Aide → Documentation** ou **F1**, ou le bouton **Aide F1** en haut à droite.
-Le manuel français comprend un parcours « Mon premier morceau », 23 chapitres,
-une recherche insensible aux accents, une table des matières et les raccourcis
-classés par contexte. Il reste ouvert pendant que vous pratiquez dans Nova DAW.
-Le contenu embarqué vérifie aussi les limites actuelles de l’export, des médias
-référencés, de la récupération et de l’automatisation.
-
-Voir [l’audit et la validation du manuel](doc/help_audit.md) pour les sources,
-la couverture et les limites des vérifications.
-
-**NovaDAW** est un logiciel de production et de création musicale (DAW) libre, modulaire et open-source conçu en Python et PySide6 (Qt 6), inspiré de l'ergonomie et du design professionnel de Cubase Pro.
-
-Il intègre une architecture avancée de plugins DSP, un importateur audio universel, un gestionnaire complet des cartes graphiques et des pilotes audio (ASIO/WASAPI), ainsi qu'une **intégration complète avec le Model Context Protocol (MCP)** permettant à un agent IA (Google Antigravity, Claude, Codex) de composer, mixer et sculpter le son en direct avec vous.
+> [!IMPORTANT]
+> **Statut du dépôt — Logiciel *Source-Available* (Non Open-Source)** :
+> NovaDAW est mis à disposition publiquement pour être téléchargé, testé et utilisé **gratuitement** (y compris dans un cadre **professionnel** pour produire vos œuvres musicales), **mais il ne s'agit pas d'un logiciel open-source**. Il est strictement interdit de vendre, revendre, louer ou vous approprier le logiciel (code source ou exécutable) sans accord écrit préalable. Voir la section [Licence](#-licence-et-droits-dutilisation) et [`LICENSE`](LICENSE).
 
 ---
 
-## 🌟 Nouvelles Fonctionnalités Majeures (v1.1)
+## ⚠️ Avertissement et Mises en Garde d'Utilisation
 
-### 1. 🖥️ Section Périphériques Audio & Graphiques (Hardware Manager)
-- **Pilotes Audio Professionnels** : Sélection en direct des systèmes hôtes **Windows WASAPI**, **ASIO**, **DirectSound**, **MME** et **WDM-KS**.
-- **Routage et DSP** :
-  - Choix précis des périphériques d'entrée (microphones, lignes) et de sortie (enceintes, casques, interfaces audio externes comme Eleven Rack, Focusrite, etc.).
-  - Réglage de la fréquence d'échantillonnage (44.1 kHz à 192 kHz) et de la taille du tampon buffer (32 à 4096 échantillons).
-  - Calcul et affichage en temps réel de la **latence théorique** en millisecondes.
-  - Bouton **Tester la Sortie Audio** jouant un son sinusoïdal pur à 440 Hz pour valider immédiatement le routage.
-- **Cartes Graphiques (GPU) & Affichage** :
-  - Détection automatique et détaillée de toutes les cartes graphiques installées (GPU principal et secondaire, p. ex. NVIDIA GeForce RTX 2060, AMD Radeon, Intel Arc).
-  - Affichage de la mémoire **VRAM dédiée (Mo/Go GDDR)**, de la version exacte du pilote d'affichage et du statut matériel.
-  - Choix du moteur de rendu UI (**Direct3D 11 / OpenGL / Vulkan**) et limiteur de fréquence d'images (**60 FPS, 120 FPS, 144 FPS ou VSync**).
-  - Accélération matérielle GPU activable pour les visualisations audio (courbes EQ, FFT, VU-mètres).
-- **Accès Rapide** : Menu *Périphériques > Configuration Matériel & Audio (Pilotes, GPU)* ou clic direct sur le libellé audio dans la barre de statut.
+Avant d'installer, compiler ou utiliser NovaDAW, veuillez lire attentivement les points suivants :
 
-### 2. 📥 Importateur Audio Universel & Explorateur Windows
-- **Explorateur Windows Natif** : Boîte de dialogue native Windows pour parcourir vos dossiers et disques.
-- **Support de TOUS les Formats Audio** : Importation transparente de fichiers **WAV, MP3, FLAC, OGG, AIFF, M4A, AAC, CAF, WMA**.
-- **Traitement Automatique** :
-  - Détection du nombre de canaux et conversion intelligente mono vers stéréo.
-  - Rééchantillonnage automatique à la fréquence d'échantillonnage active du projet.
-  - Placement automatique sur la piste audio sélectionnée ou création immédiate d'une nouvelle piste.
-- **Raccourcis & Accès Directs** :
-  - Menu principal centralisé : *Fichier > 📥 Importer > 🎵 Fichier Audio...* (`Ctrl + I`).
-  - Éditeur audio de la zone inférieure ("Lower Zone").
-  - Action MCP automatisée pour les agents IA (`novadaw_import_audio_file`).
-
-### 3. 🤖 Orchestration Complète par Agent IA (Protocole MCP & Pont TCP IPC)
-NovaDAW transforme la station de travail audio numérique en un environnement collaboratif où l'utilisateur dialogue avec un agent de codage / composition IA :
-- **Serveur Officiel FastMCP** (`core/mcp/server.py`) : 44 outils d'automatisation audio exposés via le protocole standard Model Context Protocol.
-- **Pont TCP IPC non-bloquant** : L'interface utilisateur graphique PySide6 reste ultra-fluide pendant que l'agent manipule les pistes et les paramètres sonores en arrière-plan.
-- **Outils MCP Intégrés** :
-  - **Plugins & Mixage** :
-    - `novadaw_configure_equalizer` : Application de presets (`bass_boost`, `vocal_clarity`, `warm_master`, `bright_air`, `flat`) ou réglage précis bande par bande (fréquence, gain, Q, type de filtre).
-    - `novadaw_configure_compressor` : Application de presets (`punchy_drums`, `vocal_leveler`, `master_glue`, `parallel_crush`) ou réglage des paramètres (seuil, ratio, attaque, relâchement, makeup gain, mix dry/wet).
-    - `novadaw_configure_mixer` : Contrôle du volume master, panoramique, activation du mode mono et de l'atténuateur Dim (-12 dB).
-    - `novadaw_get_mixer_levels` : Télémétrie en temps réel des niveaux crête L/R et RMS.
-    - `novadaw_get_track_plugins`, `novadaw_add_plugin`, `novadaw_remove_plugin`, `novadaw_set_plugin_bypass`.
-  - **Matériel & Pilotes** :
-    - `novadaw_get_hardware_devices` : Inspection des GPU, pilotes audio, fréquences et buffers.
-    - `novadaw_set_audio_device` : Reconfiguration à chaud du périphérique de sortie, du sample rate et du buffer size.
-  - **Projet & Timeline** :
-    - `novadaw_import_audio_file` : Importation directe de tout fichier audio depuis le disque.
-    - `novadaw_create_track`, `novadaw_delete_track`, `novadaw_set_track_volume`, `novadaw_set_track_mute`, `novadaw_set_track_solo`.
-    - `novadaw_transport_play`, `novadaw_transport_stop`, `novadaw_transport_pause`, `novadaw_transport_loop`.
-
-### 4. 🌌 Identité Visuelle & Logo Supernova
-- Nouveau logo et emblème cosmique **Supernova** haute résolution.
-- Icône Windows multi-résolutions (`.ico` de 16x16 à 256x256) intégrée aux fenêtres et au raccourci du Bureau Windows (`NovaDAW.lnk`).
-- Script de régénération automatique du raccourci (`scripts/update_desktop_shortcut.py`).
+1. **Logiciel fourni « TEL QUEL » (« AS IS »)** : NovaDAW est distribué sans aucune garantie de fonctionnement continu, d'absence de bugs ou de compatibilité avec votre matériel ou vos plugins tiers.
+2. **Sécurité auditive et matérielle** : Comme tout logiciel audio temps réel, une mauvaise configuration, un gain excessif, un effet auto-oscillant, un larsen ou un plugin tiers instable peut générer des **pics sonores brutaux**. **Baissez toujours le volume physique de votre interface audio, casque ou enceintes avant de lancer la lecture, un enregistrement ou un test audio.**
+3. **Sauvegarde de vos projets** : Effectuez régulièrement des copies de sauvegarde de vos fichiers `.ndaw` et de vos fichiers audio sources.
+4. **Plugins VST tiers & Automatisation IA (MCP)** : Les plugins externes (`.vst3` / `.dll`) et les actions déclenchées par des agents IA via MCP s'exécutent sous votre entière supervision et responsabilité.
+5. **Exclusion totale de responsabilité** : En utilisant ce logiciel, vous acceptez que l'auteur ne puisse en aucun cas être tenu responsable des **pertes financières ou commerciales** (perte de projets, de données, de revenus ou interruption d'activité), des **dommages matériels**, ni des **dommages physiques (y compris auditifs) ou psychologiques** pouvant résulter de l'utilisation ou d'une mauvaise utilisation du logiciel. Consultez [`LICENSE`](LICENSE) pour les conditions juridiques complètes.
 
 ---
 
-## Édition MIDI et protection des projets
+## 🚀 Installation et Lancement (Prise en Charge Rapide)
 
-Le piano roll couvre les 128 notes MIDI et propose sélection multiple (Ctrl+clic ou Ctrl+glisser), déplacement et redimensionnement groupés, quantification (Q), transposition par flèches, vélocité, copier/coller et duplication des notes. Ctrl+Z et Ctrl+Y annulent/rétablissent les éditions du clip ouvert, y compris « Tout effacer ». Les clips s'allongent lorsque les nouvelles notes dépassent leur fin.
+### Prérequis
+- **Système recommandé** : Windows 10 / Windows 11 (64 bits) pour le support complet ASIO / WASAPI et des bridges VST2/VST3 *(compatible Python multiplateforme pour l'édition/tests de base)*.
+- **Python** : Python **3.10 à 3.13** installé avec `pip`.
 
-Les sauvegardes utilisent un remplacement atomique du fichier pour préserver la version précédente en cas d'erreur d'écriture. Les actions MIDI/MCP respectent strictement les cibles explicites et valident les lots avant modification.
+### 1. Télécharger et installer les dépendances
 
-Voir [les commandes du piano roll](doc/tracks_and_sequencing.md) et [le rapport de validation](doc/editing_workflow_validation.md).
+```powershell
+git clone https://github.com/AnalogShade/NovaDAW.git
+cd NovaDAW
 
----
+# Créer et activer un environnement virtuel (recommandé)
+python -m venv .venv
+.venv\Scripts\Activate.ps1
 
-## 🎛️ Fonctionnalités Audio & Studio
+# Installer les dépendances nécessaires pour lancer NovaDAW
+pip install -r requirements.txt
+```
 
-- **Console de Mixage Pro (`novadaw.mixer`)** :
-  - Tranches multipistes avec faders dB, panoramique, Solo/Mute/Rec, et **VU-mètres dynamiques L/R**.
-  - Tranche Master avec commutateur Mono et Dim (-12 dB).
-- **Égaliseur Paramétrique Haute Précision (`novadaw.equalizer`)** :
-  - Mode **3, 10, 12 ou 24 bandes**.
-  - Filtres IIR biquad (Peaking, Low/High Shelf, Low/High Pass) sans distorsion ni clics.
-  - Interface interactive : courbe logarithmique 20 Hz - 20 kHz avec nœuds déplaçables à la souris.
-- **Compresseur Dynamique de Studio (`novadaw.compressor`)** :
-  - Détection RMS/Peak, Soft-Knee, enveloppe d'attaque et de relâchement balistique.
-  - Affichage de la courbe dynamique et **VU-mètre de Réduction de Gain (GR) en direct**.
-- **Instrument Virtuel de Batterie Nova Drums VSTi (`novadaw.drum_machine`)** :
-  - **Échantillonnage Haute Précision FP32 (32-bit Float)** : 9 éléments acoustiques de studio générés localement par IA via le modèle **Stable Audio 3 Medium (1.4B) + SAME-Large sur GPU** (Grosse caisse, Caisse claire, Charleston fermé & ouvert, Toms aigu/médium/grave, Cymbale Crash, Cymbale Ride).
-  - **Processeur de Réverbération Stéréo Intégré** : Réverbération algorithmique de studio (Schroeder / Freeverb) avec contrôles de taille de pièce (*Room Size*), amortissement des hautes fréquences (*Damping*), largeur stéréo (*Width*) et mélange *Wet/Dry*.
-  - **Gestion Acoustique par Pad** : Contrôle indépendant du volume, panoramique, pitch / accordage (±12 demi-tons), decay d'enveloppe et niveau d'envoi réverb (*Reverb Send*).
-  - **Choke Group Intelligent** : Étouffement naturel du charleston ouvert lors de la frappe du charleston fermé.
-- **Synthétiseur Polyphonique Modulaire NovaSynth (`novadaw.synth`)** :
-  - **Synthèse DSP 100% Électronique Pure (FP32)** : Aucun sample nécessaire. 7 formes d'ondes anti-aliasées (PolyBLEP Saw, Square/Pulse avec PWM, Sine, Triangle, Bruit rose/blanc, FM 2-opérateurs, et SuperSaw 7-voix stéréo style Roland JP-8000).
-  - **Empilement de Couches Sonores (Sound Stacking)** : Possibilité de créer, dupliquer et superposer un nombre illimité de couches sonores indépendantes par note avec transposition d'octaves, demi-tons et micro-désaccordage (*Fine Tune*).
-  - **Matrice Multi-Sorties 10 Bus Stéréo** : Routage assignable de chaque couche sonore vers 10 sorties stéréo indépendantes (Bus 0 à Bus 9 / Out 1 à Out 10) permettant à plusieurs pistes de piloter le même synthétiseur sur des canaux audio séparés.
-  - **Double Enveloppe ADSR & Filtre State-Variable Analogique (SVF)** : Filtre multimode sans instabilité numérique (Passe-Bas, Passe-Haut, Passe-Bande, Rejet/Notch) avec résonance Q jusqu'à 10.0, saturation de distorsion intégrée et enveloppe de filtre dédiée.
-  - **LFO Multi-Destinations & Effets d'Espace** : LFO routable vers le pitch, le cutoff, le panoramique ou le volume, complété par un Délai Ping-Pong stéréo et une Réverbération de studio.
-  - **Design Cyberpunk & Interface Séduisante** : Arrière-plan orné d'une grille hexagonale et circuits néon, oscilloscope temps réel réactif, visualisateurs interactifs de courbe ADSR et de réponse en fréquence de filtre (Bode plot), et clavier d'écoute à latence nulle (<8ms).
-  - **Banque de Presets d'Usine** : *Cyberpunk Acid Lead*, *Neon Horizon SuperSaw*, *Deep Sub & Punch Bass*, *Ethereal Dream Pad*, *80s Synthwave Pluck*, *Sci-Fi FM Resonator*.
-  - **Contrôle Total par Protocole MCP** : Entièrement pilotable via `novadaw_configure_synth`, `novadaw_add_synth_layer`, `novadaw_remove_synth_layer`, `novadaw_set_synth_preset` et `novadaw_get_synth_state`.
-- **Export Mixdown WAV** : Rendu direct avec application des chaînes d'effets et du mastering.
+*(Optionnel)* Pour activer également le serveur IA **MCP**, les outils de **tests** (`pytest`) et la **compilation** (`pyinstaller`) :
+```powershell
+pip install -r requirements-dev.txt
+```
 
----
-
-## 🚀 Démarrage Rapide
-
-Pour lancer le logiciel, assurez-vous d'être dans le dossier du projet et exécutez :
+### 2. Lancer NovaDAW
 
 ```powershell
 python main.py
 ```
-
-### Ajouter un plugin au projet et l’utiliser sur une piste
-
-1. Ouvrir **Plugins > Ajouter un plugin au projet…**. Rechercher un nom, sélectionner un instrument ou un effet, puis cliquer **Ajouter au projet**. Le rack reste accessible avec **F11**.
-2. Créer une piste MIDI avec **Ctrl+T** et choisir son **Instrument de sortie**, ou sélectionner une piste existante et changer **Sortie MIDI — Instrument** dans l’inspecteur.
-3. Ouvrir l’interface depuis l’inspecteur pour régler cette piste. Le rack fournit les réglages de départ des nouvelles instances ; chaque piste conserve ensuite ses propres réglages.
-4. Pour un effet, utiliser **Pile de plugins & effets > Ajouter un Plugin** sur la piste ou le Master.
-5. Enregistrer le projet : le rack, le routage et les états VST sont conservés. Les plugins et banques de sons doivent rester installés sur la machine.
-
-Les VST3 sont hébergés dans des processus séparés : une erreur native du plugin ne ferme plus NovaDAW. Le scan valide le chargement, pas toutes les fonctions du plugin. Un instrument qui ne fonctionne pas reste silencieux et signale une erreur, sans remplacement automatique par le synthétiseur interne.
-
-Voir [le compte rendu des tests du parcours plugins](tests/PLUGIN_WORKFLOW_QA.md) pour les vérifications et limites de compatibilité observées.
-
-### Raccourcis Clavier :
-- **Espace** : Lecture / Pause
-- **0 (Pavé numérique)** : Stop (retour au début ou au repère de boucle)
-- **L** : Activer / Désactiver la boucle
-- **F5** : Afficher / Masquer la Console de Mixage (Mixer)
-- **Ctrl + I** : Importer un fichier audio (tout format)
-- **Ctrl + P** : Ouvrir la configuration des Périphériques (Audio, GPU, MCP)
-- **Ctrl + M** : Inspecter la Piste Master et sa pile d'effets
-- **Ctrl + T** : Ajouter une nouvelle piste
-- **Ctrl + S** : Enregistrer le projet (`.ndaw`)
-- **Ctrl + O** : Ouvrir un projet existant
-- **Ctrl + E** : Exporter le mixage en WAV
+Sous Windows, vous pouvez aussi double-cliquer sur [`Lancer_NovaDAW.bat`](Lancer_NovaDAW.bat) (il détecte automatiquement `.venv` ou votre installation Python) ou générer un raccourci Bureau avec :
+```powershell
+python scripts/update_desktop_shortcut.py
+```
 
 ---
 
-## 🤖 Connexion avec Antigravity / Claude Desktop (MCP)
+## 🛠️ Compilation (Générer un Exécutable Windows)
 
-NovaDAW est déjà configuré comme serveur MCP. Pour l'ajouter manuellement dans un autre environnement compatible :
+Si vous souhaitez compiler NovaDAW en exécutable autonome pour votre usage personnel ou interne :
+
+```powershell
+pip install pyinstaller
+pyinstaller --noconfirm --windowed --icon="assets/nova_icon.ico" --name="NovaDAW" ^
+  --add-data="assets;assets" ^
+  --add-data="presets;presets" ^
+  --add-data="core/bin;core/bin" ^
+  --add-data="plugins/drum_machine/samples;plugins/drum_machine/samples" ^
+  main.py
+```
+*(En PowerShell, remplacez `^` par le backtick `` ` `` ou écrivez la commande sur une seule ligne.)*
+L'exécutable généré se trouvera dans `dist/NovaDAW/NovaDAW.exe`.
+
+> **Note sur les bridges natifs VST3 / VST2 (`vst3_bridge_x64.exe`, `vst2_bridge_x86.exe`)** :
+> Les binaires compilés `core/bin/vst3_bridge_x64.exe` (basé sur les en-têtes officiels Steinberg VST 3.8+ sous licence **MIT**) et `core/bin/vst2_bridge_x86.exe` sont déjà fournis dans le dépôt. Si vous modifiez leurs sources C/C++ et souhaitez les recompiler avec Visual Studio Build Tools :
+> ```bat
+> :: Bridge VST3 64-bit (x64 Native Tools Command Prompt)
+> cl /O2 /EHsc /MT /std:c++17 /Icore\bin\vst3_sdk core\bin\vst3_bridge_x64.cpp user32.lib ole32.lib /Fe:core\bin\vst3_bridge_x64.exe
+>
+> :: Bridge VST2 32-bit (x86 Native Tools Command Prompt)
+> cl /O2 /MT core\bin\vst2_bridge_x86.c user32.lib gdi32.lib /Fe:core\bin\vst2_bridge_x86.exe
+> ```
+
+> [!NOTE]
+> Rappel : Toute compilation ou copie est réservée à votre usage autorisé selon [`LICENSE`](LICENSE) et doit respecter les licences des bibliothèques tierces décrites dans [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) (notamment PySide6 sous LGPLv3 et Steinberg VST3 SDK sous MIT). Aucune bibliothèque GPLv3 n'est utilisée par NovaDAW.
+
+---
+
+## 🧪 Tester le Logiciel (Suite Automatisée)
+
+La suite de tests automatisés utilise `pytest` avec isolation matérielle (`NOVADAW_SILENT_TESTS=1`) afin de **garantir un silence absolu** et de ne jamais envoyer de signal vers vos haut-parleurs pendant les tests.
+
+```powershell
+# Installer les outils de test (si ce n'est pas déjà fait)
+pip install -r requirements-dev.txt
+
+# Lancer la suite complète de tests (mode silencieux)
+$env:NOVADAW_SILENT_TESTS="1"
+$env:QT_QPA_PLATFORM="offscreen"
+python -m pytest -q
+```
+
+Pour exécuter un module de test en particulier (par exemple le manuel, le moteur synthé ou le MCP) :
+```powershell
+python -m pytest tests/test_help_manual.py -q
+python -m pytest tests/test_synth_plugin.py -q
+python -m pytest tests/test_mcp_integration.py -q
+```
+
+*(Note : en cas d'exécution sur un système sans affichage graphique ou si certains tests Qt interactifs entrent en conflit dans un même processus, exécutez les fichiers `tests/test_*.py` individuellement comme documenté dans [`doc/testing_and_qa.md`](doc/testing_and_qa.md).)*
+
+---
+
+## 🎛️ Fonctionnalités Principales
+
+- **Moteur Audio FP32 & Cache ASIO-Guard** (`core/audio_engine.py`) : Traitement temps réel 32-bit float, lecture/enregistrement audio & MIDI, mode exclusif WASAPI, gestion ASIO/WASAPI/DirectSound/MME, latence aller-retour (RTL) et compensation d'enregistrement.
+- **Console de Mixage Pro (`NovaMixer`)** : Tranches multipistes avec faders dB, panoramique, Solo/Mute/Rec, VU-mètres dynamiques L/R et bus Master (Mono, Dim -12 dB, rack d'effets Master avec A/B).
+- **Instruments & Effets Internes** :
+  - **NovaSynth** (`novadaw.synth`) : Synthétiseur polyphonique DSP 100 % synthétique (PolyBLEP, SuperSaw 7 voix, FM 2-opérateurs, double ADSR, filtre SVF multimode, LFO, Delay Ping-Pong, Reverb), empilement de couches illimité, routage sur 10 bus stéréo et 34 presets d'usine.
+  - **Nova Drums** (`novadaw.drum_machine`) : Boîte à rythmes 16 pads avec échantillons FP32, mapping General MIDI, choke group charleston, accordage, decay et réverbération stéréo intégrée.
+  - **NovaEQ** (`novadaw.equalizer`) : Égaliseur paramétrique IIR biquad 3 / 10 / 12 / 24 bandes avec courbe interactive 20 Hz – 20 kHz.
+  - **NovaCompressor** (`novadaw.compressor`) : Compresseur dynamique de studio avec Soft-Knee et VU-mètre de réduction de gain (GR) en direct.
+- **Hébergement Isolé VST3 & VST2 (32/64 bits)** (`core/vst_host.py`, `core/plugin_manager.py`) : Exécution dans des processus isolés (un crash d'un plugin externe ne ferme pas NovaDAW), scanner incrémental et Rack de projet (**F11**).
+- **Importateur Audio Universel & Éditeur MIDI** : Import WAV, MP3, FLAC, OGG, AIFF, M4A, AAC, etc. ; Piano Roll 128 notes avec sélection multiple, quantification (`Q`), transposition et annulation/rétablissement (`Ctrl+Z` / `Ctrl+Y`).
+- **Sauvegarde Atomique (`.ndaw`)** : Remplacement atomique des fichiers pour préserver la version précédente en cas d'erreur d'écriture.
+- **Orchestration par Agent IA (MCP)** (`core/mcp/server.py`) : Serveur FastMCP communiquant par pont TCP IPC non-bloquant (port `8765`) pour créer des pistes, programmer du MIDI, configurer les instruments/effets et piloter le transport en direct.
+
+---
+
+## 🎹 Utilisation Rapide & Raccourcis Essentiels
+
+### Manuel intégré hors ligne
+Ouvrez **Aide → Documentation** ou appuyez sur **F1** (ou le bouton **Aide F1** en haut à droite) directement dans NovaDAW pour accéder au manuel complet (parcours *Mon premier morceau*, 23 chapitres, recherche insensible aux accents et liste complète des raccourcis).
+
+### Utiliser un plugin sur une piste
+1. Ouvrir **Plugins → Ajouter un plugin au projet…** (**F11** pour le rack flottant).
+2. Créer une piste MIDI (**Ctrl+T**) et sélectionner son **Instrument de sortie** dans l'inspecteur.
+3. Ajouter des effets via **Pile de plugins & effets → Ajouter un Plugin** sur une piste ou sur le Master.
+4. Enregistrer votre projet (**Ctrl+S**). Les plugins externes et banques de sons doivent rester installés sur la machine.
+
+### Raccourcis clavier principaux
+- **Espace** : Lecture / Pause
+- **0 (Pavé numérique)** : Stop (retour au début ou au repère de boucle)
+- **L** : Activer / Désactiver la boucle
+- **F1** : Ouvrir le manuel intégré hors ligne
+- **F4** : Gestionnaire de plugins et dossiers VST
+- **F5** : Afficher / Masquer la Console de Mixage
+- **F11** : Rack de plugins flottant
+- **Ctrl + T** : Ajouter une nouvelle piste
+- **Ctrl + I** : Importer un fichier audio
+- **Ctrl + K** : Ouvrir le clavier musical virtuel
+- **Ctrl + P** : Configuration Matériel & Audio (ASIO/WASAPI, GPU, MCP)
+- **Ctrl + M** : Inspecter la Piste Master et ses effets
+- **Ctrl + S / O / E** : Enregistrer (`.ndaw`) / Ouvrir / Exporter en WAV
+
+---
+
+## 🤖 Connexion avec un Client MCP (Antigravity, Claude Desktop, etc.)
+
+Pour connecter un client compatible MCP à NovaDAW, lancez d'abord NovaDAW, puis ajoutez l'entrée suivante dans la configuration MCP de votre client en remplaçant `<CHEMIN_VERS_NOVADAW>` par le chemin absolu de votre dossier NovaDAW :
 
 ```json
 {
   "mcpServers": {
     "novadaw": {
       "command": "python",
-      "args": ["c:/Users/Utilisateur/Documents/Dev/music software/core/mcp/server.py"]
+      "args": ["<CHEMIN_VERS_NOVADAW>/core/mcp/server.py"]
     }
   }
 }
@@ -164,82 +174,29 @@ NovaDAW est déjà configuré comme serveur MCP. Pour l'ajouter manuellement dan
 
 ---
 
-## 📚 Documentation & Spécifications Techniques (`doc/`)
+## 📚 Documentation Technique Complète (`doc/`)
 
-L'architecture complète du logiciel et les contrats d'ingénierie destinés aux développeurs et aux agents IA sont documentés dans [**`AGENT.md`**](AGENT.md) et dans le dossier [**`doc/`**](doc/README.md) :
-- [**Guide Opérationnel des Agents IA (`AGENT.md`)**](AGENT.md)
+Pour comprendre l'architecture interne, les contrats d'ingénierie ou les limites vérifiées du logiciel :
 - [**Index Complet des Spécifications (`doc/README.md`)**](doc/README.md)
+- [**Audit et Validation du Manuel (`doc/help_audit.md`)**](doc/help_audit.md)
+- [**Stratégie de Tests & QA (`doc/testing_and_qa.md`)**](doc/testing_and_qa.md)
+- [**Guide d'Architecture pour Agents (`AGENT.md`)**](AGENT.md)
 
 ---
 
-## 🎹 Architecture du Codebase
+## 📜 Licence et Droits d'Utilisation
 
-```text
-music software/
-├── main.py                         # Point d'entrée de NovaDAW avec ID d'application Windows
-├── AGENT.md                        # Guide maître d'architecture et de comportement pour Agents IA
-├── GEMINI.md                       # Directives d'autonomie et pilotage MCP NovaDAW
-├── README.md                       # Présentation générale et guide de démarrage
-├── assets/
-│   ├── nova_icon.ico               # Icône officielle multi-résolution Windows (16 à 256px)
-│   ├── nova_icon.png               # Icône Supernova haute résolution (512x512)
-│   ├── nova_logo_full.png          # Logo complet NovaDAW
-│   └── style.qss                   # Thème sombre professionnel inspiré de Cubase Pro
-├── core/
-│   ├── action_registry.py          # Registre déclaratif central des actions (@action_registry)
-│   ├── audio_engine.py             # Moteur audio FP32 temps réel, cache ASIO-Guard, enregistrement
-│   ├── audio_importer.py           # Importateur universel (WAV, MP3, FLAC, OGG, AIFF, M4A) & crêtes 1:1
-│   ├── hardware_manager.py         # Auto-config ASIO/WASAPI, latence RTL, panneaux pilotes, GPU
-│   ├── plugin_manager.py           # Scanner VST3/VST2 incrémental, watcher temps réel, instances
-│   ├── preset_manager.py           # Gestionnaire universel de presets & protection Factory Presets
-│   ├── project.py                  # Modèle de données (Project, Track, Master, MidiClip, AudioClip)
-│   ├── recent_projects.py          # Historique MRU des projets récents
-│   ├── serializer.py               # Sérialisation & rétrocompatibilité au format .ndaw (v1.1)
-│   ├── vst_host.py                 # Wrapper d'hébergement sécurisé des plugins VST3 (IsolatedPlugin)
-│   ├── actions/                    # 44 handlers d'actions (transport, midi, project, plugins, synth)
-│   ├── ipc/                        # Serveur et client TCP IPC JSON non-bloquant (port 8765)
-│   └── mcp/
-│       └── server.py               # Serveur officiel FastMCP (auto-exposition des 44 outils IA)
-├── doc/                            # Spécifications techniques complètes (14 fichiers thématiques)
-├── plugins/
-│   ├── base.py                     # Contrat abstrait BasePlugin
-│   ├── registry.py                 # Registre dynamique des plugins internes (PluginRegistry)
-│   ├── synth/                      # NovaSynth : Synthétiseur polyphonique multi-couches & multi-sorties
-│   ├── drum_machine/               # Nova Drums VSTi : Boîte à rythmes 16 pads, synthèse & samples
-│   ├── equalizer/                  # NovaEQ : Égaliseur paramétrique biquad IIR 3/10/12/24 bandes
-│   ├── compressor/                 # NovaCompressor : Compresseur dynamique de studio avec GR meter
-│   └── mixer/                      # NovaMixer : Console de mixage multi-pistes & bus Master
-├── presets/                        # Bibliothèque de presets JSON par type de plugin
-├── tests/                          # Suite complète de tests unitaires et de stress (pytest)
-└── ui/
-    ├── main_window.py              # Fenêtre principale Cubase Pro, gestion Dirty State & menus
-    ├── transport_bar.py            # Barre de transport (Play, Stop, Rec, BPM, Loop, Master VU)
-    ├── editing_toolbar.py          # Barre d'outils (Select, Split, Erase, Snap, Grille, Zoom)
-    ├── track_header.py             # En-têtes de pistes (ResetableSlider, CompactNumEdit, Drag & Resize)
-    ├── inspector.py                # Inspecteur latéral de piste et routage multi-sorties
-    ├── timeline_view.py            # Règle temporelle, grille d'arrangement et clips
-    ├── piano_roll.py               # Séquenceur MIDI interactif avec clavier vertical
-    ├── audio_editor.py             # Éditeur de forme d'onde audio et trimming non-destructif
-    ├── vst_rack.py                 # Onglet Rack de plugins du projet
-    ├── floating_plugin_rack.py     # Fenêtre flottante du Rack VST (F11)
-    ├── master_fx_rack.py           # Onglet Master FX avec réorganisation DSP et Bypass Global A/B
-    ├── plugin_dialogs.py           # NativePluginDialog (barre universelle de presets) & gestionnaire VST
-    ├── project_plugin_dialog.py    # Sélecteur de plugins avec diagnostic VST2 Legacy
-    ├── device_settings_dialog.py   # Configuration Audio ASIO/WASAPI, Latence RTL, GPU & MCP
-    ├── glow_effects.py             # Effets de lueur néon 360° (Mute, Solo, Record Arm)
-    ├── dialogs.py                  # Boîtes de dialogue de création de piste
-    └── help_dialog.py              # Guide interactif et aide intégrée
-```
+Copyright © 2026 louisconumerique.ca (AnalogShade). Tous droits réservés.
 
----
+Ce projet est distribué sous la **Licence Propriétaire Source-Available NovaDAW** (voir le fichier complet [`LICENSE`](LICENSE)) :
 
-## 📜 Licences et Conformité Commerciale
+- ✅ **Vous pouvez** :
+  - Télécharger, installer, compiler et utiliser NovaDAW **gratuitement**, tel qu'il est fourni.
+  - Utiliser NovaDAW dans un cadre **personnel, éducatif ou professionnel/commercial** (par exemple pour créer, enregistrer, mixer et commercialiser vos propres morceaux et productions audio).
+  - Consulter et modifier le code source pour votre usage privé ou interne.
+- ❌ **Vous ne pouvez PAS** (sans accord écrit préalable de l'auteur) :
+  - **Vendre, revendre, louer, sous-licencier ou commercialiser** NovaDAW (code source ou binaire compilé), en tout ou en partie, tel quel ou modifié.
+  - **Vous approprier le projet**, le redistribuer sous un autre nom ou retirer les mentions d'auteur, de licence et d'avertissement.
+  - Intégrer le code source de NovaDAW dans un produit commercial tiers.
 
-L'ensemble des dépendances et du code source respecte scrupuleusement les licences permissives open source :
-- **NumPy** : BSD-3-Clause
-- **SciPy** : BSD-3-Clause
-- **sounddevice** : MIT
-- **soundfile** : BSD-3-Clause
-- **pedalboard** : Apache 2.0
-- **PySide6** : LGPLv3
-- **Zéro Licence Contaminante (Pas de GPL)** : Tous les algorithmes de filtrage biquad, de compression dynamique, de mixage et de pont IPC sont entièrement libres d'utilisation commerciale.
+Les bibliothèques tierces utilisées par NovaDAW restent soumises à leurs licences respectives, détaillées dans [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).

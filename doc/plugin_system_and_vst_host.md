@@ -12,7 +12,7 @@ NovaDAW unifie deux familles de plugins sous un modèle de routage commun dans [
 | :--- | :--- | :--- |
 | **Identifiant (`plugin_path`)** | Chaîne préfixée : `novadaw.synth`, `novadaw.drum_machine`, `novadaw.equalizer`, `novadaw.compressor`, `novadaw.mixer` | Chemin absolu sur le disque vers le binaire `.vst3` ou `.dll` |
 | **Registre / Gestionnaire** | [`PluginRegistry`](../plugins/registry.py) (`plugins/registry.py`) | [`PluginManager`](../core/plugin_manager.py) (`global_plugin_manager`) |
-| **Classe d'instance** | Sous-classe de [`BasePlugin`](../plugins/base.py) | [`IsolatedPlugin`](../core/vst_host.py) encapsulant `pedalboard.load_plugin` |
+| **Classe d'instance** | Sous-classe de [`BasePlugin`](../plugins/base.py) | [`IsolatedPlugin`](../core/vst_host.py) encapsulant `VST3Plugin64` (`vst3_bridge_x64.exe`, SDK VST3 MIT), `VST2Plugin64` ou `VST2Plugin32` (`vst2_bridge_x86.exe`) |
 | **Interface Graphique (UI)** | Widget PySide6 retourné par `plugin.create_editor()` et encapsulé dans [`NativePluginDialog`](../ui/plugin_dialogs.py) | Éditeur natif OS ouvert via `plugin.show_editor()` ou panneau générique de paramètres [`PluginEditorDialog`](../ui/plugin_dialogs.py) |
 | **Persistance d'état** | Dictionnaire JSON (`plugin.get_state()` / `plugin.set_state()`) stocké dans `native_state` et `track.plugins` | Octets `raw_state` encodés en Base64 dans `project.plugin_states` |
 
@@ -38,9 +38,9 @@ NovaDAW unifie deux familles de plugins sous un modèle de routage commun dans [
 - **Deep Scan (`PluginScanWorker`)** :
   - Accessible depuis [`PluginManagerDialog`](../ui/plugin_dialogs.py) pour inspecter en profondeur les binaires et extraire la liste complète des paramètres (`parameters`).
 
-### 2.3 Détection VST2 Legacy sans Exécution Binaire (`is_vst2_dll`)
-- `pedalboard` ne charge nativement que les formats **VST3** (et Audio Unit sur macOS).
-- Pour éviter de charger des DLL système aléatoires ou de faire planter le processus, [`is_vst2_dll(file_path)`](../core/plugin_manager.py) inspecte la table d'export PE (`pefile`) sans exécuter le code binaire :
+### 2.3 Détection VST2 & Hébergement Natif (`is_vst2_dll`, `VST3Plugin64`)
+- Les plugins **VST3 (`.vst3`)** sont hébergés via le bridge natif C++ 64-bit `core/bin/vst3_bridge_x64.exe` (compilé avec les en-têtes officiels Steinberg VST 3.8+ sous licence **MIT**), et les **VST2 (`.dll`)** 64-bit / 32-bit via `VST2Plugin64` / `core/bin/vst2_bridge_x86.exe`.
+- Pour éviter de charger des DLL système aléatoires ou de faire planter le processus lors du scan, [`is_vst2_dll(file_path)`](../core/plugin_manager.py) inspecte la table d'export PE (`pefile`) sans exécuter le code binaire :
   - Vérifie la présence des symboles d'entrée officiels Steinberg VST 2.x : `VSTPluginMain` ou `main`.
   - Ignore automatiquement les DLL d'infrastructure connues (`vcruntime`, `msvcp`, `qt5`, `d3d`, `libfftw`, etc.).
 - Les plugins VST2 détectés reçoivent le statut `" Non supporté (VST2 Legacy)"` et sont classifiés (`Instrument` vs `Effet`) par heuristique de nom/chemin afin d'afficher un diagnostic explicite de migration vers VST3 dans [`ProjectPluginDialog`](../ui/project_plugin_dialog.py).

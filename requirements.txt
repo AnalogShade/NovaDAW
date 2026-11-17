@@ -1,11 +1,10 @@
-# NovaDAW - Dépendances Python requises
+# NovaDAW - Dépendances Python requises (sans dépendance GPL)
 
-# Interface Graphique (Qt 6)
+# Interface Graphique (Qt 6 - LGPLv3)
 PySide6>=6.5.0
 
-# Moteur Audio & Traitement Numérique du Signal (DSP)
+# Moteur Audio & Traitement Numérique du Signal (BSD-3-Clause / MIT)
 numpy>=1.24.0
 scipy>=1.10.0
 sounddevice>=0.4.6
 soundfile>=0.12.1
-pedalboard>=0.9.0

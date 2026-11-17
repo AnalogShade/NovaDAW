@@ -173,7 +173,7 @@ Le registre est un singleton centralisant l'énumération et l'instanciation dyn
 
 Les plugins VST3 externes tiers s'exécutent dans un environnement hermétique via `IsolatedPlugin` :
 1. **Sous-processus Dédié** : Chaque instance externe tourne dans un processus séparé (`spawn`) avec communication par IPC Pipe binaire.
-2. **Hook de Table Virtuelle Multicanal (`_apply_multibus_vst_fix`)** : Empêche les violations d'accès mémoire (`0xC0000005`) causées par les instruments multicanaux sous Pedalboard/JUCE.
+2. **Bridges Natifs Multicanaux (`vst3_bridge_x64.exe`, `vst2_bridge_x86.exe`)** : Allouent des buffers valides pour tous les bus d'entrée/sortie VST3/VST2 afin d'éviter les violations d'accès mémoire (`0xC0000005`) sur les instruments multicanaux.
 3. **Fenêtres Graphiques Natives** : L'éditeur natif VST3 s'exécute sur le thread principal du processus fils sans bloquer la boucle d'événements Qt de NovaDAW.
 4. **Contrôle d'Erreur sans Crash** : En cas de crash du plugin, seule son instance s'arrête en silence ; NovaDAW continue de fonctionner normalement.
 

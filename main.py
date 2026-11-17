@@ -1,5 +1,5 @@
 """
-main.py - Point d'entrée de NovaDAW (Digital Audio Workstation Open-Source)
+main.py - Point d'entrée de NovaDAW (Station de Travail Audio Numérique)
 """
 import sys
 import os
@@ -26,7 +26,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("NovaDAW")
-    app.setOrganizationName("NovaDAW Open Source")
+    app.setOrganizationName("NovaDAW")
 
     # Définition de l'icône officielle Supernova
     icon_path = os.path.join(os.path.dirname(__file__), "assets", "nova_icon.png")

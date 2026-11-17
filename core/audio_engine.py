@@ -1622,7 +1622,7 @@ class AudioEngine:
                 fx_plugin = self.get_effect_plugin(fx_path, f"track:{track.id}:effect:{fx_path}")
                 if fx_plugin and getattr(fx_plugin, "is_effect", False):
                     try:
-                        # Pedalboard attend un buffer (channels, frames)
+                        # L'hôte VST attend un buffer planaire (channels, frames)
                         in_audio = track_buf.T
                         fx_out = fx_plugin(in_audio, sample_rate=self.sample_rate, reset=False)
                         if fx_out is not None and fx_out.size > 0:

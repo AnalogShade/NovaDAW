@@ -6,7 +6,7 @@ Ce document trace les perspectives d'évolution de **NovaDAW** et définit les p
 
 ## 1. Vision et Axes d'Évolution
 
-NovaDAW ambitionne de devenir la station de production musicale open-source de référence, nativement conçue pour la synergie entre musiciens humains et intelligence artificielle agentique.
+NovaDAW ambitionne de devenir une station de production musicale de référence, nativement conçue pour la synergie entre musiciens humains et intelligence artificielle agentique.
 
 ### Principaux Axes de Développement :
 1. **Intégration Avancée de Contrôleurs MIDI Matériels** :

@@ -1,3 +1,14 @@
 @echo off
-start "" "C:\Users\Utilisateur\AppData\Local\Programs\Python\Python313\pythonw.exe" "C:\Users\Utilisateur\Documents\Dev\music software\main.py"
-exit
+setlocal
+cd /d "%~dp0"
+if exist ".venv\Scripts\pythonw.exe" (
+    start "" ".venv\Scripts\pythonw.exe" "%~dp0main.py"
+) else (
+    where pythonw >nul 2>&1
+    if %errorlevel%==0 (
+        start "" pythonw "%~dp0main.py"
+    ) else (
+        python "%~dp0main.py"
+    )
+)
+exit /b 0

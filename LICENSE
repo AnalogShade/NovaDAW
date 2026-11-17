@@ -1,0 +1,163 @@
+NovaDAW Proprietary Source-Available License (Free Use / No Resale)
+Licence Propriétaire Source-Available NovaDAW (Usage Gratuit / Revente Interdite)
+================================================================================
+
+Copyright (c) 2026 louisconumerique.ca (AnalogShade).
+Tous droits réservés / All rights reserved.
+
+--------------------------------------------------------------------------------
+[VERSION FRANÇAISE]
+--------------------------------------------------------------------------------
+
+1. STATUT DU LOGICIEL (SOURCE-AVAILABLE, NON OPEN-SOURCE)
+Le présent logiciel (« NovaDAW »), incluant son code source, ses exécutables, ses
+interfaces graphiques, ses algorithmes DSP, sa documentation, ses presets
+d'usine, ses échantillons audio et ses éléments visuels (ci-après le
+« Logiciel »), est mis à disposition sous un modèle « Source-Available ».
+Bien que le dépôt soit public, NovaDAW N'EST PAS un logiciel libre ou open
+source au sens de l'Open Source Initiative (OSI). Tous les droits qui ne sont
+pas expressément accordés ci-dessous restent réservés à l'Auteur.
+
+2. DROITS ACCORDÉS (UTILISATION GRATUITE, Y COMPRIS PROFESSIONNELLE)
+Sous réserve du strict respect de la présente licence, l'Auteur vous accorde une
+licence gratuite, mondiale, non exclusive et non transférable vous autorisant à :
+  a) Télécharger, installer, compiler depuis les sources et exécuter le Logiciel
+     tel qu'il est fourni, gratuitement, à des fins personnelles, éducatives,
+     associatives, artistiques ou professionnelles / commerciales (par exemple :
+     composer, enregistrer, mixer, produire et vendre vos propres œuvres audio
+     ou projets musicaux créés à l'aide du Logiciel) ;
+  b) Consulter le code source et le modifier uniquement pour votre propre usage
+     privé ou interne.
+
+3. RESTRICTIONS STRICTES (INTERDICTION DE VENTE ET D'APPROPRIATION)
+Il est strictement interdit, sans l'accord écrit préalable exprès de l'Auteur :
+  a) De vendre, revendre, louer, prêter contre rémunération, concéder en
+     sous-licence, monétiser ou commercialiser le Logiciel (sous forme de code
+     source ou de binaire compilé), en tout ou en partie, tel quel ou modifié ;
+  b) De vous approprier le travail de l'Auteur, de revendiquer la paternité du
+     Logiciel, de le republier sous un autre nom ou une autre marque, ou de
+     supprimer, masquer ou altérer les mentions de copyright, d'auteur, de
+     licence ou d'avertissement ;
+  c) D'intégrer le Logiciel ou une partie substantielle de son code source dans
+     un produit ou service commercial tiers ;
+  d) De redistribuer publiquement des copies ou versions dérivées du Logiciel à
+     des fins commerciales. Toute copie ou fork conservé à des fins strictement
+     non commerciales doit conserver intégralement le présent fichier LICENSE,
+     les mentions de copyright et les clauses de non-responsabilité.
+
+4. COMPOSANTS ET BIBLIOTHÈQUES TIERCES
+Le Logiciel utilise des bibliothèques tierces indépendantes (telles que PySide6,
+NumPy, SciPy, sounddevice, soundfile et les en-têtes Steinberg VST3 SDK),
+qui restent régies par leurs propres licences respectives (voir THIRD_PARTY_LICENSES.md). La présente
+licence ne restreint aucun des droits dont vous disposez directement en vertu
+des licences applicables à ces bibliothèques tierces.
+
+5. EXCLUSION DE GARANTIE (« TEL QUEL »)
+LE LOGICIEL EST FOURNI « TEL QUEL » (« AS IS »), SANS GARANTIE D'AUCUNE SORTE,
+EXPRESSE OU IMPLICITE, INCLUANT NOTAMMENT, MAIS SANS S'Y LIMITER, TOUTE
+GARANTIE DE QUALITÉ MARCHANDE, D'ADÉQUATION À UN USAGE PARTICULIER, D'ABSENCE
+DE BUGS, DE CONTINUITÉ DE FONCTIONNEMENT, DE COMPATIBILITÉ MATÉRIELLE OU VST,
+OU D'EXACTITUDE DES RÉSULTATS. VOUS UTILISEZ LE LOGICIEL À VOS SEULS RISQUES.
+
+6. LIMITATION ABSOLUE DE RESPONSABILITÉ
+DANS TOUTE LA MESURE PERMISE PAR LA LOI APPLICABLE, EN AUCUN CAS L'AUTEUR OU LES
+CONTRIBUTEURS NE POURRONT ÊTRE TENUS RESPONSABLES DE TOUT DOMMAGE DIRECT,
+INDIRECT, ACCESSOIRE, SPÉCIAL, EXEMPLAIRE OU CONSÉCUTIF, DE QUELQUE NATURE QUE
+CE SOIT, RÉSULTANT DE L'UTILISATION, DE L'IMPOSSIBILITÉ D'UTILISER OU D'UNE
+MAUVAISE UTILISATION DU LOGICIEL, INCLUANT NOTAMMENT ET SANS LIMITATION :
+  - TOUTE PERTE FINANCIÈRE OU COMMERCIALE (perte de revenus, de profits, de
+    clients, de contrats, interruption d'activité, retard de livraison ou perte
+    de données et de projets musicaux) ;
+  - TOUT DOMMAGE MATÉRIEL (détérioration d'enceintes, casques, interfaces audio,
+    microphones ou équipements informatiques) ;
+  - TOUT DOMMAGE PHYSIQUE (notamment lésions auditives, acouphènes, fatigue
+    auditive ou inconfort causés par des niveaux sonores excessifs, des pics
+    numériques, du larsen ou un mauvais routage audio) ;
+  - TOUT DOMMAGE PSYCHOLOGIQUE OU MORAL découlant de l'utilisation ou d'une
+    mauvaise utilisation du Logiciel, de plugins VST tiers ou de commandes
+    exécutées par des agents d'intelligence artificielle (MCP).
+
+L'utilisateur demeure seul responsable de la sauvegarde régulière de ses
+fichiers, de la protection de son audition et de son matériel audio (limitation
+du volume physique avant lecture ou test), ainsi que de la vérification des
+résultats produits par le Logiciel.
+
+7. RÉSILIATION
+Tout manquement aux conditions de la présente licence entraîne la résiliation
+automatique et immédiate des droits qui vous sont accordés par celle-ci.
+
+--------------------------------------------------------------------------------
+[ENGLISH VERSION]
+--------------------------------------------------------------------------------
+
+1. SOFTWARE STATUS (SOURCE-AVAILABLE, NOT OPEN SOURCE)
+This software ("NovaDAW"), including its source code, executables, user
+interfaces, DSP algorithms, documentation, factory presets, audio samples, and
+visual assets (collectively, the "Software"), is made available on a
+"Source-Available" basis. Although the repository is public, NovaDAW is NOT
+free or open-source software as defined by the Open Source Initiative (OSI).
+All rights not expressly granted below are reserved by the Author.
+
+2. GRANT OF RIGHTS (FREE PERSONAL AND PROFESSIONAL USE)
+Subject to full compliance with this License, the Author grants you a free,
+worldwide, non-exclusive, non-transferable license to:
+  a) Download, install, compile from source, and run the Software as-is, free
+     of charge, for personal, educational, non-profit, creative, or
+     professional/commercial use (for example, composing, recording, mixing,
+     producing, and commercially releasing your own audio works created with
+     the Software);
+  b) Inspect and modify the source code solely for your own private or internal
+     use.
+
+3. STRICT RESTRICTIONS (NO RESALE AND NO MISAPPROPRIATION)
+Without the prior express written permission of the Author, you may NOT:
+  a) Sell, resell, rent, lease, sublicense, monetize, or otherwise
+     commercially distribute the Software (whether in source code or compiled
+     binary form), in whole or in part, as-is or modified;
+  b) Misappropriate the Author's work, claim authorship of the Software,
+     republish it under a different name or brand, or remove, obscure, or alter
+     any copyright, authorship, license, or disclaimer notices;
+  c) Incorporate the Software or any substantial portion of its source code
+     into a third-party commercial product or service;
+  d) Publicly redistribute copies or derivative versions of the Software for
+     commercial purposes. Any non-commercial copy or fork must retain this
+     LICENSE file, all copyright notices, and all disclaimers in full.
+
+4. THIRD-PARTY COMPONENTS AND LIBRARIES
+The Software relies on independent third-party libraries (such as PySide6,
+NumPy, SciPy, sounddevice, soundfile, and Steinberg VST3 SDK headers), which
+remain governed by their own respective licenses (see THIRD_PARTY_LICENSES.md). Nothing in
+this License restricts any rights you may have directly under those third-party
+licenses.
+
+5. DISCLAIMER OF WARRANTY ("AS IS")
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, ABSENCE OF DEFECTS, HARDWARE
+OR VST COMPATIBILITY, OR ACCURACY OF RESULTS. YOU USE THE SOFTWARE AT YOUR OWN
+SOLE RISK.
+
+6. ABSOLUTE LIMITATION OF LIABILITY
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE AUTHOR
+OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES OF ANY KIND ARISING OUT OF OR IN CONNECTION
+WITH THE USE, INABILITY TO USE, OR MISUSE OF THE SOFTWARE, INCLUDING WITHOUT
+LIMITATION:
+  - ANY FINANCIAL OR COMMERCIAL LOSSES (loss of revenue, profits, clients,
+    contracts, business interruption, missed deadlines, or loss of data and
+    audio projects);
+  - ANY HARDWARE OR PROPERTY DAMAGE (damage to speakers, headphones, audio
+    interfaces, microphones, or computer systems);
+  - ANY PHYSICAL INJURY (including hearing loss, tinnitus, ear fatigue, or
+    discomfort caused by excessive volume levels, digital peaks, feedback, or
+    improper audio routing);
+  - ANY PSYCHOLOGICAL OR EMOTIONAL HARM resulting from the use or misuse of
+    the Software, third-party VST plugins, or AI/MCP automated actions.
+
+The user assumes sole responsibility for regularly backing up projects,
+protecting their hearing and audio equipment (checking physical volume levels
+before playback or testing), and verifying all outputs produced by the Software.
+
+7. TERMINATION
+Any breach of the terms of this License automatically and immediately
+terminates the rights granted to you hereunder.

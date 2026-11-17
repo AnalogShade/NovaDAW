@@ -1,11 +1,10 @@
 """
 core/audio_importer.py - Module d'importation universelle de fichiers audio pour NovaDAW.
 
-Supporte tous les formats audio majeurs (WAV, MP3, FLAC, OGG, AIFF, AIF, CAF, AU, M4A, AAC, etc.)
-en utilisant exclusivement des bibliothèques open-source sous licences hautement permissives
-(BSD-3-Clause, Apache 2.0, MIT) :
-- `soundfile` (libsndfile - BSD-3-Clause)
-- `pedalboard.io` (Apache 2.0)
+Supporte les formats audio majeurs (WAV, MP3, FLAC, OGG, AIFF, AIF, CAF, AU, M4A, AAC, WMA, etc.)
+via des bibliothèques sans dépendance GPL forte :
+- `soundfile` (BSD-3-Clause / libsndfile LGPL-2.1+)
+- `PySide6.QtMultimedia.QAudioDecoder` (LGPLv3) pour les formats étendus (M4A, AAC, WMA, MP4...)
 - `scipy.signal` (BSD-3-Clause)
 """
 import os
@@ -19,10 +18,11 @@ except ImportError:
     HAS_SOUNDFILE = False
 
 try:
-    import pedalboard.io
-    HAS_PEDALBOARD = True
+    from PySide6.QtCore import QCoreApplication, QEventLoop, QTimer, QUrl
+    from PySide6.QtMultimedia import QAudioDecoder, QAudioFormat
+    HAS_QT_MULTIMEDIA = True
 except ImportError:
-    HAS_PEDALBOARD = False
+    HAS_QT_MULTIMEDIA = False
 
 try:
     from scipy.signal import resample_poly
@@ -45,6 +45,56 @@ QT_FILE_DIALOG_FILTER = (
     "Fichiers AIFF (*.aiff *.aif);;"
     "Tous les fichiers (*.*)"
 )
+
+
+def _decode_with_qt_multimedia(file_path: str, target_sr: int) -> Tuple[np.ndarray, int]:
+    """Décode un fichier audio via QAudioDecoder (PySide6 QtMultimedia, LGPLv3)."""
+    app = QCoreApplication.instance()
+    if app is None:
+        app = QCoreApplication([])
+
+    dec = QAudioDecoder()
+    fmt = QAudioFormat()
+    fmt.setSampleRate(int(target_sr))
+    fmt.setChannelCount(2)
+    fmt.setSampleFormat(QAudioFormat.SampleFormat.Float)
+    dec.setAudioFormat(fmt)
+    dec.setSource(QUrl.fromLocalFile(os.path.abspath(file_path)))
+
+    loop = QEventLoop()
+    chunks: List[bytes] = []
+    errors: List[str] = []
+
+    def _on_buffer_ready():
+        while dec.bufferAvailable():
+            buf = dec.read()
+            if buf.isValid():
+                chunks.append(buf.constData().tobytes())
+
+    def _on_error(_err):
+        errors.append(dec.errorString() or "Erreur de décodage QtMultimedia")
+        loop.quit()
+
+    dec.bufferReady.connect(_on_buffer_ready)
+    dec.finished.connect(loop.quit)
+    dec.error.connect(_on_error)
+
+    # Garde-fou contre un flux bloqué
+    QTimer.singleShot(30000, loop.quit)
+    dec.start()
+    loop.exec()
+    _on_buffer_ready()
+
+    if errors and not chunks:
+        raise RuntimeError(errors[0])
+    if not chunks:
+        raise RuntimeError("Aucune donnée audio décodée par QAudioDecoder")
+
+    pcm = np.frombuffer(b"".join(chunks), dtype=np.float32)
+    usable = (len(pcm) // 2) * 2
+    if usable <= 0:
+        raise RuntimeError("Flux audio décodé vide")
+    return pcm[:usable].reshape(-1, 2).copy(), int(target_sr)
 
 
 def load_audio_file(file_path: str, target_sr: int = 44100) -> Tuple[np.ndarray, int, float]:
@@ -71,18 +121,10 @@ def load_audio_file(file_path: str, target_sr: int = 44100) -> Tuple[np.ndarray,
         except Exception as e:
             last_error = e
 
-    # 2. Si échec ou format non géré, tentative avec Pedalboard AudioFile (Apache 2.0)
-    if audio is None and HAS_PEDALBOARD:
+    # 2. Si échec ou format non géré (M4A, AAC, WMA, MP4), décodage via PySide6 QtMultimedia (LGPLv3)
+    if audio is None and HAS_QT_MULTIMEDIA:
         try:
-            with pedalboard.io.AudioFile(file_path) as f:
-                orig_sr = int(f.samplerate)
-                # Lecture complète
-                raw_audio = f.read(f.frames)
-                # Pedalboard retourne shape (channels, frames)
-                if raw_audio.ndim == 2:
-                    audio = raw_audio.T.astype(np.float32)
-                else:
-                    audio = raw_audio.astype(np.float32)
+            audio, orig_sr = _decode_with_qt_multimedia(file_path, target_sr)
         except Exception as e:
             last_error = e
 

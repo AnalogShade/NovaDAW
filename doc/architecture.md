@@ -165,31 +165,31 @@ NovaDAW adopte un motif architectural de type **Command Pattern centralisé** :
 
 ---
 
-## 5. Hébergement Crash-Isolé des Plugins VST3 (`core/vst_host.py`)
+## 5. Hébergement Crash-Isolé des Plugins VST3 & VST2 (`core/vst_host.py`)
 
-Les plugins VST3 natifs externes (Pedalboard / JUCE) sont programmés en C++ natif et peuvent contenir des erreurs de mémoire fatales pour un processus Python. NovaDAW résout ce problème par une isolation de processus complète :
+Les plugins VST natifs externes sont programmés en C/C++ natif et peuvent contenir des erreurs de mémoire fatales pour un processus Python. NovaDAW résout ce problème par une isolation complète :
 
 ```mermaid
 flowchart TD
     subgraph Parent_Process["Processus Principal NovaDAW"]
         APP["PySide6 Application & AudioEngine"]
         ISO["IsolatedPlugin Wrapper"]
-        PIPE_P["multiprocessing.Pipe (Parent End)"]
+        SHM["_SharedRenderChannel / Pipe"]
     end
 
-    subgraph Child_Process["Sous-Processus Isolateur VST (Spawn)"]
-        PIPE_C["multiprocessing.Pipe (Child End)"]
+    subgraph Child_Process["Sous-Processus Isolateur VST"]
         WORKER["_host Worker Function"]
-        PEDAL["Pedalboard VST3 Plugin Instance"]
-        HOOK["vtable multibus shadow hook (_apply_multibus_vst_fix)"]
-        GUI["Native VST Editor Window (Main Thread du fils)"]
+        VST3["VST3Plugin64 (vst3_bridge_x64.exe - SDK MIT)"]
+        VST2["VST2Plugin64 / VST2Plugin32 (vst2_bridge_x86.exe)"]
+        GUI["Native VST Editor Window (Thread UI dédié)"]
     end
 
-    APP <--> ISO <--> PIPE_P
-    PIPE_P <-->|"Commandes: render, state, restore, editor"| PIPE_C
-    PIPE_C <--> WORKER
-    WORKER <--> HOOK <--> PEDAL
-    WORKER <--> GUI
+    APP <--> ISO <--> SHM
+    SHM <-->|"Rendu audio/MIDI, état, éditeur"| WORKER
+    WORKER <--> VST3
+    WORKER <--> VST2
+    VST3 <--> GUI
+    VST2 <--> GUI
 ```
 
 ### Avantages Majeurs de cette Architecture :

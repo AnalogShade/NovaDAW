@@ -59,96 +59,6 @@ def _get_pe_machine(file_path: str) -> int:
         return 0
 
 
-def _apply_multibus_vst_fix(plugin):
-    """
-    Fix for multi-output VST3 instruments (e.g. Kontakt, SampleTank) in Pedalboard.
-    Pedalboard allocates only 2 channel pointers in renderMIDIMessages,
-    causing JUCE's processBlock to pass out-of-bounds stack pointers for plugins
-    expecting > 2 channels, triggering 0xC0000005 (Access Violation).
-    This installs a transparent shadow vtable hook intercepting processBlock and expanding
-    channel pointers to pluginInstance->getTotalNumOutputChannels() with scratch dummy buffers.
-    """
-    try:
-        class _PybindInstance(ctypes.Structure):
-            _fields_ = [
-                ('ob_refcnt', ctypes.c_ssize_t),
-                ('ob_type', c_void_p),
-                ('value', c_void_p),
-            ]
-
-        inst = _PybindInstance.from_address(id(plugin))
-        cpp_obj = inst.value
-        if not cpp_obj:
-            return
-
-        plugin_inst_ptr = c_void_p.from_address(cpp_obj + 0xf0).value
-        if not plugin_inst_ptr:
-            return
-
-        total_out = c_int32.from_address(plugin_inst_ptr + 0x10c).value
-        if total_out <= 2:
-            return
-
-        vtable_ptr = c_void_p.from_address(plugin_inst_ptr).value
-        if not vtable_ptr:
-            return
-
-        original_process_block_addr = c_void_p.from_address(vtable_ptr + 0x38).value
-        if not original_process_block_addr:
-            return
-
-        PROCESS_BLOCK_PROTO = ctypes.CFUNCTYPE(None, c_void_p, c_void_p, c_void_p)
-        original_process_block = PROCESS_BLOCK_PROTO(original_process_block_addr)
-
-        MAX_SAMPLES = 65536
-        dummy_float_buffer = (ctypes.c_float * MAX_SAMPLES)()
-        dummy_float_ptr = ctypes.addressof(dummy_float_buffer)
-
-        chan_ptrs_count = max(128, total_out + 16)
-        chan_pointers = (c_void_p * chan_ptrs_count)()
-        for i in range(chan_ptrs_count):
-            chan_pointers[i] = dummy_float_ptr
-        chan_pointers_addr = ctypes.addressof(chan_pointers)
-
-        def hooked_process_block(this_ptr, audio_buf_ptr, midi_buf_ptr):
-            p_num_channels = c_int32.from_address(audio_buf_ptr + 0)
-            orig_num_channels = p_num_channels.value
-            p_channels = c_void_p.from_address(audio_buf_ptr + 16)
-            orig_channels = p_channels.value
-
-            if orig_num_channels < total_out and orig_channels:
-                orig_ptrs = (c_void_p * orig_num_channels).from_address(orig_channels)
-                for c in range(orig_num_channels):
-                    chan_pointers[c] = orig_ptrs[c]
-                for c in range(orig_num_channels, total_out):
-                    chan_pointers[c] = dummy_float_ptr
-
-                p_num_channels.value = total_out
-                p_channels.value = chan_pointers_addr
-                try:
-                    original_process_block(this_ptr, audio_buf_ptr, midi_buf_ptr)
-                finally:
-                    p_num_channels.value = orig_num_channels
-                    p_channels.value = orig_channels
-            else:
-                original_process_block(this_ptr, audio_buf_ptr, midi_buf_ptr)
-
-        callback_ref = PROCESS_BLOCK_PROTO(hooked_process_block)
-
-        VTABLE_SIZE = 200
-        new_vtable = (c_void_p * VTABLE_SIZE)()
-        orig_vtable_entries = (c_void_p * VTABLE_SIZE).from_address(vtable_ptr)
-        for i in range(VTABLE_SIZE):
-            new_vtable[i] = orig_vtable_entries[i]
-
-        new_vtable[7] = ctypes.cast(callback_ref, c_void_p).value
-        c_void_p.from_address(plugin_inst_ptr).value = ctypes.addressof(new_vtable)
-
-        plugin._multibus_fix_refs = (new_vtable, callback_ref, dummy_float_buffer, chan_pointers)
-    except Exception:
-        pass
-
-
 # ============================================================================
 # Native 64-bit VST 2.4 C-ABI Host (ctypes)
 # ============================================================================
@@ -290,7 +200,7 @@ def unregister_vst_key_callback():
 
 
 class VST2Plugin64:
-    """Native 64-bit VST 2.4 Host wrapper compatible with Pedalboard's plugin API."""
+    """Native 64-bit VST 2.4 Host wrapper for NovaDAW."""
 
     def __init__(self, path: str, probe_only: bool = False):
         self.path = os.path.normpath(path)
@@ -863,27 +773,31 @@ class VST2Plugin64:
 
 
 # ============================================================================
-# 32-bit (x86) VST 2.4 Host Bridge Wrapper
+# Shared Subprocess Binary Bridge Base + VST2 (x86) & VST3 (x64) Bridges
 # ============================================================================
 
-def _get_bridge_x86_exe() -> str:
+def _get_bridge_exe(filename: str) -> str:
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    exe_path = os.path.join(base_dir, "bin", "vst2_bridge_x86.exe")
-    return exe_path
+    return os.path.join(base_dir, "bin", filename)
 
 
-class VST2Plugin32:
-    """Hosts 32-bit (x86) VST 2.4 DLL plugins via core/bin/vst2_bridge_x86.exe."""
+class _SubprocessBridgePlugin:
+    """Shared binary IPC wrapper for native C/C++ VST bridge executables."""
 
-    def __init__(self, path: str, probe_only: bool = False):
+    _bridge_exe_name: str = ""
+    _bridge_label: str = "VST"
+
+    def __init__(self, path: str, probe_only: bool = False, extra_args: Optional[list] = None):
         self.path = os.path.normpath(path)
         self._lock = threading.RLock()
         self._sample_rate = 44100.0
-        exe = _get_bridge_x86_exe()
+        exe = _get_bridge_exe(self._bridge_exe_name)
         if not os.path.isfile(exe):
-            raise RuntimeError("Pont VST2 32-bit (vst2_bridge_x86.exe) introuvable.")
+            raise RuntimeError(f"Pont {self._bridge_label} ({self._bridge_exe_name}) introuvable.")
 
         cmd = [exe, self.path]
+        if extra_args:
+            cmd.extend(extra_args)
         if probe_only:
             cmd.append("--probe")
 
@@ -924,7 +838,7 @@ class VST2Plugin32:
         while len(buf) < count:
             chunk = self._proc.stdout.read(count - len(buf))
             if not chunk:
-                raise EOFError("Le pont VST2 32-bit s'est arrêté de manière inattendue.")
+                raise EOFError(f"Le pont {self._bridge_label} s'est arrêté de manière inattendue.")
             buf.extend(chunk)
         return bytes(buf)
 
@@ -937,7 +851,7 @@ class VST2Plugin32:
             self._write_exact(b"Z")
             ok = struct.unpack("<I", self._read_exact(4))[0]
             if not ok:
-                raise RuntimeError("Échec du reset VST2 32-bit.")
+                raise RuntimeError(f"Échec du reset {self._bridge_label}.")
 
     @property
     def raw_state(self) -> bytes:
@@ -956,46 +870,21 @@ class VST2Plugin32:
             self._write_exact(b"L" + struct.pack("<I", len(data)) + data)
             ok = struct.unpack("<I", self._read_exact(4))[0]
             if not ok:
-                raise RuntimeError("Échec de restauration d'état VST2 32-bit.")
+                raise RuntimeError(f"Échec de restauration d'état {self._bridge_label}.")
 
-    def __call__(self, *args, **kwargs):
-        sample_rate = float(kwargs.get("sample_rate", self._sample_rate))
-        reset_flag = 1 if kwargs.get("reset", False) else 0
-        num_channels = int(kwargs.get("num_channels", 2))
-
-        first_arg = args[0] if args else kwargs.get("input_array", kwargs.get("midi_messages"))
-        is_midi_input = isinstance(first_arg, list) or "duration" in kwargs
-
-        if is_midi_input:
-            duration = float(kwargs.get("duration", args[1] if len(args) > 1 else 1.0))
-            total_frames = max(1, int(round(duration * sample_rate)))
-            midi_events = _normalize_midi_messages(first_arg, sample_rate)
-            in_planar = None
-            has_input = 0
-        else:
-            arr = np.asarray(first_arg, dtype=np.float32)
-            if arr.ndim == 1:
-                in_planar = np.vstack([arr, arr])
-            elif arr.shape[0] <= 16 and (arr.shape[1] > arr.shape[0] or arr.shape[0] <= 2):
-                in_planar = np.ascontiguousarray(arr, dtype=np.float32)
-            else:
-                in_planar = np.ascontiguousarray(arr.T, dtype=np.float32)
-            num_channels = in_planar.shape[0]
-            total_frames = in_planar.shape[1]
-            midi_events = []
-            has_input = 1
-
-        out_ch = max(1, num_channels)
+    def _render_raw(self, midi_events, total_frames: int, sample_rate: float, num_channels: int, reset_flag: bool, in_planar: Optional[np.ndarray]) -> np.ndarray:
+        out_ch = max(1, int(num_channels))
+        has_input = 1 if in_planar is not None else 0
         with self._lock:
             hdr = struct.pack(
                 "<cfiiiii",
                 b"R",
                 float(sample_rate),
-                int(out_ch),
+                out_ch,
                 int(total_frames),
-                int(has_input),
+                has_input,
                 len(midi_events),
-                int(reset_flag),
+                1 if reset_flag else 0,
             )
             payload = bytearray(hdr)
             for sample_idx, b0, b1, b2 in midi_events:
@@ -1008,7 +897,52 @@ class VST2Plugin32:
             if not ok or ret_frames <= 0:
                 return np.zeros((out_ch, max(0, total_frames)), dtype=np.float32)
             raw_audio = self._read_exact(ret_ch * ret_frames * 4)
-            return np.frombuffer(raw_audio, dtype=np.float32).reshape((ret_ch, ret_frames)).copy()
+            return np.frombuffer(raw_audio, dtype=np.float32).reshape((ret_ch, ret_frames))
+
+    def render_into_planar(
+        self,
+        midi_events,
+        total_frames: int,
+        sample_rate: float,
+        num_channels: int,
+        reset_flag: bool,
+        in_planar: Optional[np.ndarray],
+        out_planar: np.ndarray,
+    ):
+        """Render audio/MIDI directly into caller-provided planar float32 buffer."""
+        res = self._render_raw(midi_events, total_frames, sample_rate, num_channels, reset_flag, in_planar)
+        out_ch = min(out_planar.shape[0], res.shape[0])
+        frames = min(out_planar.shape[1], res.shape[1])
+        out_planar[:, :frames].fill(0.0)
+        if out_ch > 0 and frames > 0:
+            out_planar[:out_ch, :frames] = res[:out_ch, :frames]
+
+    def __call__(self, *args, **kwargs):
+        sample_rate = float(kwargs.get("sample_rate", self._sample_rate))
+        reset_flag = bool(kwargs.get("reset", False))
+        num_channels = int(kwargs.get("num_channels", 2))
+
+        first_arg = args[0] if args else kwargs.get("input_array", kwargs.get("midi_messages"))
+        is_midi_input = isinstance(first_arg, list) or "duration" in kwargs
+
+        if is_midi_input:
+            duration = float(kwargs.get("duration", args[1] if len(args) > 1 else 1.0))
+            total_frames = max(1, int(round(duration * sample_rate)))
+            midi_events = _normalize_midi_messages(first_arg, sample_rate)
+            in_planar = None
+        else:
+            arr = np.asarray(first_arg, dtype=np.float32)
+            if arr.ndim == 1:
+                in_planar = np.vstack([arr, arr])
+            elif arr.shape[0] <= 16 and (arr.shape[1] > arr.shape[0] or arr.shape[0] <= 2):
+                in_planar = np.ascontiguousarray(arr, dtype=np.float32)
+            else:
+                in_planar = np.ascontiguousarray(arr.T, dtype=np.float32)
+            num_channels = in_planar.shape[0]
+            total_frames = in_planar.shape[1]
+            midi_events = []
+
+        return self._render_raw(midi_events, total_frames, sample_rate, num_channels, reset_flag, in_planar).copy()
 
     def show_editor(self, close_event: threading.Event):
         with self._lock:
@@ -1038,10 +972,38 @@ class VST2Plugin32:
                 unregister_plugin_pid(self._proc.pid)
             if self._proc.poll() is None:
                 try:
-                    self._proc.terminate()
-                    self._proc.wait(timeout=1)
+                    self._write_exact(b"Q")
+                    self._read_exact(4)
+                    self._proc.wait(timeout=0.5)
                 except Exception:
                     pass
+                if self._proc.poll() is None:
+                    try:
+                        self._proc.terminate()
+                        self._proc.wait(timeout=1)
+                    except Exception:
+                        pass
+
+
+class VST2Plugin32(_SubprocessBridgePlugin):
+    """Hosts 32-bit (x86) VST 2.4 DLL plugins via core/bin/vst2_bridge_x86.exe."""
+
+    _bridge_exe_name = "vst2_bridge_x86.exe"
+    _bridge_label = "VST2 32-bit"
+
+    def __init__(self, path: str, probe_only: bool = False):
+        super().__init__(path, probe_only=probe_only)
+
+
+class VST3Plugin64(_SubprocessBridgePlugin):
+    """Hosts 64-bit VST3 plugins via core/bin/vst3_bridge_x64.exe (Steinberg VST3 SDK MIT)."""
+
+    _bridge_exe_name = "vst3_bridge_x64.exe"
+    _bridge_label = "VST3 64-bit"
+
+    def __init__(self, path: str, sub_plugin_name: Optional[str] = None, probe_only: bool = False):
+        extra = ["--sub", sub_plugin_name] if sub_plugin_name else None
+        super().__init__(path, probe_only=probe_only, extra_args=extra)
 
 
 # ============================================================================
@@ -1061,13 +1023,7 @@ def _load_any_plugin(path: str, probe_only: bool = False):
             return VST2Plugin32(real_path, probe_only=probe_only)
         return VST2Plugin64(real_path, probe_only=probe_only)
 
-    import pedalboard
-    if sub_plugin_name:
-        plugin = pedalboard.load_plugin(real_path, plugin_name=sub_plugin_name)
-    else:
-        plugin = pedalboard.load_plugin(real_path)
-    _apply_multibus_vst_fix(plugin)
-    return plugin
+    return VST3Plugin64(real_path, sub_plugin_name=sub_plugin_name, probe_only=probe_only)
 
 
 def _init_win32_sync_api():

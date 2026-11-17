@@ -15,19 +15,29 @@ def update_shortcut():
     except ImportError:
         try:
             import subprocess
-            ps_cmd = """
-            $wsh = New-Object -ComObject WScript.Shell
-            $desktop = [System.Environment]::GetFolderPath('Desktop')
-            $shortcutPath = Join-Path $desktop 'NovaDAW.lnk'
-            $shortcut = $wsh.CreateShortcut($shortcutPath)
-            $shortcut.TargetPath = 'C:\\Users\\Utilisateur\\AppData\\Local\\Programs\\Python\\Python313\\pythonw.exe'
-            $shortcut.Arguments = '\"C:\\Users\\Utilisateur\\Documents\\Dev\\music software\\main.py\"'
-            $shortcut.WorkingDirectory = 'C:\\Users\\Utilisateur\\Documents\\Dev\\music software'
-            $shortcut.IconLocation = 'C:\\Users\\Utilisateur\\Documents\\Dev\\music software\\assets\\nova_icon.ico,0'
-            $shortcut.Description = 'NovaDAW - Digital Audio Workstation Open-Source'
-            $shortcut.Save()
-            Write-Output "Raccourci Bureau mis à jour avec succès : $shortcutPath"
-            """
+            project_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            main_py = os.path.join(project_dir, "main.py")
+            ico_path = os.path.join(project_dir, "assets", "nova_icon.ico")
+            pythonw_exe = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+            if not os.path.exists(pythonw_exe):
+                pythonw_exe = sys.executable
+
+            def _ps_escape(val: str) -> str:
+                return val.replace("'", "''")
+
+            ps_cmd = (
+                "$wsh = New-Object -ComObject WScript.Shell; "
+                "$desktop = [System.Environment]::GetFolderPath('Desktop'); "
+                "$shortcutPath = Join-Path $desktop 'NovaDAW.lnk'; "
+                "$shortcut = $wsh.CreateShortcut($shortcutPath); "
+                f"$shortcut.TargetPath = '{_ps_escape(pythonw_exe)}'; "
+                f"$shortcut.Arguments = '\"{_ps_escape(main_py)}\"'; "
+                f"$shortcut.WorkingDirectory = '{_ps_escape(project_dir)}'; "
+                f"$shortcut.IconLocation = '{_ps_escape(ico_path)},0'; "
+                "$shortcut.Description = 'NovaDAW - Station de Travail Audio Numérique'; "
+                "$shortcut.Save(); "
+                "Write-Output \"Raccourci Bureau mis à jour avec succès : $shortcutPath\""
+            )
             res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, text=True)
             print(res.stdout)
             return
@@ -52,7 +62,7 @@ def update_shortcut():
         shortcut.Arguments = f'"{main_py}"'
         shortcut.WorkingDirectory = project_dir
         shortcut.IconLocation = f"{ico_path},0"
-        shortcut.Description = "NovaDAW - Digital Audio Workstation Open-Source"
+        shortcut.Description = "NovaDAW - Station de Travail Audio Numérique"
         shortcut.Save()
         print(f"Raccourci Bureau mis à jour : {shortcut_path}")
     except Exception as e:
