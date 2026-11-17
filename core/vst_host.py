@@ -1116,6 +1116,21 @@ class _SharedRenderChannel:
                     setattr(self, h_attr, None)
 
 
+def _pump_win32_messages():
+    """Drain queued Win32 messages on the current STA thread without blocking."""
+    if sys.platform != "win32":
+        return
+    try:
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        msg = wintypes.MSG()
+        while user32.PeekMessageW(byref(msg), None, 0, 0, 1):
+            user32.TranslateMessage(byref(msg))
+            user32.DispatchMessageW(byref(msg))
+    except Exception:
+        pass
+
+
 def _host(connection, path, probe_only=False, shm_tag=None):
     if sys.platform == "win32":
         try:
@@ -1124,6 +1139,8 @@ def _host(connection, path, probe_only=False, shm_tag=None):
             pass
     try:
         plugin = _load_any_plugin(path, probe_only=probe_only)
+        if not probe_only:
+            _pump_win32_messages()
         params_count = getattr(plugin, "parameters_count", None)
         if params_count is None:
             params_count = len(getattr(plugin, "parameters", ()))
@@ -1147,6 +1164,33 @@ def _host(connection, path, probe_only=False, shm_tag=None):
     close = threading.Event()
     stop = threading.Event()
     editor = {"open": False, "error": None}
+
+    win_k32 = None
+    win_user32 = None
+    win_wake_evt = None
+    win_wake_arr = None
+    if sys.platform == "win32":
+        try:
+            from ctypes import wintypes
+            win_k32 = _init_win32_sync_api()
+            win_user32 = ctypes.WinDLL("user32", use_last_error=True)
+            win_user32.MsgWaitForMultipleObjectsEx.argtypes = [
+                wintypes.DWORD, POINTER(c_void_p), wintypes.DWORD, wintypes.DWORD, wintypes.DWORD
+            ]
+            win_user32.MsgWaitForMultipleObjectsEx.restype = wintypes.DWORD
+            win_wake_evt = win_k32.CreateEventW(None, False, False, None)
+            if win_wake_evt:
+                win_wake_arr = (c_void_p * 1)(win_wake_evt)
+        except Exception:
+            win_wake_evt = None
+            win_wake_arr = None
+
+    def _wake_main():
+        if win_wake_evt and win_k32:
+            try:
+                win_k32.SetEvent(win_wake_evt)
+            except Exception:
+                pass
 
     shm_channel = None
     if shm_tag and sys.platform == "win32":
@@ -1287,6 +1331,7 @@ def _host(connection, path, probe_only=False, shm_tag=None):
                         close.clear()
                         editor.update(open=True, error=None)
                         show.set()
+                        _wake_main()
                         result = saved_state
                     elif command == "editor_status":
                         result = dict(editor)
@@ -1297,6 +1342,7 @@ def _host(connection, path, probe_only=False, shm_tag=None):
                         close.set()
                         stop.set()
                         show.set()
+                        _wake_main()
                         result = None
                     else:
                         raise ValueError(command)
@@ -1307,12 +1353,19 @@ def _host(connection, path, probe_only=False, shm_tag=None):
             close.set()
             stop.set()
             show.set()
+            _wake_main()
 
     if shm_channel is not None:
         threading.Thread(target=_shm_serve, daemon=True, name="NovaDAW-VST-SHM").start()
     threading.Thread(target=serve, daemon=True).start()
     while not stop.is_set():
-        show.wait()
+        if win_wake_arr is not None and win_user32 is not None:
+            _pump_win32_messages()
+            if not show.is_set() and not stop.is_set():
+                win_user32.MsgWaitForMultipleObjectsEx(1, win_wake_arr, 0xFFFFFFFF, 0x04FF, 0x0004)
+                continue
+        else:
+            show.wait()
         show.clear()
         if stop.is_set():
             break
@@ -1322,6 +1375,11 @@ def _host(connection, path, probe_only=False, shm_tag=None):
             editor["error"] = str(exc)
         finally:
             editor["open"] = False
+    if win_wake_evt and win_k32:
+        try:
+            win_k32.CloseHandle(win_wake_evt)
+        except Exception:
+            pass
     if shm_channel is not None:
         shm_channel.close()
     if hasattr(plugin, "dispose"):

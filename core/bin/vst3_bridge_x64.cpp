@@ -806,6 +806,27 @@ static bool restore_full_state(const uint8_t* data, size_t sz) {
     return res == kResultOk || res == kResultTrue;
 }
 
+static HANDLE g_hCmdReady = nullptr;
+static HANDLE g_hNextCmdAllowed = nullptr;
+static int g_ipcInFd = -1;
+static uint8_t g_pendingCmd = 0;
+static std::atomic<bool> g_stdinClosed{false};
+
+static DWORD WINAPI stdin_watcher_thread(LPVOID) {
+    while (true) {
+        uint8_t cmd = 0;
+        if (!read_exact(g_ipcInFd, &cmd, 1)) {
+            g_stdinClosed = true;
+            SetEvent(g_hCmdReady);
+            return 0;
+        }
+        g_pendingCmd = cmd;
+        SetEvent(g_hCmdReady);
+        WaitForSingleObject(g_hNextCmdAllowed, INFINITE);
+    }
+    return 0;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Main Entry Point                                                           */
 /* -------------------------------------------------------------------------- */
@@ -985,6 +1006,13 @@ int wmain(int argc, wchar_t* argv[]) {
     }
 
     configure_and_start_processing(44100.0);
+    if (!probe_only) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
 
     int32 evInCount = g_comp->getBusCount(kEvent, kInput);
     int32 mainAudioInCh = (!g_inBusChannels.empty()) ? g_inBusChannels[0] : 0;
@@ -1035,32 +1063,41 @@ int wmain(int argc, wchar_t* argv[]) {
     wc.lpszClassName = EDITOR_WND_CLASS;
     RegisterClassExW(&wc);
 
-    HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+    g_ipcInFd = ipc_in;
+    g_hCmdReady = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    g_hNextCmdAllowed = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    HANDLE hWatcher = CreateThread(nullptr, 0, stdin_watcher_thread, nullptr, 0, nullptr);
+    if (hWatcher) CloseHandle(hWatcher);
+
     HostEventList inEvents;
     HostParameterChanges inParams;
     std::vector<float> zeroBuf((size_t)g_maxBlockSize, 0.0f);
 
     while (true) {
-        if (g_editorHwnd) {
-            MSG msg;
-            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-            DWORD avail = 0;
-            if (!PeekNamedPipe(hStdin, nullptr, 0, nullptr, &avail, nullptr)) {
-                break;
-            }
-            if (avail == 0) {
-                Sleep(10);
-                continue;
-            }
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
         }
 
-        uint8_t cmd = 0;
-        if (!read_exact(ipc_in, &cmd, 1)) {
+        if (g_editorHwnd && !IsWindow(g_editorHwnd)) {
+            close_editor_internal();
+        }
+
+        DWORD waitRes = MsgWaitForMultipleObjectsEx(
+            1, &g_hCmdReady, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE
+        );
+        if (waitRes == WAIT_OBJECT_0 + 1) {
+            continue;
+        }
+        if (waitRes != WAIT_OBJECT_0) {
             break;
         }
+        if (g_stdinClosed.load()) {
+            break;
+        }
+
+        uint8_t cmd = g_pendingCmd;
 
         if (cmd == 'R') {
             float sr = 44100.0f;
@@ -1368,6 +1405,8 @@ int wmain(int argc, wchar_t* argv[]) {
             write_exact(ipc_out, &ok, 4);
             break;
         }
+
+        SetEvent(g_hNextCmdAllowed);
     }
 
     close_editor_internal();
