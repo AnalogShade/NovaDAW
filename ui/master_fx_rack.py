@@ -604,6 +604,9 @@ class MasterFxWidget(QWidget):
         act_comp = menu.addAction("🗜️ Compresseur Dynamique (Studio)")
         act_comp.triggered.connect(self.add_compressor)
 
+        act_glide = menu.addAction("🎤 Nova Vocal Glide (Auto-Volume)")
+        act_glide.triggered.connect(self.add_vocal_glide)
+
         menu.addSeparator()
 
         effects = global_plugin_manager.get_compatible_effects()
@@ -687,6 +690,21 @@ class MasterFxWidget(QWidget):
             self.refresh_rack()
             self.fx_changed.emit()
             open_native_plugin_editor(comp, self)
+
+    def add_vocal_glide(self):
+        """Ajoute Nova Vocal Glide à la chaîne Master et ouvre son éditeur."""
+        master_t = self.get_master_track()
+        if not master_t:
+            return
+        ensure_plugins_loaded()
+        glide = plugin_registry.create_plugin("novadaw.vocal_glide")
+        if glide:
+            if hasattr(glide, "set_project"):
+                glide.set_project(self.project)
+            master_t.add_plugin(glide)
+            self.refresh_rack()
+            self.fx_changed.emit()
+            open_native_plugin_editor(glide, self)
 
     def add_vst_effect(self, file_path: str):
         """Ajoute un effet VST3 externe à la chaîne Master."""

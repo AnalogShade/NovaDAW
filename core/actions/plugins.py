@@ -8,7 +8,7 @@ from plugins.registry import plugin_registry, ensure_plugins_loaded
 
 @action_registry.register(
     name="novadaw_get_available_plugins",
-    description="Retourne la liste des plugins audio disponibles dans NovaDAW (Égaliseur, Compresseur, Mixeur).",
+    description="Retourne la liste des plugins audio disponibles dans NovaDAW (Égaliseur, Compresseur, Nova Vocal Glide, Mixeur).",
     tags=["plugins"]
 )
 def get_available_plugins(app) -> Dict[str, Any]:
@@ -22,7 +22,7 @@ def get_available_plugins(app) -> Dict[str, Any]:
 
 @action_registry.register(
     name="novadaw_add_plugin_to_track",
-    description="Ajoute un plugin (novadaw.equalizer, novadaw.compressor, novadaw.mixer) à la pile d'effets d'une piste ou du Master.",
+    description="Ajoute un plugin (novadaw.equalizer, novadaw.compressor, novadaw.vocal_glide, novadaw.mixer) à la pile d'effets d'une piste ou du Master.",
     tags=["plugins", "track"]
 )
 def add_plugin_to_track(app, track_id: str, plugin_type_id: str) -> Dict[str, Any]:

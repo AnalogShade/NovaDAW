@@ -303,7 +303,7 @@ AUTOMATION_PARAM_SPECS: Dict[str, Dict[str, Any]] = {
         "label": "Volume",
         "icon": "🔊",
         "min_val": 0.0,
-        "max_val": 1.5,
+        "max_val": 2.0,
         "default_val": 0.8,
         "center_val": None,
         "color": "#38bdf8",
@@ -402,7 +402,7 @@ class AutomationLane:
     """Sous-piste d'automatisation liée à un paramètre de piste ou de plugin."""
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     target_param: str = "volume"  # "volume", "pan", ou paramètre de plugin
-    target_scope: str = "track"   # "track" | "plugin" (préparé pour Vocal Rider, etc.)
+    target_scope: str = "track"   # "track" | "plugin" (préparé pour Nova Vocal Glide, etc.)
     target_plugin_id: Optional[str] = None
     name: str = ""
     enabled: bool = True
@@ -594,6 +594,7 @@ class Track:
     muted: bool = False
     soloed: bool = False
     armed: bool = False
+    monitoring: bool = False
     height: int = 76  # Hauteur personnalisable de la piste (48 à 300px)
     clips: List[ClipType] = field(default_factory=list)
     plugin_path: Optional[str] = None
@@ -708,6 +709,7 @@ class Track:
             "muted": self.muted,
             "soloed": self.soloed,
             "armed": self.armed,
+            "monitoring": self.monitoring,
             "height": int(self.height),
             "plugin_path": plugin_path,
             "plugin_name": plugin_name,
@@ -733,6 +735,7 @@ class Track:
             muted=data.get("muted", False),
             soloed=data.get("soloed", False),
             armed=data.get("armed", False),
+            monitoring=data.get("monitoring", False),
             height=int(data.get("height", 76)),
             plugin_path=data.get("plugin_path"),
             plugin_name=data.get("plugin_name"),
@@ -949,6 +952,7 @@ class Project:
         dup.id = str(uuid.uuid4())[:8]
         dup.name = f"{orig.name} (Copie)"
         dup.armed = False
+        dup.monitoring = False
         for orig_clip, dup_clip in zip(orig.clips, dup.clips):
             dup_clip.id = str(uuid.uuid4())[:8]
             if isinstance(orig_clip, AudioClip) and isinstance(dup_clip, AudioClip):

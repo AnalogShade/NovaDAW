@@ -286,11 +286,17 @@ class MainWindow(QMainWindow):
         act_comp.triggered.connect(self.add_comp_to_selected_track)
         menu_plugins.addAction(act_comp)
 
+        act_glide = QAction("🎤 Ajouter &Nova Vocal Glide (Auto-Volume)...", self)
+        act_glide.triggered.connect(self.add_vocal_glide_to_selected_track)
+        menu_plugins.addAction(act_glide)
+
         menu_master_plugins = menu_plugins.addMenu("👑 &Effets sur le Bus Master...")
         act_m_eq = menu_master_plugins.addAction("📊 Ajouter Égaliseur sur le Master")
         act_m_eq.triggered.connect(self.add_eq_to_master)
         act_m_comp = menu_master_plugins.addAction("🗜️ Ajouter Compresseur sur le Master")
         act_m_comp.triggered.connect(self.add_comp_to_master)
+        act_m_glide = menu_master_plugins.addAction("🎤 Ajouter Nova Vocal Glide sur le Master")
+        act_m_glide.triggered.connect(self.add_vocal_glide_to_master)
 
         menu_plugins.addSeparator()
 
@@ -1043,6 +1049,8 @@ class MainWindow(QMainWindow):
                 self.inspector.set_track(None)
             if hasattr(self, "piano_roll"):
                 self.piano_roll.clear()
+        if hasattr(self, "audio_engine") and hasattr(self.audio_engine, "sync_project_monitoring"):
+            self.audio_engine.sync_project_monitoring()
             if hasattr(self, "audio_editor"):
                 self.audio_editor.clear()
             if hasattr(self, "timeline_grid"):
@@ -1305,6 +1313,29 @@ class MainWindow(QMainWindow):
             self.refresh_project_ui()
             open_native_plugin_editor(comp, self)
             self.statusBar().showMessage("Compresseur Dynamique ajouté sur le Bus Master", 2500)
+
+    def add_vocal_glide_to_selected_track(self):
+        target_id = getattr(self, "selected_track_id", None)
+        track = self.project.get_track(target_id) if target_id else (self.project.tracks[0] if self.project.tracks else None)
+        if track:
+            ensure_plugins_loaded()
+            glide = plugin_registry.create_plugin("novadaw.vocal_glide")
+            if glide:
+                track.add_plugin(glide)
+                self.refresh_project_ui()
+                open_native_plugin_editor(glide, self, track=track)
+                self.statusBar().showMessage(f"Nova Vocal Glide ajouté sur {track.name}", 2000)
+
+    def add_vocal_glide_to_master(self):
+        """Ajoute Nova Vocal Glide directement sur la piste Master."""
+        master_t = self.project.ensure_master_track()
+        ensure_plugins_loaded()
+        glide = plugin_registry.create_plugin("novadaw.vocal_glide")
+        if glide:
+            master_t.add_plugin(glide)
+            self.refresh_project_ui()
+            open_native_plugin_editor(glide, self, track=master_t)
+            self.statusBar().showMessage("Nova Vocal Glide ajouté sur le Bus Master", 2500)
 
     def _on_track_height_changed(self, track_id: str, height: int, apply_all: bool):
         """Gère le redimensionnement fluide de la hauteur des pistes"""
@@ -2209,6 +2240,8 @@ class MainWindow(QMainWindow):
     def _on_track_mixer_changed(self):
         """Mise à jour ultra-rapide des contrôles de mixage (Mute, Solo, Vol, Pan) sans invalider le cache audio."""
         self.set_dirty(True)
+        if hasattr(self, "audio_engine") and hasattr(self.audio_engine, "sync_project_monitoring"):
+            self.audio_engine.sync_project_monitoring()
         self.timeline_grid.update()
         if hasattr(self, "inspector") and self.inspector.current_track:
             self.inspector.sync_controls_from_track()
@@ -2270,7 +2303,7 @@ class MainWindow(QMainWindow):
             self.piano_roll.set_playhead(beat)
             self.transport_bar.update_position(beat, self.project.bpm)
 
-            # Collecte des points d'automatisation émis par des plugins (ex: futur Vocal Rider)
+            # Collecte des points d'automatisation émis par des plugins (ex: Nova Vocal Glide)
             if hasattr(self.audio_engine, "drain_pending_automation_writes"):
                 writes = self.audio_engine.drain_pending_automation_writes()
                 if writes:

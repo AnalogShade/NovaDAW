@@ -133,3 +133,8 @@ def ensure_plugins_loaded():
         import plugins.synth.synth_plugin
     except ImportError as e:
         print(f"[PluginRegistry] Erreur chargement NovaSynth: {e}")
+
+    try:
+        import plugins.vocal_glide.vocal_glide_plugin
+    except ImportError as e:
+        print(f"[PluginRegistry] Erreur chargement Nova Vocal Glide: {e}")

@@ -50,6 +50,7 @@ class ProjectPluginDialog(QDialog):
             ("⚡ NovaSynth (Synthétiseur Polyphonique)", "novadaw.synth", "instrument"),
             ("Égaliseur Paramétrique", "novadaw.equalizer", "effect"),
             ("Compresseur Dynamique", "novadaw.compressor", "effect"),
+            ("🎤 Nova Vocal Glide (Auto-Volume)", "novadaw.vocal_glide", "effect"),
             ("Mixeur de Pistes", "novadaw.mixer", "effect"),
         ]
         entries += [(p.name, p.file_path, p.plugin_type) for p in global_plugin_manager.plugins

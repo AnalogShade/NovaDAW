@@ -18,7 +18,7 @@ import numpy as np
 class AutomationProcessContext:
     """
     Contexte temporel et d'automatisation transmis aux plugins lors du traitement audio.
-    Permet à un plugin (ex: futur Vocal Rider) de lire ou écrire des points d'automatisation
+    Permet à un plugin (ex: Nova Vocal Glide) de lire ou écrire des points d'automatisation
     sur sa piste hôte sans dépendre de l'interface graphique.
     """
     track_id: str

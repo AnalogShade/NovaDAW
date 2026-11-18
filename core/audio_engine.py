@@ -142,6 +142,13 @@ class AudioEngine:
         self._recorded_midi_notes: List[MidiNote] = []
         self._record_lock = threading.Lock()
         self.record_latency_compensation_samples: int = 0
+        self._record_sample_rate: int = self.sample_rate
+
+        # Monitoring audio live (entrée micro -> effets de piste -> sortie temps réel)
+        self._monitor_lock = threading.Lock()
+        self._monitor_enabled: bool = False
+        self._monitor_chunks: List[np.ndarray] = []
+        self._monitor_buffered_samples: int = 0
 
         # Instances VST3 chargées par piste (track_id -> plugin instance)
         self.plugin_errors = {}
@@ -175,7 +182,7 @@ class AudioEngine:
         self._master_clip_time: float = 0.0
         self._master_peak_lock = threading.Lock()
 
-        # File d'attente thread-safe pour les écritures d'automatisation pilotées par plugins (ex: futur Vocal Rider)
+        # File d'attente thread-safe pour les écritures d'automatisation pilotées par plugins (ex: Nova Vocal Glide)
         self._automation_write_lock = threading.Lock()
         self._pending_automation_writes: List[tuple[str, str, float, float, str]] = []
         self._live_automation_values: Dict[str, Dict[str, float]] = {}
@@ -412,15 +419,10 @@ class AudioEngine:
             self._input_stream = None
 
 
-    def start_recording(self, start_beat: float):
-        """Démarre la capture audio en direct et initialise l'enregistrement."""
-        self.is_recording = True
-        self.recording_start_beat = max(0.0, float(start_beat))
-        with self._record_lock:
-            self._recorded_audio_blocks.clear()
-            self._recorded_midi_notes.clear()
-
-        # Fermer un éventuel flux d'enregistrement précédent
+    def _close_input_stream_if_idle(self) -> None:
+        """Ferme le flux d'entrée physique uniquement s'il n'est utilisé ni en enregistrement ni en monitoring."""
+        if self.is_recording or self._monitor_enabled:
+            return
         if self._input_stream:
             try:
                 self._input_stream.stop()
@@ -429,7 +431,11 @@ class AudioEngine:
                 pass
             self._input_stream = None
 
-        # Mode silencieux pour tests unitaires
+    def _ensure_input_stream_open(self) -> None:
+        """Ouvre le flux de capture micro si nécessaire (partagé entre enregistrement et monitoring live)."""
+        if self._input_stream is not None:
+            return
+
         if os.environ.get("NOVADAW_SILENT_TESTS") == "1":
             try:
                 self._input_stream = sd.InputStream(
@@ -439,18 +445,17 @@ class AudioEngine:
                     callback=self._record_callback
                 )
                 self._input_stream.start()
+                self._record_sample_rate = self.sample_rate
             except Exception:
                 self._input_stream = None
             return
 
-        # Démarrage du flux de capture d'entrée physique
         try:
             in_dev = self.input_device
             if in_dev is None or in_dev < 0:
                 from core.hardware_manager import hardware_manager
                 in_dev = hardware_manager.get_default_input_device_index()
 
-            # Identifier les caractéristiques du microphone
             dev_default_sr = self.sample_rate
             in_channels = 1
             try:
@@ -462,11 +467,9 @@ class AudioEngine:
                 pass
 
             opened = False
-            # Ordre de test des fréquences : fréquence du projet, fréquence native du micro, 48k, 44.1k
             candidate_srs = [self.sample_rate, dev_default_sr, 48000, 44100]
             seen_srs = set()
             candidate_srs = [x for x in candidate_srs if not (x in seen_srs or seen_srs.add(x))]
-
             channel_trials = [in_channels] if in_channels == 1 else [in_channels, 1]
 
             for ch in channel_trials:
@@ -494,7 +497,6 @@ class AudioEngine:
                     break
 
             if not opened:
-                # Repli ultime : ouvrir l'entrée système par défaut sans device explicite
                 try:
                     self._input_stream = sd.InputStream(
                         samplerate=dev_default_sr,
@@ -510,16 +512,101 @@ class AudioEngine:
                 except Exception as e_final:
                     print(f"[AudioEngine] Impossible d'ouvrir le flux de capture d'entrée : {e_final}")
                     self._input_stream = None
-
         except Exception as e:
             print(f"[AudioEngine] Erreur critique initialisation micro : {e}")
             self._input_stream = None
+
+    def sync_project_monitoring(self) -> bool:
+        """Active ou désactive le flux d'entrée live selon l'état `monitoring` des pistes audio du projet."""
+        active = False
+        if self.project and hasattr(self.project, "tracks"):
+            active = any(
+                getattr(t, "track_type", "") == "audio"
+                and getattr(t, "monitoring", False)
+                and not getattr(t, "muted", False)
+                for t in self.project.tracks
+            )
+        self._monitor_enabled = active
+        if active:
+            self._ensure_input_stream_open()
+        else:
+            with self._monitor_lock:
+                self._monitor_chunks.clear()
+                self._monitor_buffered_samples = 0
+            self._close_input_stream_if_idle()
+        return active
+
+    def feed_live_input_block(self, indata: np.ndarray, input_sr: Optional[int] = None) -> None:
+        """Injecte un bloc audio micro stéréo dans le ring buffer du monitoring live."""
+        if indata is None or len(indata) == 0:
+            return
+        if indata.ndim == 1:
+            stereo = np.column_stack((indata, indata)).astype(np.float32)
+        elif indata.shape[1] == 1:
+            stereo = np.column_stack((indata[:, 0], indata[:, 0])).astype(np.float32)
+        else:
+            stereo = np.ascontiguousarray(indata[:, :2], dtype=np.float32)
+
+        src_sr = int(input_sr or self.sample_rate)
+        if src_sr != self.sample_rate and len(stereo) > 1:
+            new_len = max(1, int(round(len(stereo) * (self.sample_rate / float(src_sr)))))
+            idx_orig = np.linspace(0.0, len(stereo) - 1, new_len)
+            l = np.interp(idx_orig, np.arange(len(stereo)), stereo[:, 0]).astype(np.float32)
+            r = np.interp(idx_orig, np.arange(len(stereo)), stereo[:, 1]).astype(np.float32)
+            stereo = np.column_stack((l, r))
+
+        max_cap = max(4096, self.block_size * 4)
+        with self._monitor_lock:
+            self._monitor_chunks.append(stereo)
+            self._monitor_buffered_samples += len(stereo)
+            while self._monitor_buffered_samples > max_cap and len(self._monitor_chunks) > 1:
+                dropped = self._monitor_chunks.pop(0)
+                self._monitor_buffered_samples -= len(dropped)
+
+    def _consume_monitor_block(self, frames: int) -> Optional[np.ndarray]:
+        """Consomme jusqu'à `frames` échantillons depuis le buffer de monitoring live."""
+        with self._monitor_lock:
+            if not self._monitor_chunks:
+                return None
+            out = np.zeros((frames, 2), dtype=np.float32)
+            filled = 0
+            while filled < frames and self._monitor_chunks:
+                head = self._monitor_chunks[0]
+                take = min(frames - filled, len(head))
+                out[filled:filled + take] = head[:take]
+                filled += take
+                self._monitor_buffered_samples -= take
+                if take < len(head):
+                    self._monitor_chunks[0] = head[take:]
+                else:
+                    self._monitor_chunks.pop(0)
+            return out
+
+    def start_recording(self, start_beat: float):
+        """Démarre la capture audio en direct et initialise l'enregistrement."""
+        self.is_recording = True
+        self.recording_start_beat = max(0.0, float(start_beat))
+        with self._record_lock:
+            self._recorded_audio_blocks.clear()
+            self._recorded_midi_notes.clear()
+
+        if self._input_stream is not None and not self._monitor_enabled:
+            try:
+                self._input_stream.stop()
+                self._input_stream.close()
+            except Exception:
+                pass
+            self._input_stream = None
+
+        self._ensure_input_stream_open()
 
     def _record_callback(self, indata, frames, time_info, status):
         """Callback temps réel de capture audio du microphone/ligne"""
         if self.is_recording:
             with self._record_lock:
                 self._recorded_audio_blocks.append(indata.copy())
+        if self._monitor_enabled:
+            self.feed_live_input_block(indata, getattr(self, "_record_sample_rate", self.sample_rate))
 
     def get_live_recording_audio(self) -> Optional[np.ndarray]:
         """Retourne une copie concaténée des blocs audio capturés en direct (thread-safe)."""
@@ -550,13 +637,7 @@ class AudioEngine:
     def stop_recording(self) -> Dict[str, Any]:
         """Arrête l'enregistrement audio et retourne les blocs capturés ainsi que les notes MIDI."""
         self.is_recording = False
-        if self._input_stream:
-            try:
-                self._input_stream.stop()
-                self._input_stream.close()
-            except Exception:
-                pass
-            self._input_stream = None
+        self._close_input_stream_if_idle()
 
         with self._record_lock:
             blocks = list(self._recorded_audio_blocks)
@@ -1488,7 +1569,11 @@ class AudioEngine:
             if need_wake and not handled_direct:
                 self._live_vst_event.set()
 
-        # 2. Si le transport est en lecture, mixer les pistes du projet
+        # 2. Si le transport est en lecture, mixer les pistes du projet (et le monitoring live éventuel)
+        live_in_buf = None
+        if self._monitor_enabled and self.project:
+            live_in_buf = self._consume_monitor_block(frames)
+
         if self.is_playing and self.project:
             bpm = max(20.0, self.project.bpm)
             beats_per_sec = bpm / 60.0
@@ -1514,7 +1599,12 @@ class AudioEngine:
                         mixer_plugin.update_track_peak(track.id, 0.0, 0.0)
                     continue
 
-                track_signal = self._render_track_slice(track, start_beat, end_beat, frames, bpm)
+                track_live = (
+                    live_in_buf
+                    if (live_in_buf is not None and track.track_type == "audio" and getattr(track, "monitoring", False))
+                    else None
+                )
+                track_signal = self._render_track_slice(track, start_beat, end_beat, frames, bpm, live_input_buf=track_live)
                 if track_signal is not None:
                     # Application du volume et panoramique (avec automatisation sample-accurate si active)
                     left_gain, right_gain, eff_vol, eff_pan = self._compute_track_automation_gains(
@@ -1551,6 +1641,26 @@ class AudioEngine:
             # Notification UI
             if self.playhead_callback:
                 self.playhead_callback(self.current_beat)
+        elif self._monitor_enabled and self.project and live_in_buf is not None:
+            # Mode Monitoring Live à l'arrêt : permet de chanter et voir/entendre les plugins en direct
+            bpm = max(20.0, self.project.bpm)
+            has_solo = any(t.soloed for t in self.project.tracks)
+            for track in self.project.tracks:
+                if track.track_type != "audio" or not getattr(track, "monitoring", False):
+                    continue
+                if track.muted or (has_solo and not track.soloed):
+                    continue
+                mon_sig = self._process_track_effects_chain(track, live_in_buf.copy(), 0.0, 0.0, frames, bpm)
+                if mon_sig is not None and len(mon_sig) > 0:
+                    pan = max(-1.0, min(1.0, float(track.pan)))
+                    g_l = float(track.volume) * (1.0 - max(0.0, pan))
+                    g_r = float(track.volume) * (1.0 + min(0.0, pan))
+                    mon_sig[:, 0] *= g_l
+                    mon_sig[:, 1] *= g_r
+                    out += mon_sig
+                    pk_l = float(np.max(np.abs(mon_sig[:, 0])))
+                    pk_r = float(np.max(np.abs(mon_sig[:, 1])))
+                    block_track_peaks[track.id] = (pk_l, pk_r)
 
         # Mise à jour des niveaux de crête des pistes dans le mixeur (audio live + lecture)
         mixer_plugin = self._get_active_mixer_plugin()
@@ -2431,27 +2541,18 @@ class AudioEngine:
                 return True
         return False
 
-    def _render_track_slice(self, track: Track, start_b: float, end_b: float, frames: int, bpm: float) -> Optional[np.ndarray]:
-        track_buf = None
-        native_inst = None
-        # 0. ASIO-Guard Cache Hit: Si la piste n'est pas armée/live et dispose d'un cache générateur valide
-        if self._asio_guard_enabled and not getattr(track, "armed", False) and not self._is_track_live_active(track.id):
-            track_buf = self._get_cached_track_slice(track, start_b, end_b, frames, bpm)
-
-        if track_buf is None:
-            track_buf, native_inst = self._render_track_generator_slice(track, start_b, end_b, frames, bpm)
-        elif track.track_type == "midi":
-            target_track = None
-            if getattr(track, "synth_route_track_id", None) and self.project:
-                target_track = self.project.get_track(track.synth_route_track_id)
-            native_inst = self.get_native_instrument(target_track) if target_track else self.get_native_instrument(track)
-
-        if track_buf is None:
-            track_buf = np.zeros((frames, 2), dtype=np.float32)
-
+    def _process_track_effects_chain(
+        self,
+        track: Track,
+        track_buf: np.ndarray,
+        start_b: float,
+        end_b: float,
+        frames: int,
+        bpm: float,
+        native_inst: Any = None,
+    ) -> np.ndarray:
+        """Applique les VST et la pile de plugins natifs d'une piste sur son buffer stéréo."""
         track_buf = self._process_vst_effects(track, track_buf)
-
-        # 4. Traitement de la pile de plugins modulaires de la piste (Égaliseur, Compresseur, futur Vocal Rider...)
         if hasattr(track, "plugins") and track.plugins and track_buf is not None:
             from plugins.base import AutomationProcessContext
             ctx = AutomationProcessContext(
@@ -2475,6 +2576,45 @@ class AudioEngine:
                             track_buf = plugin.process(track_buf, self.sample_rate)
                     except Exception:
                         pass
+        return track_buf
+
+    def _render_track_slice(
+        self,
+        track: Track,
+        start_b: float,
+        end_b: float,
+        frames: int,
+        bpm: float,
+        live_input_buf: Optional[np.ndarray] = None,
+    ) -> Optional[np.ndarray]:
+        track_buf = None
+        native_inst = None
+        # 0. ASIO-Guard Cache Hit: Si la piste n'est pas armée/live/monitorée et dispose d'un cache générateur valide
+        if (
+            self._asio_guard_enabled
+            and not getattr(track, "armed", False)
+            and not getattr(track, "monitoring", False)
+            and not self._is_track_live_active(track.id)
+        ):
+            track_buf = self._get_cached_track_slice(track, start_b, end_b, frames, bpm)
+
+        if track_buf is None:
+            track_buf, native_inst = self._render_track_generator_slice(track, start_b, end_b, frames, bpm)
+        elif track.track_type == "midi":
+            target_track = None
+            if getattr(track, "synth_route_track_id", None) and self.project:
+                target_track = self.project.get_track(track.synth_route_track_id)
+            native_inst = self.get_native_instrument(target_track) if target_track else self.get_native_instrument(track)
+
+        if track_buf is None:
+            track_buf = np.zeros((frames, 2), dtype=np.float32)
+
+        if live_input_buf is not None and len(live_input_buf) > 0:
+            n_copy = min(len(track_buf), len(live_input_buf))
+            track_buf[:n_copy] += live_input_buf[:n_copy]
+
+        # 4. Traitement VST + pile de plugins modulaires (Égaliseur, Compresseur, Nova Vocal Glide...)
+        track_buf = self._process_track_effects_chain(track, track_buf, start_b, end_b, frames, bpm, native_inst=native_inst)
 
         # 5. Envoi des niveaux de crête au plugin Mixeur pour les VU-mètres (post-fader)
         mixer_plugin = self._get_active_mixer_plugin()

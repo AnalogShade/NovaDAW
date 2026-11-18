@@ -5,7 +5,7 @@ tests/test_automation_lanes.py - Tests complets pour les pistes d'automatisation
 - Réordonnancement groupé (piste + ses sous-pistes suivent ensemble)
 - Outils d'édition dans TimelineGrid (Pointeur, Crayon/Draw à main levée, Gomme, Ciseaux, courbure)
 - Application audio sample-accurate (Volume & Pan)
-- Fondation de pilotage par plugin (futur Vocal Rider via AutomationProcessContext)
+- Fondation de pilotage par plugin (Nova Vocal Glide via AutomationProcessContext)
 """
 import os
 import sys
@@ -102,7 +102,7 @@ def test_pan_lane_vertical_center_mapping():
 
 
 def test_audio_engine_automation_gains_and_plugin_write_context(qapp):
-    """Vérifie l'application audio Volume/Pan et le hook de pilotage par plugin (futur Vocal Rider)."""
+    """Vérifie l'application audio Volume/Pan et le hook de pilotage par plugin (Nova Vocal Glide)."""
     os.environ["NOVADAW_SILENT_TESTS"] = "1"
     engine = AudioEngine()
     try:
@@ -135,10 +135,10 @@ def test_audio_engine_automation_gains_and_plugin_write_context(qapp):
         assert end_vol == pytest.approx(1.0, abs=1e-2)
         assert end_pan == pytest.approx(1.0, abs=1e-2)
 
-        # Test du hook Vocal Rider (plugin émetteur de points d'automatisation)
-        class MockVocalRider(BasePlugin):
+        # Test du hook Nova Vocal Glide (plugin émetteur de points d'automatisation)
+        class MockVocalGlide(BasePlugin):
             def __init__(self):
-                super().__init__("test.vocal_rider", "Mock Rider", category="dynamics")
+                super().__init__("test.vocal_glide", "Mock Glide", category="dynamics")
                 self.supports_automation_write = True
                 self.automatable_outputs = ["volume"]
 
@@ -156,8 +156,8 @@ def test_audio_engine_automation_gains_and_plugin_write_context(qapp):
                     context.emit_automation("volume", context.start_beat, 0.92, self.instance_id)
                 return audio_buf
 
-        rider = MockVocalRider()
-        t.add_plugin(rider)
+        glide = MockVocalGlide()
+        t.add_plugin(glide)
         engine.is_playing = True
         engine._render_track_slice(t, 1.5, 2.0, 256, 120.0)
         writes = engine.drain_pending_automation_writes()
@@ -166,7 +166,7 @@ def test_audio_engine_automation_gains_and_plugin_write_context(qapp):
         assert writes[0][1] == "volume"
         assert writes[0][2] == pytest.approx(1.5)
         assert writes[0][3] == pytest.approx(0.92)
-        assert writes[0][4] == rider.instance_id
+        assert writes[0][4] == glide.instance_id
     finally:
         engine.close()
 
@@ -317,7 +317,7 @@ def test_ui_dropdown_automation_group_reorder_and_pencil_tool(qapp):
     vol_lane.mode = "write"
     pts_before_write = len(vol_lane.points)
     win.audio_engine.is_playing = True
-    win.audio_engine._enqueue_plugin_automation_write(t1.id, "volume", 6.5, 1.15, "vocal_rider_id")
+    win.audio_engine._enqueue_plugin_automation_write(t1.id, "volume", 6.5, 1.15, "vocal_glide_id")
     win._update_playback_ui()
     win.audio_engine.is_playing = False
     assert len(vol_lane.points) == pts_before_write + 1

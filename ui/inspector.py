@@ -818,6 +818,9 @@ class TrackInspector(QFrame):
         act_comp = menu.addAction("🗜️ Compresseur Dynamique (Studio)")
         act_comp.triggered.connect(self._add_compressor_plugin)
 
+        act_glide = menu.addAction("🎤 Nova Vocal Glide (Auto-Volume)")
+        act_glide.triggered.connect(self._add_vocal_glide_plugin)
+
         menu.addSeparator()
 
         # 2. Plugins VST3 externes scannés
@@ -889,6 +892,18 @@ class TrackInspector(QFrame):
             self._rebuild_plugin_stack()
             self.track_modified.emit()
             open_native_plugin_editor(comp, self, track=self.current_track)
+
+    def _add_vocal_glide_plugin(self):
+        if not self.current_track:
+            return
+        ensure_plugins_loaded()
+        glide = plugin_registry.create_plugin("novadaw.vocal_glide")
+        if glide:
+            self.current_track.add_plugin(glide)
+            self.project.add_rack_plugin("novadaw.vocal_glide", "Nova Vocal Glide", "effect")
+            self._rebuild_plugin_stack()
+            self.track_modified.emit()
+            open_native_plugin_editor(glide, self, track=self.current_track)
 
     def _add_mixer_plugin(self):
         if not self.current_track:

@@ -452,6 +452,50 @@ class TrackHeaderWidget(QFrame):
             row3.addWidget(self.btn_edit_plugin)
 
             content_layout.addWidget(self.row3_widget)
+        elif self.track.track_type == "audio":
+            self.row3_widget = QWidget()
+            row3 = QHBoxLayout(self.row3_widget)
+            row3.setContentsMargins(0, 0, 0, 0)
+            row3.setSpacing(6)
+
+            self.btn_monitor = QPushButton("🎧 Mon Live")
+            self.btn_monitor.setObjectName("btn_track_monitor")
+            self.btn_monitor.setCheckable(True)
+            self.btn_monitor.setChecked(bool(getattr(self.track, "monitoring", False)))
+            self.btn_monitor.setFixedHeight(19)
+            self.btn_monitor.setCursor(Qt.PointingHandCursor)
+            self.btn_monitor.setToolTip(
+                "Activer/désactiver le monitoring audio en direct (micro -> effets -> sortie)"
+            )
+            self.btn_monitor.setStyleSheet("""
+                QPushButton#btn_track_monitor {
+                    background-color: #161b26;
+                    color: #94a3b8;
+                    border: 1px solid #283044;
+                    border-radius: 3px;
+                    font-size: 9px;
+                    font-weight: bold;
+                    padding: 1px 7px;
+                }
+                QPushButton#btn_track_monitor:hover {
+                    border-color: #10b981;
+                    color: #e2e8f0;
+                }
+                QPushButton#btn_track_monitor:checked {
+                    background-color: #065f46;
+                    border-color: #10b981;
+                    color: #ecfdf5;
+                }
+            """)
+            self.btn_monitor.toggled.connect(self._on_monitor_toggled)
+            row3.addWidget(self.btn_monitor)
+
+            lbl_in = QLabel("AUDIO IN")
+            lbl_in.setStyleSheet("font-size: 8px; color: #64748b; font-weight: bold;")
+            row3.addWidget(lbl_in)
+            row3.addStretch()
+
+            content_layout.addWidget(self.row3_widget)
         else:
             content_layout.addStretch()
 
@@ -466,6 +510,8 @@ class TrackHeaderWidget(QFrame):
             watched_children.append(self.combo_plugin)
         if hasattr(self, "btn_edit_plugin"):
             watched_children.append(self.btn_edit_plugin)
+        if hasattr(self, "btn_monitor"):
+            watched_children.append(self.btn_monitor)
         for child in watched_children:
             child.installEventFilter(self)
 
@@ -842,6 +888,10 @@ class TrackHeaderWidget(QFrame):
         set_button_glow(self.btn_rec, checked, "#ff2244", blur_radius=16, alpha=235)
         self.track_mixer_changed.emit()
 
+    def _on_monitor_toggled(self, checked: bool):
+        self.track.monitoring = bool(checked)
+        self.track_mixer_changed.emit()
+
     def update_arm_state(self, armed: bool):
         """Met à jour l'état visuel et logique de l'armement R avec son aura rouge."""
         self.track.armed = armed
@@ -879,6 +929,11 @@ class TrackHeaderWidget(QFrame):
         self.update_mute_state(self.track.muted)
         self.update_solo_state(self.track.soloed)
         self.update_arm_state(self.track.armed)
+        if hasattr(self, "btn_monitor"):
+            mon = bool(getattr(self.track, "monitoring", False))
+            self.btn_monitor.blockSignals(True)
+            self.btn_monitor.setChecked(mon)
+            self.btn_monitor.blockSignals(False)
         if hasattr(self, "slider_vol"):
             self.slider_vol.blockSignals(True)
             self.slider_vol.setValue(int(round(self.track.volume * 100)))
@@ -1183,7 +1238,7 @@ class TrackHeaderWidget(QFrame):
 
 class AutomationHeaderWidget(QFrame):
     """
-    En-tête compact d'une sous-piste d'automatisation (Volume, Panoramique, futur Vocal Rider).
+    En-tête compact d'une sous-piste d'automatisation (Volume, Panoramique, Nova Vocal Glide).
     Visuellement indenté et rattaché à sa piste parente.
     """
     track_selected = Signal(str)                     # track_id
@@ -1263,7 +1318,7 @@ class AutomationHeaderWidget(QFrame):
         self.btn_enable.toggled.connect(self._on_enable_toggled)
         row1.addWidget(self.btn_enable)
 
-        # Bouton Mode (R = Lecture / W = Écriture plugin, préparé pour Vocal Rider)
+        # Bouton Mode (R = Lecture / W = Écriture plugin, ex: Nova Vocal Glide)
         self.btn_mode = QPushButton(self.lane.mode[0].upper())
         self.btn_mode.setFixedSize(20, 18)
         self.btn_mode.setCursor(Qt.PointingHandCursor)
