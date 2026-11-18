@@ -26,7 +26,7 @@ Un ancien test qui imposait l’interdiction de Kontakt/SampleTank par leur nom 
 | --- | --- | --- |
 | Prologue, Cubase 6 | Note MIDI et note-off, 44,1 kHz, stéréo, 0,2 s | Buffer de 2 × 8 820 échantillons, crête ≈ 0,257 ; état VST de 6 476 octets relu/restauré |
 | TR5 Classic EQ | Éditeur natif ouvert, traitement simultané, fermeture | Réussi ; 95 événements Qt de 50 ms traités au moment du contrôle à 6 s ; signal de test à 0,1 conservé ; éditeur confirmé fermé à 8 s |
-| Prologue | Éditeur natif | Plantage reproduit également dans un programme Pedalboard minimal indépendant ; contenu dans le processus VST de NovaDAW |
+| Prologue | Éditeur natif | Plantage natif reproduit également hors de l'interface principale dans un hôte VST3 minimal indépendant ; contenu dans le processus VST de NovaDAW |
 | Kontakt | Rendu MIDI | Arrêt du processus VST pendant le rendu ; erreur remontée au parent, sans fermeture du parent |
 | Superior Drummer | — | Non testé ; absent du catalogue détecté utilisé pour cette session |
 
@@ -36,7 +36,7 @@ Menu Plugins, entrée « Ajouter un plugin au projet… », ouverture du sélect
 
 ## Limites
 
-- Hôte VST3/Pedalboard, sortie stéréo ; pas de certification VST2, multi-sorties ou contrôleur MIDI physique dans cette intervention.
+- Hôte VST3, sortie stéréo ; pas de certification VST2, multi-sorties ou contrôleur MIDI physique dans cette intervention.
 - L’isolation contient les plantages mais ne répare pas une incompatibilité native. Kontakt en rendu et l’éditeur de Prologue restent des cas incompatibles observés.
 - Le rack initialise des instances propres à chaque piste ; ce n’est pas un instrument multitimbral partagé avec sélection de canal MIDI.
 - Les appels audio passent par IPC ; la latence sous forte charge et avec de grandes banques n’a pas été caractérisée. Un hôte bloqué peut interrompre temporairement le flux avant l’expiration de son délai.

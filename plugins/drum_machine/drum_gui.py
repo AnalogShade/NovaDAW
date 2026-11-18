@@ -651,6 +651,17 @@ class DrumMachineWidget(QWidget):
 
         main_layout.addWidget(group_reverb)
 
+        lbl_kit_credit = QLabel(
+            'Kit d\'usine (default_kit) : échantillons générés avec '
+            '<a href="https://github.com/Stability-AI/stable-audio-3" style="color:#64748b;">Stable Audio 3</a> — '
+            'Powered by <a href="https://stability.ai/license" style="color:#64748b;">Stability AI</a> '
+            '(Stability AI Community License)'
+        )
+        lbl_kit_credit.setOpenExternalLinks(True)
+        lbl_kit_credit.setStyleSheet("font-size: 9px; color: #64748b; padding-top: 2px;")
+        lbl_kit_credit.setAlignment(Qt.AlignRight)
+        main_layout.addWidget(lbl_kit_credit)
+
     def _sync_all_controls(self):
         if not self.selected_pad:
             return

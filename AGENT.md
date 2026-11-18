@@ -8,7 +8,7 @@ Son rôle est de permettre à n'importe quel agent de comprendre **immédiatemen
 
 ## 🧭 1. Identité et Nature du Projet
 
-**NovaDAW** est une station de travail audio numérique professionnelle Source-Available conçue en **Python et PySide6 (Qt 6)**, inspirée de l'ergonomie de **Steinberg Cubase Pro**.
+**NovaDAW** est une station de travail audio numérique professionnelle open-source (licence **MIT**) conçue en **Python et PySide6 (Qt 6)**, inspirée de l'ergonomie de **Steinberg Cubase Pro**.
 Le logiciel repose sur :
 - Un moteur audio temps réel haute précision en virgule flottante 32 bits (**FP32**) avec cache hybride RAM **ASIO-Guard** ([`core/audio_engine.py`](core/audio_engine.py)).
 - Une **architecture duale de plugins** :
