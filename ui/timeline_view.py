@@ -1,7 +1,7 @@
 """
 ui/timeline_view.py - Règle temporelle, grille d'arrangement, clips et tête de lecture
 """
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Set
 import copy
 import uuid
 from PySide6.QtWidgets import (
@@ -12,7 +12,14 @@ from PySide6.QtGui import (
     QPolygonF, QCursor, QPixmap, QPainterPath
 )
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF
-from core.project import Project, Track, MidiClip, AudioClip, MidiNote, ClipType
+from core.project import (
+    Project, Track, MidiClip, AudioClip, MidiNote, ClipType,
+    AutomationLane, AutomationPoint, format_automation_value
+)
+from ui.automation_lane_renderer import (
+    paint_automation_lane, value_to_lane_y, lane_y_to_value,
+    simplify_freehand_points, get_segment_midpoint_handle
+)
 
 
 def create_scissors_cursor() -> QCursor:
@@ -463,6 +470,8 @@ class TimelineGrid(QWidget):
     track_deleted = Signal(str)     # track_id
     track_moved = Signal(str, int)  # (track_id, delta)
     track_duplicated = Signal(str)  # track_id
+    automation_lane_height_changed = Signal(str, str, int)  # (track_id, lane_id, height)
+    automation_modified = Signal()
     status_message = Signal(str, int)  # (message, duration_ms)
     zoom_in_requested = Signal()
     zoom_out_requested = Signal()
@@ -479,10 +488,23 @@ class TimelineGrid(QWidget):
         self._last_track_context_menu: Optional[QMenu] = None
 
         # Outils d'édition & Grille
-        self.active_tool: str = "select"  # "select", "split", "erase"
+        self.active_tool: str = "select"  # "select", "split", "erase", "draw"
         self.snap_enabled: bool = True
         self.grid_resolution: float = 1.0  # en temps (1.0 = noire / quart de mesure)
         self._clip_clipboard: Optional[ClipType] = None
+
+        # État d'édition des pistes d'automatisation
+        self.selected_automation_points: Set[str] = set()
+        self._hover_auto_point: Optional[Tuple[str, str]] = None      # (lane_id, point_id)
+        self._hover_auto_segment: Optional[Tuple[str, int]] = None    # (lane_id, seg_idx)
+        self._dragging_auto_point: Optional[Tuple[Track, AutomationLane, AutomationPoint, float, float]] = None
+        self._dragging_auto_curve: Optional[Tuple[Track, AutomationLane, AutomationPoint, float, float, float]] = None
+        self._drawing_auto_freehand: Optional[Tuple[Track, AutomationLane, float, float]] = None
+        self._draw_auto_raw_points: List[Tuple[float, float]] = []
+        self._erasing_auto: bool = False
+        self._resizing_lane: Optional[Tuple[Track, AutomationLane]] = None
+        self._drag_start_lane_h = 56
+        self._drag_start_lane_y = 0
 
         # Guide visuel pour découpe (ciseaux)
         self._hover_split_beat: Optional[float] = None
@@ -546,7 +568,7 @@ class TimelineGrid(QWidget):
         return max(0.0, round(beat / step) * step)
 
     def set_active_tool(self, tool_name: str):
-        """Active l'outil demandé ('select', 'split', 'erase')"""
+        """Active l'outil demandé ('select', 'split', 'erase', 'draw')"""
         self.active_tool = tool_name
         self._hover_split_beat = None
         self._hover_clip = None
@@ -555,10 +577,13 @@ class TimelineGrid(QWidget):
             self.status_message.emit("✂️ Outil Ciseaux actif : Cliquez sur un clip pour le scinder à l'endroit précis (Raccourci: 2 ou C)", 3500)
         elif tool_name == "erase":
             self.setCursor(Qt.PointingHandCursor)
-            self.status_message.emit("🗑️ Outil Gomme actif : Cliquez sur un clip pour le supprimer instantanément (Raccourci: 3)", 3500)
+            self.status_message.emit("🗑️ Outil Gomme actif : Cliquez sur un clip ou un point d'automatisation pour le supprimer (Raccourci: 3)", 3500)
+        elif tool_name == "draw":
+            self.setCursor(Qt.CrossCursor)
+            self.status_message.emit("✏️ Outil Crayon actif : Dessinez librement dans une piste d'automatisation (Raccourci: 4 ou B)", 3500)
         else:
             self.unsetCursor()
-            self.status_message.emit("🖱️ Outil Pointeur actif : Sélectionner, déplacer et redimensionner des blocs (Raccourci: 1 ou V)", 2500)
+            self.status_message.emit("🖱️ Outil Pointeur actif : Sélectionner, déplacer et redimensionner des blocs ou points (Raccourci: 1 ou V)", 2500)
         self.update()
 
     def set_grid_resolution(self, res_beats: float):
@@ -760,21 +785,118 @@ class TimelineGrid(QWidget):
             self.update(new_px - 4, 0, 9, h)
 
     def get_track_layout(self) -> list:
-        """Retourne la liste des tuples (track, top_y, height) pour chaque piste"""
+        """Retourne la liste des tuples (track, top_y, height) pour chaque piste principale."""
         layout = []
         curr_y = 0
         for track in self.project.tracks:
             h = getattr(track, "height", self.DEFAULT_TRACK_HEIGHT)
             layout.append((track, curr_y, h))
             curr_y += h
+            if getattr(track, "automation_expanded", True):
+                for lane in getattr(track, "automation_lanes", []):
+                    if getattr(lane, "visible", True):
+                        curr_y += max(40, int(getattr(lane, "height", 56)))
         return layout
 
+    def get_automation_layout(self) -> list:
+        """Retourne la liste des tuples (track, lane, top_y, height) pour chaque sous-piste d'automatisation visible."""
+        lanes_layout = []
+        curr_y = 0
+        for track in self.project.tracks:
+            h = getattr(track, "height", self.DEFAULT_TRACK_HEIGHT)
+            curr_y += h
+            if getattr(track, "automation_expanded", True):
+                for lane in getattr(track, "automation_lanes", []):
+                    if getattr(lane, "visible", True):
+                        lh = max(40, int(getattr(lane, "height", 56)))
+                        lanes_layout.append((track, lane, curr_y, lh))
+                        curr_y += lh
+        return lanes_layout
+
     def update_dimensions(self):
-        total_tracks_h = sum(getattr(t, "height", self.DEFAULT_TRACK_HEIGHT) for t in self.project.tracks)
+        total_tracks_h = 0
+        for t in self.project.tracks:
+            total_tracks_h += getattr(t, "height", self.DEFAULT_TRACK_HEIGHT)
+            if getattr(t, "automation_expanded", True):
+                for lane in getattr(t, "automation_lanes", []):
+                    if getattr(lane, "visible", True):
+                        total_tracks_h += max(40, int(getattr(lane, "height", 56)))
         h = max(400, total_tracks_h)
         total_beats = self.get_total_project_beats()
         w = max(2400, int(total_beats * self.pixels_per_beat))
         self.setFixedSize(w, h)
+
+    def _get_automation_lane_at_y(self, y: float) -> Tuple[Optional[Track], Optional[AutomationLane], float, float]:
+        for track, lane, top_y, lh in self.get_automation_layout():
+            if top_y <= y < top_y + lh:
+                return track, lane, float(top_y), float(lh)
+        return None, None, 0.0, 0.0
+
+    def _get_lane_separator_at_y(self, y: float) -> Tuple[Optional[Track], Optional[AutomationLane]]:
+        for track, lane, top_y, lh in self.get_automation_layout():
+            if abs(y - (top_y + lh)) <= self.RESIZE_MARGIN:
+                return track, lane
+        return None, None
+
+    def _get_auto_point_at(
+        self, lane: AutomationLane, x: float, y: float, top_y: float, lh: float, radius: float = 8.0
+    ) -> Optional[AutomationPoint]:
+        best_pt = None
+        best_d = radius + 1.0
+        for pt in lane.points:
+            px = pt.beat * self.pixels_per_beat
+            py = value_to_lane_y(lane, pt.value, top_y, lh)
+            d = ((x - px) ** 2 + (y - py) ** 2) ** 0.5
+            if d <= radius and d < best_d:
+                best_d = d
+                best_pt = pt
+        return best_pt
+
+    def _get_auto_segment_handle_at(
+        self, lane: AutomationLane, x: float, y: float, top_y: float, lh: float, radius: float = 8.0
+    ) -> Optional[int]:
+        for idx in range(len(lane.points) - 1):
+            handle = get_segment_midpoint_handle(lane, idx, top_y, lh, self.pixels_per_beat)
+            if handle is not None:
+                hx, hy = handle
+                if ((x - hx) ** 2 + (y - hy) ** 2) ** 0.5 <= radius:
+                    return idx
+        return None
+
+    def _get_auto_segment_at(self, lane: AutomationLane, beat: float) -> Optional[int]:
+        for idx in range(len(lane.points) - 1):
+            if lane.points[idx].beat <= beat <= lane.points[idx + 1].beat:
+                return idx
+        return None
+
+    def _ensure_lane_anchor(self, track: Track, lane: AutomationLane) -> None:
+        """Si la courbe est encore vide, pose un point initial à beat=0 avec la valeur actuelle de la piste."""
+        if lane.points:
+            return
+        if lane.target_param == "volume":
+            init_val = float(track.volume)
+        elif lane.target_param == "pan":
+            init_val = float(track.pan)
+        else:
+            init_val = lane.evaluate(0.0)
+        lane.add_point(0.0, init_val, curve_type="linear")
+
+    def delete_selected_automation_points(self) -> bool:
+        if not self.selected_automation_points:
+            return False
+        removed = False
+        for track in self.project.tracks:
+            for lane in getattr(track, "automation_lanes", []):
+                before = len(lane.points)
+                lane.points = [p for p in lane.points if p.id not in self.selected_automation_points]
+                if len(lane.points) < before:
+                    removed = True
+        self.selected_automation_points.clear()
+        if removed:
+            self.project_modified.emit()
+            self.automation_modified.emit()
+            self.update()
+        return removed
 
     def _get_track_at_y(self, y: int) -> Tuple[Optional[Track], int]:
         for index, (track, top_y, h) in enumerate(self.get_track_layout()):
@@ -810,6 +932,126 @@ class TimelineGrid(QWidget):
         self.setFocus()
         x = event.position().x()
         y = event.position().y()
+
+        # 0. Vérifier si l'événement se situe dans une sous-piste d'automatisation
+        auto_track, auto_lane, lane_top, lane_h = self._get_automation_lane_at_y(y)
+        if auto_track and auto_lane:
+            self.selected_track_id = auto_track.id
+            self.track_selected.emit(auto_track.id)
+
+            if event.button() == Qt.LeftButton:
+                # Bord inférieur de la sous-piste : redimensionner sa hauteur
+                sep_t, sep_l = self._get_lane_separator_at_y(y)
+                if sep_t and sep_l:
+                    self._resizing_lane = (sep_t, sep_l)
+                    self._drag_start_lane_h = sep_l.height
+                    self._drag_start_lane_y = event.globalPosition().y()
+                    self.grabMouse()
+                    event.accept()
+                    return
+
+                raw_beat = max(0.0, x / self.pixels_per_beat)
+                use_snap = self.snap_enabled and self.grid_resolution > 0.0 and not (event.modifiers() & Qt.AltModifier)
+                beat = self.snap_beat(raw_beat) if use_snap else raw_beat
+                val = lane_y_to_value(auto_lane, y, lane_top, lane_h)
+
+                # Outil Crayon : démarrage du dessin à main levée
+                if self.active_tool == "draw":
+                    self._ensure_lane_anchor(auto_track, auto_lane)
+                    self._drawing_auto_freehand = (auto_track, auto_lane, lane_top, lane_h)
+                    self._draw_auto_raw_points = [(raw_beat, val)]
+                    QToolTip.showText(
+                        event.globalPosition().toPoint(),
+                        f"✏️ {auto_lane.name}: {format_automation_value(auto_lane.target_param, val)}",
+                        self,
+                    )
+                    self.update()
+                    event.accept()
+                    return
+
+                # Outil Gomme : supprimer le point cliqué
+                if self.active_tool == "erase":
+                    self._erasing_auto = True
+                    hit_pt = self._get_auto_point_at(auto_lane, x, y, lane_top, lane_h)
+                    if hit_pt:
+                        auto_lane.remove_point(hit_pt.id)
+                        self.selected_automation_points.discard(hit_pt.id)
+                        self.project_modified.emit()
+                        self.automation_modified.emit()
+                        self.update()
+                    event.accept()
+                    return
+
+                # Outil Ciseaux : insérer un point d'ancrage / coupure nette
+                if self.active_tool == "split":
+                    self._ensure_lane_anchor(auto_track, auto_lane)
+                    cur_v = auto_lane.evaluate(beat, fallback_value=val)
+                    pt = auto_lane.add_point(beat, cur_v, curve_type="step")
+                    self.selected_automation_points = {pt.id}
+                    self.project_modified.emit()
+                    self.automation_modified.emit()
+                    self.update()
+                    self.status_message.emit(
+                        f"✂️ Point d'ancrage posé à {beat:.2f} t ({format_automation_value(auto_lane.target_param, cur_v)})",
+                        2500,
+                    )
+                    event.accept()
+                    return
+
+                # Outil Pointeur : poignée de courbure ou point existant ou création
+                seg_handle_idx = self._get_auto_segment_handle_at(auto_lane, x, y, lane_top, lane_h)
+                if seg_handle_idx is not None or ((event.modifiers() & Qt.AltModifier) and self._get_auto_segment_at(auto_lane, raw_beat) is not None):
+                    seg_idx = seg_handle_idx if seg_handle_idx is not None else self._get_auto_segment_at(auto_lane, raw_beat)
+                    if seg_idx is not None and 0 <= seg_idx < len(auto_lane.points) - 1:
+                        p0 = auto_lane.points[seg_idx]
+                        p0.curve_type = "curve"
+                        self._dragging_auto_curve = (auto_track, auto_lane, p0, y, p0.curve_tension, lane_h)
+                        self.update()
+                        event.accept()
+                        return
+
+                hit_pt = self._get_auto_point_at(auto_lane, x, y, lane_top, lane_h)
+                if hit_pt:
+                    if event.modifiers() & Qt.ControlModifier:
+                        if hit_pt.id in self.selected_automation_points:
+                            self.selected_automation_points.discard(hit_pt.id)
+                        else:
+                            self.selected_automation_points.add(hit_pt.id)
+                    else:
+                        if hit_pt.id not in self.selected_automation_points:
+                            self.selected_automation_points = {hit_pt.id}
+                    self._dragging_auto_point = (auto_track, auto_lane, hit_pt, lane_top, lane_h)
+                    QToolTip.showText(
+                        event.globalPosition().toPoint(),
+                        f"{auto_lane.name}: {format_automation_value(auto_lane.target_param, hit_pt.value)} @ {hit_pt.beat:.2f} t",
+                        self,
+                    )
+                    self.update()
+                    event.accept()
+                    return
+
+                # Clic dans la zone vide de la sous-piste : ajoute un point directement déplaçable
+                self._ensure_lane_anchor(auto_track, auto_lane)
+                new_pt = auto_lane.add_point(beat, val, curve_type="linear")
+                self.selected_automation_points = {new_pt.id}
+                self._dragging_auto_point = (auto_track, auto_lane, new_pt, lane_top, lane_h)
+                self.project_modified.emit()
+                self.automation_modified.emit()
+                QToolTip.showText(
+                    event.globalPosition().toPoint(),
+                    f"{auto_lane.name}: {format_automation_value(auto_lane.target_param, new_pt.value)} @ {new_pt.beat:.2f} t",
+                    self,
+                )
+                self.update()
+                event.accept()
+                return
+
+            elif event.button() == Qt.RightButton:
+                self._show_automation_context_menu(
+                    event.globalPosition().toPoint(), auto_track, auto_lane, x, y, lane_top, lane_h
+                )
+                event.accept()
+                return
 
         # 1. Vérifier si on clique sur la ligne de séparation d'une piste pour redimensionner sa hauteur
         sep_track, sep_idx = self._get_track_separator_at_y(y)
@@ -903,6 +1145,31 @@ class TimelineGrid(QWidget):
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         x = event.position().x()
         y = event.position().y()
+
+        auto_track, auto_lane, lane_top, lane_h = self._get_automation_lane_at_y(y)
+        if auto_track and auto_lane:
+            seg_idx = self._get_auto_segment_handle_at(auto_lane, x, y, lane_top, lane_h)
+            if seg_idx is not None and 0 <= seg_idx < len(auto_lane.points) - 1:
+                p0 = auto_lane.points[seg_idx]
+                p0.curve_type = "linear"
+                p0.curve_tension = 0.0
+                self.project_modified.emit()
+                self.automation_modified.emit()
+                self.update()
+                event.accept()
+                return
+            hit_pt = self._get_auto_point_at(auto_lane, x, y, lane_top, lane_h)
+            if hit_pt:
+                auto_lane.remove_point(hit_pt.id)
+                self.selected_automation_points.discard(hit_pt.id)
+                self.project_modified.emit()
+                self.automation_modified.emit()
+                self.update()
+                event.accept()
+                return
+            event.accept()
+            return
+
         track, clip, _ = self._get_clip_at(x, y)
 
         if clip and track:
@@ -952,6 +1219,91 @@ class TimelineGrid(QWidget):
         x = event.position().x()
         y = event.position().y()
 
+        if self._resizing_lane:
+            r_track, r_lane = self._resizing_lane
+            dy = int(event.globalPosition().y() - self._drag_start_lane_y)
+            new_h = max(40, min(220, self._drag_start_lane_h + dy))
+            r_lane.height = new_h
+            self.update_dimensions()
+            self.update()
+            self.automation_lane_height_changed.emit(r_track.id, r_lane.id, new_h)
+            event.accept()
+            return
+
+        if self._drawing_auto_freehand:
+            _, d_lane, d_top, d_h = self._drawing_auto_freehand
+            raw_beat = max(0.0, x / self.pixels_per_beat)
+            val = lane_y_to_value(d_lane, y, d_top, d_h)
+            self._draw_auto_raw_points.append((raw_beat, val))
+            QToolTip.showText(
+                event.globalPosition().toPoint(),
+                f"✏️ {d_lane.name}: {format_automation_value(d_lane.target_param, val)}",
+                self,
+            )
+            self.update()
+            event.accept()
+            return
+
+        if self._dragging_auto_curve:
+            _, c_lane, p0, start_y, start_tension, c_h = self._dragging_auto_curve
+            dy = (y - start_y) / max(32.0, c_h * 0.75)
+            # Inverser si nécessaire pour que monter la souris bombe vers le haut
+            p1_idx = c_lane.points.index(p0) + 1 if p0 in c_lane.points else -1
+            sign = 1.0
+            if 0 <= p1_idx < len(c_lane.points):
+                if c_lane.target_param == "pan":
+                    sign = -1.0 if c_lane.points[p1_idx].value >= p0.value else 1.0
+                else:
+                    sign = 1.0 if c_lane.points[p1_idx].value >= p0.value else -1.0
+            p0.curve_type = "curve"
+            p0.curve_tension = max(-1.0, min(1.0, start_tension + sign * dy))
+            self.project_modified.emit()
+            self.automation_modified.emit()
+            QToolTip.showText(
+                event.globalPosition().toPoint(),
+                f"〰️ Courbure: {p0.curve_tension:+.2f}",
+                self,
+            )
+            self.update()
+            event.accept()
+            return
+
+        if self._dragging_auto_point:
+            _, p_lane, pt, p_top, p_h = self._dragging_auto_point
+            raw_beat = max(0.0, x / self.pixels_per_beat)
+            use_snap = self.snap_enabled and self.grid_resolution > 0.0 and not (event.modifiers() & Qt.AltModifier)
+            new_beat = self.snap_beat(raw_beat) if use_snap else raw_beat
+            new_val = lane_y_to_value(p_lane, y, p_top, p_h)
+            if event.modifiers() & Qt.ShiftModifier:
+                # Ajustement fin vertical (ralentit d'un facteur 4 autour de la valeur précédente)
+                new_val = p_lane.clamp_value(pt.value + (new_val - pt.value) * 0.25)
+            pt.beat = new_beat
+            pt.value = p_lane.clamp_value(new_val)
+            p_lane.sort_points()
+            self.project_modified.emit()
+            self.automation_modified.emit()
+            QToolTip.showText(
+                event.globalPosition().toPoint(),
+                f"{p_lane.name}: {format_automation_value(p_lane.target_param, pt.value)} @ {pt.beat:.2f} t",
+                self,
+            )
+            self.update()
+            event.accept()
+            return
+
+        if self._erasing_auto and self.active_tool == "erase":
+            _, e_lane, e_top, e_h = self._get_automation_lane_at_y(y)
+            if e_lane:
+                hit_pt = self._get_auto_point_at(e_lane, x, y, e_top, e_h, radius=10.0)
+                if hit_pt:
+                    e_lane.remove_point(hit_pt.id)
+                    self.selected_automation_points.discard(hit_pt.id)
+                    self.project_modified.emit()
+                    self.automation_modified.emit()
+                    self.update()
+            event.accept()
+            return
+
         if self._resizing_track_height and self._resizing_track:
             dy = int(event.globalPosition().y() - self._drag_start_track_y)
             new_h = max(46, min(320, self._drag_start_track_h + dy))
@@ -996,6 +1348,15 @@ class TimelineGrid(QWidget):
             self._hover_clip = None
             return
 
+        # Survol avec outil Crayon
+        if self.active_tool == "draw":
+            auto_t, auto_l, _, _ = self._get_automation_lane_at_y(y)
+            if auto_t and auto_l:
+                self.setCursor(Qt.CrossCursor)
+            else:
+                self.setCursor(Qt.ArrowCursor)
+            return
+
         if self._dragging_clip and self.selected_clip:
             _, clip = self.selected_clip
             delta_beats = (x - self._drag_start_x) / self.pixels_per_beat
@@ -1033,6 +1394,36 @@ class TimelineGrid(QWidget):
             self.update()
 
         else:
+            auto_t, auto_l, l_top, l_h = self._get_automation_lane_at_y(y)
+            if auto_t and auto_l:
+                sep_t, sep_l = self._get_lane_separator_at_y(y)
+                hit_pt = self._get_auto_point_at(auto_l, x, y, l_top, l_h)
+                seg_h_idx = self._get_auto_segment_handle_at(auto_l, x, y, l_top, l_h)
+                new_hov_pt = (auto_l.id, hit_pt.id) if hit_pt else None
+                new_hov_seg = (auto_l.id, seg_h_idx) if seg_h_idx is not None else (
+                    (auto_l.id, self._get_auto_segment_at(auto_l, max(0.0, x / self.pixels_per_beat)))
+                    if (not hit_pt and self._get_auto_segment_at(auto_l, max(0.0, x / self.pixels_per_beat)) is not None)
+                    else None
+                )
+                if new_hov_pt != self._hover_auto_point or new_hov_seg != self._hover_auto_segment:
+                    self._hover_auto_point = new_hov_pt
+                    self._hover_auto_segment = new_hov_seg
+                    self.update()
+                if sep_t and sep_l:
+                    self.setCursor(Qt.SizeVerCursor)
+                elif seg_h_idx is not None:
+                    self.setCursor(Qt.SizeVerCursor)
+                elif hit_pt:
+                    self.setCursor(Qt.PointingHandCursor)
+                else:
+                    self.setCursor(Qt.CrossCursor)
+                return
+
+            if self._hover_auto_point is not None or self._hover_auto_segment is not None:
+                self._hover_auto_point = None
+                self._hover_auto_segment = None
+                self.update()
+
             sep_track, _ = self._get_track_separator_at_y(y)
             _, clip, is_resize = self._get_clip_at(x, y)
             if sep_track and (not clip or is_resize):
@@ -1045,6 +1436,68 @@ class TimelineGrid(QWidget):
                 self.setCursor(Qt.CrossCursor)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._resizing_lane:
+            self._resizing_lane = None
+            self.releaseMouse()
+            self.unsetCursor()
+            self.project_modified.emit()
+            self.update()
+            event.accept()
+            return
+
+        if self._drawing_auto_freehand:
+            _, d_lane, _, _ = self._drawing_auto_freehand
+            raw_pts = self._draw_auto_raw_points
+            self._drawing_auto_freehand = None
+            self._draw_auto_raw_points = []
+            if raw_pts:
+                min_v, max_v = d_lane.get_bounds()
+                simplified = simplify_freehand_points(
+                    raw_pts,
+                    grid_step=self.grid_resolution,
+                    snap_enabled=self.snap_enabled and not (event.modifiers() & Qt.AltModifier),
+                    value_span=(max_v - min_v),
+                )
+                if simplified:
+                    b_start = min(b for b, _ in simplified)
+                    b_end = max(b for b, _ in simplified)
+                    # Remplacer proprement les points existants dans l'intervalle redessiné
+                    d_lane.points = [
+                        p for p in d_lane.points
+                        if p.beat < b_start - 1e-3 or p.beat > b_end + 1e-3
+                    ]
+                    new_ids = set()
+                    for b, v in simplified:
+                        pt = d_lane.add_point(b, v, curve_type="linear")
+                        new_ids.add(pt.id)
+                    self.selected_automation_points = new_ids
+                    self.project_modified.emit()
+                    self.automation_modified.emit()
+            self.update()
+            event.accept()
+            return
+
+        if self._dragging_auto_curve:
+            self._dragging_auto_curve = None
+            self.project_modified.emit()
+            self.automation_modified.emit()
+            self.update()
+            event.accept()
+            return
+
+        if self._dragging_auto_point:
+            self._dragging_auto_point = None
+            self.project_modified.emit()
+            self.automation_modified.emit()
+            self.update()
+            event.accept()
+            return
+
+        if self._erasing_auto:
+            self._erasing_auto = False
+            event.accept()
+            return
+
         if self._resizing_track_height:
             self._resizing_track_height = False
             self._resizing_track = None
@@ -1098,9 +1551,18 @@ class TimelineGrid(QWidget):
                 self.parent().editing_toolbar.set_active_tool("erase")
             event.accept()
             return
+        elif event.key() in (Qt.Key_4, Qt.Key_B) and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
+            self.set_active_tool("draw")
+            if hasattr(self.parent(), "editing_toolbar"):
+                self.parent().editing_toolbar.set_active_tool("draw")
+            event.accept()
+            return
 
-        # Touche Suppr ou Backspace pour supprimer le bloc sélectionné
+        # Touche Suppr ou Backspace pour supprimer les points d'automatisation ou le bloc sélectionné
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            if self.delete_selected_automation_points():
+                event.accept()
+                return
             if self.delete_selected_clip():
                 event.accept()
                 return
@@ -1275,6 +1737,141 @@ class TimelineGrid(QWidget):
         self._last_track_context_menu = menu
         menu.exec(pos)
 
+    def _show_automation_context_menu(
+        self, pos, track: Track, lane: AutomationLane, x: float, y: float, lane_top: float, lane_h: float
+    ):
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #181b26;
+                color: #f1f5f9;
+                border: 1px solid #38bdf8;
+                border-radius: 4px;
+                padding: 4px;
+                font-size: 11px;
+            }
+            QMenu::item { padding: 5px 16px 5px 10px; border-radius: 3px; }
+            QMenu::item:selected { background-color: #0284c7; color: #ffffff; font-weight: bold; }
+            QMenu::item:disabled { color: #64748b; font-weight: bold; }
+            QMenu::separator { height: 1px; background-color: #2b3042; margin: 4px 6px; }
+        """)
+        hdr = menu.addAction(f"📈 {track.name} — {lane.name}")
+        hdr.setEnabled(False)
+        menu.addSeparator()
+
+        hit_pt = self._get_auto_point_at(lane, x, y, lane_top, lane_h)
+        raw_beat = max(0.0, x / self.pixels_per_beat)
+        seg_idx = self._get_auto_segment_at(lane, raw_beat)
+        target_pt: Optional[AutomationPoint] = hit_pt
+        if target_pt is None and seg_idx is not None and 0 <= seg_idx < len(lane.points):
+            target_pt = lane.points[seg_idx]
+
+        if target_pt is not None:
+            act_lin = menu.addAction("📈 Segment : Linéaire (Ligne droite)")
+            act_lin.setCheckable(True)
+            act_lin.setChecked(target_pt.curve_type == "linear")
+            act_lin.triggered.connect(lambda: self._set_point_curve(target_pt, "linear", 0.0))
+
+            act_curve = menu.addAction("〰️ Segment : Courbe lissée")
+            act_curve.setCheckable(True)
+            act_curve.setChecked(target_pt.curve_type == "curve")
+            act_curve.triggered.connect(lambda: self._set_point_curve(target_pt, "curve", target_pt.curve_tension))
+
+            act_step = menu.addAction("📐 Segment : Angle droit (Palier)")
+            act_step.setCheckable(True)
+            act_step.setChecked(target_pt.curve_type == "step")
+            act_step.triggered.connect(lambda: self._set_point_curve(target_pt, "step", 0.0))
+
+            if target_pt.curve_type == "curve" and abs(target_pt.curve_tension) > 1e-4:
+                act_reset_c = menu.addAction("⚖️ Réinitialiser la tension de courbe")
+                act_reset_c.triggered.connect(lambda: self._set_point_curve(target_pt, "curve", 0.0))
+
+            menu.addSeparator()
+
+        if hit_pt is not None:
+            act_set_val = menu.addAction(
+                f"🎯 Définir une valeur exacte ({format_automation_value(lane.target_param, hit_pt.value)})..."
+            )
+            act_set_val.triggered.connect(lambda: self._prompt_point_value(lane, hit_pt))
+
+            act_del_pt = menu.addAction("🗑️ Supprimer ce point")
+            act_del_pt.triggered.connect(lambda: self._delete_automation_point(lane, hit_pt.id))
+        else:
+            act_add_pt = menu.addAction("➕ Ajouter un point ici")
+            snap_b = self.snap_beat(raw_beat) if (self.snap_enabled and self.grid_resolution > 0) else raw_beat
+            val_y = lane_y_to_value(lane, y, lane_top, lane_h)
+            act_add_pt.triggered.connect(lambda: self._add_automation_point_action(track, lane, snap_b, val_y))
+
+        menu.addSeparator()
+        act_draw = menu.addAction("✏️ Activer l'outil Crayon (4)")
+        act_draw.triggered.connect(lambda: self._activate_tool_from_menu("draw"))
+
+        act_clear = menu.addAction("🧹 Effacer tous les points de cette courbe")
+        act_clear.setEnabled(len(lane.points) > 0)
+        act_clear.triggered.connect(lambda: self._clear_automation_lane(lane))
+
+        menu.exec(pos)
+
+    def _set_point_curve(self, pt: AutomationPoint, curve_type: str, tension: float):
+        pt.curve_type = curve_type
+        pt.curve_tension = max(-1.0, min(1.0, float(tension)))
+        self.project_modified.emit()
+        self.automation_modified.emit()
+        self.update()
+
+    def _delete_automation_point(self, lane: AutomationLane, point_id: str):
+        lane.remove_point(point_id)
+        self.selected_automation_points.discard(point_id)
+        self.project_modified.emit()
+        self.automation_modified.emit()
+        self.update()
+
+    def _add_automation_point_action(self, track: Track, lane: AutomationLane, beat: float, val: float):
+        self._ensure_lane_anchor(track, lane)
+        pt = lane.add_point(beat, val, curve_type="linear")
+        self.selected_automation_points = {pt.id}
+        self.project_modified.emit()
+        self.automation_modified.emit()
+        self.update()
+
+    def _prompt_point_value(self, lane: AutomationLane, pt: AutomationPoint):
+        if lane.target_param == "volume":
+            val_pct, ok = QInputDialog.getInt(
+                self, "Valeur du point (Volume)", "Volume en % (0 à 150) :",
+                int(round(pt.value * 100.0)), 0, 150, 1
+            )
+            if ok:
+                pt.value = lane.clamp_value(val_pct / 100.0)
+        elif lane.target_param == "pan":
+            val_pct, ok = QInputDialog.getInt(
+                self, "Valeur du point (Panoramique)", "Panoramique (-100 = L, 0 = C, +100 = R) :",
+                int(round(pt.value * 100.0)), -100, 100, 1
+            )
+            if ok:
+                pt.value = lane.clamp_value(val_pct / 100.0)
+        else:
+            min_v, max_v = lane.get_bounds()
+            val_f, ok = QInputDialog.getDouble(
+                self, "Valeur du point", "Valeur :", pt.value, min_v, max_v, 3
+            )
+            if ok:
+                pt.value = lane.clamp_value(val_f)
+        self.project_modified.emit()
+        self.automation_modified.emit()
+        self.update()
+
+    def _clear_automation_lane(self, lane: AutomationLane):
+        lane.points.clear()
+        self.selected_automation_points.clear()
+        self.project_modified.emit()
+        self.automation_modified.emit()
+        self.update()
+
+    def _activate_tool_from_menu(self, tool_name: str):
+        self.set_active_tool(tool_name)
+        if hasattr(self.parent(), "editing_toolbar"):
+            self.parent().editing_toolbar.set_active_tool(tool_name)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -1308,6 +1905,12 @@ class TimelineGrid(QWidget):
                 painter.drawLine(0, top_y + track_h - 1, width, top_y + track_h - 1)
             painter.setPen(QPen(QColor("#232634"), 1))
             painter.drawLine(0, top_y + track_h, width, top_y + track_h)
+
+        # Fond des sous-pistes d'automatisation (avant la grille verticale musicale)
+        auto_layout = self.get_automation_layout()
+        for track, lane, ly, lh in auto_layout:
+            bg_col = QColor("#0e1017") if lane.enabled else QColor("#0b0c12")
+            painter.fillRect(0, ly, width, lh, bg_col)
 
         # Grille verticale musicale dynamique (Mesures, temps et subdivisions)
         num_bars = int(width / (self.pixels_per_beat * 4)) + 4
@@ -1509,6 +2112,38 @@ class TimelineGrid(QWidget):
                 else:
                     painter.setPen(QPen(QColor(255, 255, 255, 100), 2))
                     painter.drawLine(int(cx + cw) - 3, int(cy) + 6, int(cx + cw) - 3, int(cy + ch) - 6)
+
+        # Dessin des courbes et points des sous-pistes d'automatisation
+        for track, lane, ly, lh in auto_layout:
+            hov_pt_id = (
+                self._hover_auto_point[1]
+                if (self._hover_auto_point and self._hover_auto_point[0] == lane.id)
+                else None
+            )
+            hov_seg_idx = (
+                self._hover_auto_segment[1]
+                if (self._hover_auto_segment and self._hover_auto_segment[0] == lane.id)
+                else None
+            )
+            preview = (
+                self._draw_auto_raw_points
+                if (self._drawing_auto_freehand and self._drawing_auto_freehand[1].id == lane.id)
+                else None
+            )
+            paint_automation_lane(
+                painter=painter,
+                track=track,
+                lane=lane,
+                top_y=ly,
+                height=lh,
+                width=width,
+                pixels_per_beat=self.pixels_per_beat,
+                selected_point_ids=self.selected_automation_points,
+                hovered_point_id=hov_pt_id,
+                hovered_segment_idx=hov_seg_idx,
+                draw_preview=preview,
+                draw_background=False,
+            )
 
         # Guide visuel de découpe ciseaux si outil split actif
         if self.active_tool == "split" and self._hover_clip and self._hover_split_beat is not None:

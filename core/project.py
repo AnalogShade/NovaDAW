@@ -2,8 +2,9 @@
 core/project.py - Modèle de données pour le DAW
 """
 import os
+import math
 from dataclasses import dataclass, field
-from typing import List, Optional, Union, Any, Tuple
+from typing import List, Optional, Union, Any, Tuple, Dict
 import uuid
 import numpy as np
 
@@ -297,6 +298,291 @@ class AudioClip:
 ClipType = Union[MidiClip, AudioClip]
 
 
+AUTOMATION_PARAM_SPECS: Dict[str, Dict[str, Any]] = {
+    "volume": {
+        "label": "Volume",
+        "icon": "🔊",
+        "min_val": 0.0,
+        "max_val": 1.5,
+        "default_val": 0.8,
+        "center_val": None,
+        "color": "#38bdf8",
+    },
+    "pan": {
+        "label": "Panoramique",
+        "icon": "↔",
+        "min_val": -1.0,
+        "max_val": 1.0,
+        "default_val": 0.0,
+        "center_val": 0.0,
+        "color": "#a855f7",
+    },
+}
+
+
+def get_automation_param_spec(target_param: str) -> Dict[str, Any]:
+    """Retourne les métadonnées (plage, défaut, couleur) d'un paramètre automatisable."""
+    if target_param in AUTOMATION_PARAM_SPECS:
+        return AUTOMATION_PARAM_SPECS[target_param]
+    return {
+        "label": target_param.replace("_", " ").title(),
+        "icon": "🎛️",
+        "min_val": 0.0,
+        "max_val": 1.0,
+        "default_val": 0.5,
+        "center_val": None,
+        "color": "#10b981",
+    }
+
+
+def format_automation_value(target_param: str, value: float) -> str:
+    """Formate lisiblement une valeur d'automatisation pour l'interface."""
+    if target_param == "volume":
+        return f"{int(round(value * 100.0))}%"
+    if target_param == "pan":
+        pct = int(round(value * 100.0))
+        if pct == 0:
+            return "C"
+        return f"L{abs(pct)}" if pct < 0 else f"R{pct}"
+    return f"{value:.2f}"
+
+
+def _eval_segment_t(t: Union[float, np.ndarray], curve_type: str, curve_tension: float):
+    """Calcule le facteur d'interpolation normalisé [0..1] selon le type de courbe."""
+    if curve_type == "step":
+        return 0.0 if isinstance(t, float) else np.zeros_like(t, dtype=np.float32)
+    if curve_type == "curve":
+        tension = max(-1.0, min(1.0, float(curve_tension)))
+        if abs(tension) < 1e-4:
+            # S-curve douce (cosinus) par défaut quand on choisit 'courbe' sans tension asymétrique
+            if isinstance(t, float):
+                return 0.5 * (1.0 - math.cos(math.pi * t))
+            return (0.5 * (1.0 - np.cos(np.pi * t))).astype(np.float32)
+        exp = 1.0 + 3.0 * abs(tension)
+        if tension > 0.0:
+            return t ** exp
+        return 1.0 - (1.0 - t) ** exp
+    return t
+
+
+@dataclass
+class AutomationPoint:
+    """Point de contrôle d'une courbe d'automatisation."""
+    beat: float = 0.0
+    value: float = 0.8
+    curve_type: str = "linear"  # "linear", "step" (angle droit), "curve" (courbe)
+    curve_tension: float = 0.0  # -1.0 .. +1.0 (0.0 = S-curve douce en mode "curve")
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "beat": float(self.beat),
+            "value": float(self.value),
+            "curve_type": str(self.curve_type),
+            "curve_tension": float(self.curve_tension),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AutomationPoint":
+        ctype = data.get("curve_type", "linear")
+        if ctype not in ("linear", "step", "curve"):
+            ctype = "linear"
+        return cls(
+            id=data.get("id", str(uuid.uuid4())[:8]),
+            beat=max(0.0, float(data.get("beat", 0.0))),
+            value=float(data.get("value", 0.8)),
+            curve_type=ctype,
+            curve_tension=max(-1.0, min(1.0, float(data.get("curve_tension", 0.0)))),
+        )
+
+
+@dataclass
+class AutomationLane:
+    """Sous-piste d'automatisation liée à un paramètre de piste ou de plugin."""
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    target_param: str = "volume"  # "volume", "pan", ou paramètre de plugin
+    target_scope: str = "track"   # "track" | "plugin" (préparé pour Vocal Rider, etc.)
+    target_plugin_id: Optional[str] = None
+    name: str = ""
+    enabled: bool = True
+    visible: bool = True
+    height: int = 56
+    mode: str = "read"  # "read", "write", "touch", "latch"
+    color: str = ""
+    points: List[AutomationPoint] = field(default_factory=list)
+
+    def __post_init__(self):
+        spec = get_automation_param_spec(self.target_param)
+        if not self.name:
+            self.name = spec["label"]
+        if not self.color:
+            self.color = spec["color"]
+        if self.mode not in ("read", "write", "touch", "latch"):
+            self.mode = "read"
+        self.height = max(40, min(220, int(self.height)))
+        self.sort_points()
+
+    def get_bounds(self) -> Tuple[float, float]:
+        spec = get_automation_param_spec(self.target_param)
+        return float(spec["min_val"]), float(spec["max_val"])
+
+    def clamp_value(self, value: float) -> float:
+        min_v, max_v = self.get_bounds()
+        return max(min_v, min(max_v, float(value)))
+
+    def sort_points(self) -> None:
+        self.points.sort(key=lambda p: p.beat)
+
+    def add_point(
+        self,
+        beat: float,
+        value: float,
+        curve_type: str = "linear",
+        curve_tension: float = 0.0,
+        merge_tol: float = 1e-4,
+    ) -> AutomationPoint:
+        """Ajoute ou met à jour un point à `beat` avec la valeur bornée."""
+        b = max(0.0, float(beat))
+        v = self.clamp_value(value)
+        for pt in self.points:
+            if abs(pt.beat - b) <= merge_tol:
+                pt.beat = b
+                pt.value = v
+                pt.curve_type = curve_type if curve_type in ("linear", "step", "curve") else pt.curve_type
+                pt.curve_tension = max(-1.0, min(1.0, float(curve_tension)))
+                self.sort_points()
+                return pt
+        pt = AutomationPoint(
+            beat=b,
+            value=v,
+            curve_type=curve_type if curve_type in ("linear", "step", "curve") else "linear",
+            curve_tension=max(-1.0, min(1.0, float(curve_tension))),
+        )
+        self.points.append(pt)
+        self.sort_points()
+        return pt
+
+    def remove_point(self, point_id: str) -> bool:
+        before = len(self.points)
+        self.points = [p for p in self.points if p.id != point_id]
+        return len(self.points) < before
+
+    def evaluate(self, beat: float, fallback_value: Optional[float] = None) -> float:
+        """Évalue la valeur de la courbe à un temps donné (en beats)."""
+        if not self.points:
+            if fallback_value is not None:
+                return self.clamp_value(fallback_value)
+            return float(get_automation_param_spec(self.target_param)["default_val"])
+
+        b = float(beat)
+        if b <= self.points[0].beat:
+            return self.clamp_value(self.points[0].value)
+        if b >= self.points[-1].beat:
+            return self.clamp_value(self.points[-1].value)
+
+        for i in range(len(self.points) - 1):
+            p0 = self.points[i]
+            p1 = self.points[i + 1]
+            if p0.beat <= b < p1.beat:
+                span = p1.beat - p0.beat
+                if span <= 1e-9:
+                    return self.clamp_value(p1.value)
+                if p0.curve_type == "step":
+                    return self.clamp_value(p0.value)
+                t = (b - p0.beat) / span
+                t_eff = _eval_segment_t(t, p0.curve_type, p0.curve_tension)
+                return self.clamp_value(p0.value + t_eff * (p1.value - p0.value))
+
+        return self.clamp_value(self.points[-1].value)
+
+    def evaluate_range(
+        self,
+        start_beat: float,
+        end_beat: float,
+        num_frames: int,
+        fallback_value: Optional[float] = None,
+    ) -> np.ndarray:
+        """Évalue la courbe échantillon par échantillon sur [start_beat, end_beat) en NumPy."""
+        n = max(0, int(num_frames))
+        if n == 0:
+            return np.zeros(0, dtype=np.float32)
+
+        if not self.points:
+            val = self.clamp_value(
+                fallback_value
+                if fallback_value is not None
+                else get_automation_param_spec(self.target_param)["default_val"]
+            )
+            return np.full(n, val, dtype=np.float32)
+
+        if len(self.points) == 1 or end_beat <= self.points[0].beat:
+            return np.full(n, self.clamp_value(self.points[0].value), dtype=np.float32)
+
+        if start_beat >= self.points[-1].beat:
+            return np.full(n, self.clamp_value(self.points[-1].value), dtype=np.float32)
+
+        beats = np.linspace(float(start_beat), float(end_beat), n, endpoint=False, dtype=np.float64)
+        out = np.empty(n, dtype=np.float32)
+
+        first_b = self.points[0].beat
+        last_b = self.points[-1].beat
+        out[beats <= first_b] = self.points[0].value
+        out[beats >= last_b] = self.points[-1].value
+
+        for i in range(len(self.points) - 1):
+            p0 = self.points[i]
+            p1 = self.points[i + 1]
+            if p1.beat <= start_beat or p0.beat >= end_beat:
+                continue
+            mask = (beats >= p0.beat) & (beats < p1.beat)
+            if not np.any(mask):
+                continue
+            span = p1.beat - p0.beat
+            if span <= 1e-9 or p0.curve_type == "step":
+                out[mask] = p0.value
+            else:
+                t = (beats[mask] - p0.beat) / span
+                t_eff = _eval_segment_t(t, p0.curve_type, p0.curve_tension)
+                out[mask] = p0.value + t_eff * (p1.value - p0.value)
+
+        min_v, max_v = self.get_bounds()
+        return np.clip(out, min_v, max_v).astype(np.float32)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "target_param": self.target_param,
+            "target_scope": self.target_scope,
+            "target_plugin_id": self.target_plugin_id,
+            "name": self.name,
+            "enabled": bool(self.enabled),
+            "visible": bool(self.visible),
+            "height": int(self.height),
+            "mode": self.mode,
+            "color": self.color,
+            "points": [p.to_dict() for p in self.points],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AutomationLane":
+        lane = cls(
+            id=data.get("id", str(uuid.uuid4())[:8]),
+            target_param=data.get("target_param", "volume"),
+            target_scope=data.get("target_scope", "track"),
+            target_plugin_id=data.get("target_plugin_id"),
+            name=data.get("name", ""),
+            enabled=bool(data.get("enabled", True)),
+            visible=bool(data.get("visible", True)),
+            height=int(data.get("height", 56)),
+            mode=data.get("mode", "read"),
+            color=data.get("color", ""),
+        )
+        lane.points = [AutomationPoint.from_dict(p) for p in data.get("points", [])]
+        lane.sort_points()
+        return lane
+
+
 @dataclass
 class Track:
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
@@ -317,6 +603,61 @@ class Track:
     midi_channel: int = 1  # Canal MIDI de sortie, 1 à 16
     synth_output_bus: Optional[int] = None  # Sortie stéréo assignée de 0 à 9 (Out 1 à Out 10)
     synth_route_track_id: Optional[str] = None  # Piste hébergeant le synthétiseur partagé
+    automation_lanes: List[AutomationLane] = field(default_factory=list)
+    automation_expanded: bool = True
+
+    def get_automation_lane(
+        self,
+        target_param: str,
+        target_plugin_id: Optional[str] = None,
+    ) -> Optional[AutomationLane]:
+        """Retourne la sous-piste d'automatisation correspondant au paramètre ciblé."""
+        for lane in self.automation_lanes:
+            if lane.target_param == target_param and lane.target_plugin_id == target_plugin_id:
+                return lane
+        return None
+
+    def get_automation_lane_by_id(self, lane_id: str) -> Optional[AutomationLane]:
+        for lane in self.automation_lanes:
+            if lane.id == lane_id:
+                return lane
+        return None
+
+    def add_automation_lane(
+        self,
+        target_param: str,
+        target_plugin_id: Optional[str] = None,
+        target_scope: str = "track",
+        seed_initial_point: bool = True,
+    ) -> AutomationLane:
+        """Ajoute une piste d'automatisation liée à cette piste (ou réaffiche si existante)."""
+        existing = self.get_automation_lane(target_param, target_plugin_id)
+        if existing is not None:
+            existing.visible = True
+            self.automation_expanded = True
+            return existing
+
+        lane = AutomationLane(
+            target_param=target_param,
+            target_scope=target_scope,
+            target_plugin_id=target_plugin_id,
+        )
+        if seed_initial_point:
+            if target_param == "volume":
+                init_val = self.volume
+            elif target_param == "pan":
+                init_val = self.pan
+            else:
+                init_val = get_automation_param_spec(target_param)["default_val"]
+            lane.add_point(0.0, init_val, curve_type="linear")
+        self.automation_lanes.append(lane)
+        self.automation_expanded = True
+        return lane
+
+    def remove_automation_lane(self, lane_id: str) -> bool:
+        before = len(self.automation_lanes)
+        self.automation_lanes = [l for l in self.automation_lanes if l.id != lane_id]
+        return len(self.automation_lanes) < before
 
     def add_plugin(self, plugin: Any, index: Optional[int] = None) -> Any:
         """Ajoute un plugin à la pile d'effets de la piste"""
@@ -375,6 +716,8 @@ class Track:
             "midi_channel": self.midi_channel,
             "synth_output_bus": self.synth_output_bus,
             "synth_route_track_id": self.synth_route_track_id,
+            "automation_expanded": bool(self.automation_expanded),
+            "automation_lanes": [l.to_dict() for l in self.automation_lanes],
             "clips": [c.to_dict() for c in self.clips],
         }
 
@@ -397,7 +740,11 @@ class Track:
             midi_channel=max(1, min(16, int(data.get("midi_channel", 1) or 1))),
             synth_output_bus=data.get("synth_output_bus"),
             synth_route_track_id=data.get("synth_route_track_id"),
+            automation_expanded=bool(data.get("automation_expanded", True)),
         )
+        t.automation_lanes = [
+            AutomationLane.from_dict(l) for l in data.get("automation_lanes", [])
+        ]
         t.clips = []
         for c in data.get("clips", []):
             if c.get("type") == "audio":
@@ -611,6 +958,10 @@ class Project:
         for p in getattr(dup, "plugins", []):
             if hasattr(p, "instance_id"):
                 p.instance_id = str(uuid.uuid4())[:8]
+        for lane in getattr(dup, "automation_lanes", []):
+            lane.id = str(uuid.uuid4())[:8]
+            for pt in lane.points:
+                pt.id = str(uuid.uuid4())[:8]
         self.tracks.insert(idx + 1, dup)
         return dup
 

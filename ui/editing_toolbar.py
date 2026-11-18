@@ -12,14 +12,14 @@ from PySide6.QtGui import QFont
 class EditingToolbar(QWidget):
     """
     Barre d'outils d'édition complète :
-    - Palette d'outils exclusifs : Pointeur [1], Ciseaux / Scission [2], Gomme [3]
+    - Palette d'outils exclusifs : Pointeur [1], Ciseaux / Scission [2], Gomme [3], Crayon [4]
     - Découpe instantanée : Scinder à la tête de lecture [Ctrl+B / S]
     - Presse-papier : Copier [Ctrl+C], Couper [Ctrl+X], Coller [Ctrl+V], Dupliquer [Ctrl+D], Supprimer [Suppr]
     - Grille BPM & Aimantage : Aimantage Snap (On/Off), Sélecteur de résolution (1 Mesure à 1/32, Off)
     - Zoom de l'arrangement : Dézoomer, Zoomer, Zoom 100%
     """
 
-    tool_changed = Signal(str)                   # "select", "split", "erase"
+    tool_changed = Signal(str)                   # "select", "split", "erase", "draw"
     split_playhead_requested = Signal()
     copy_requested = Signal()
     cut_requested = Signal()
@@ -148,11 +148,18 @@ class EditingToolbar(QWidget):
         layout.addWidget(self.btn_split)
 
         self.btn_erase = QPushButton("🗑️ Gomme (3)")
-        self.btn_erase.setToolTip("Outil Gomme [3] : Cliquer sur un bloc pour le supprimer instantanément")
+        self.btn_erase.setToolTip("Outil Gomme [3] : Cliquer sur un bloc ou un point d'automatisation pour le supprimer instantanément")
         self.btn_erase.setProperty("class", "tool_btn")
         self.btn_erase.setCheckable(True)
         self.tool_group.addButton(self.btn_erase)
         layout.addWidget(self.btn_erase)
+
+        self.btn_draw = QPushButton("✏️ Crayon (4)")
+        self.btn_draw.setToolTip("Outil Crayon [4 ou B] : Dessiner librement des courbes et points sur les pistes d'automatisation")
+        self.btn_draw.setProperty("class", "tool_btn")
+        self.btn_draw.setCheckable(True)
+        self.tool_group.addButton(self.btn_draw)
+        layout.addWidget(self.btn_draw)
 
         self.tool_group.buttonClicked.connect(self._on_tool_clicked)
 
@@ -262,6 +269,8 @@ class EditingToolbar(QWidget):
             self.tool_changed.emit("split")
         elif button == self.btn_erase:
             self.tool_changed.emit("erase")
+        elif button == self.btn_draw:
+            self.tool_changed.emit("draw")
 
     def _on_grid_combo_changed(self, index: int):
         val = float(self.combo_grid.currentData())
@@ -302,13 +311,15 @@ class EditingToolbar(QWidget):
         self.snap_toggled.emit(checked)
 
     def set_active_tool(self, tool_name: str):
-        """Définit l'outil actif programmatiquement ('select', 'split', 'erase')"""
+        """Définit l'outil actif programmatiquement ('select', 'split', 'erase', 'draw')"""
         if tool_name == "select":
             self.btn_select.setChecked(True)
         elif tool_name == "split":
             self.btn_split.setChecked(True)
         elif tool_name == "erase":
             self.btn_erase.setChecked(True)
+        elif tool_name == "draw":
+            self.btn_draw.setChecked(True)
         self.tool_changed.emit(tool_name)
 
     def set_grid_resolution(self, val_beats: float):

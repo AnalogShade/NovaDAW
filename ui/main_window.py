@@ -20,7 +20,7 @@ from core.audio_engine import AudioEngine
 from core.audio_importer import load_audio_file, QT_FILE_DIALOG_FILTER
 from core.hardware_manager import hardware_manager
 from ui.transport_bar import TransportBar
-from ui.track_header import TrackHeaderWidget
+from ui.track_header import TrackHeaderWidget, AutomationHeaderWidget
 from ui.timeline_view import TimelineRuler, TimelineGrid
 from ui.editing_toolbar import EditingToolbar
 from ui.piano_roll import PianoRoll
@@ -209,6 +209,11 @@ class MainWindow(QMainWindow):
         act_tool_erase.setShortcut("3")
         act_tool_erase.triggered.connect(lambda: self.editing_toolbar.set_active_tool("erase"))
         menu_edit.addAction(act_tool_erase)
+
+        act_tool_draw = QAction("✏️ Outil &Crayon (Automatisation)", self)
+        act_tool_draw.setShortcut("4")
+        act_tool_draw.triggered.connect(lambda: self.editing_toolbar.set_active_tool("draw"))
+        menu_edit.addAction(act_tool_draw)
 
         menu_edit.addSeparator()
 
@@ -678,6 +683,8 @@ class MainWindow(QMainWindow):
         self.timeline_grid.track_deleted.connect(self._on_track_deleted)
         self.timeline_grid.track_moved.connect(self._on_track_moved_step)
         self.timeline_grid.track_duplicated.connect(self._on_track_duplicated)
+        self.timeline_grid.automation_lane_height_changed.connect(self._on_automation_lane_height_changed)
+        self.timeline_grid.automation_modified.connect(self._on_automation_modified)
         self.timeline_grid.status_message.connect(self.statusBar().showMessage)
 
         # Connexions de la barre d'outils d'édition
@@ -987,7 +994,20 @@ class MainWindow(QMainWindow):
             header.track_reorder_finished.connect(self._on_track_reorder_finished)
             header.track_moved.connect(self._on_track_moved_step)
             header.track_duplicated.connect(self._on_track_duplicated)
+            header.automation_lane_requested.connect(self._on_automation_lane_requested)
+            header.automation_toggled.connect(self._on_automation_toggled)
             self.headers_layout.insertWidget(self.headers_layout.count() - 1, header)
+
+            if getattr(track, "automation_expanded", True):
+                for lane in getattr(track, "automation_lanes", []):
+                    if getattr(lane, "visible", True):
+                        auto_hdr = AutomationHeaderWidget(track, lane, parent=self.headers_container)
+                        auto_hdr.track_selected.connect(self._on_track_selected)
+                        auto_hdr.lane_modified.connect(self._on_automation_modified)
+                        auto_hdr.lane_deleted.connect(self._on_automation_lane_deleted)
+                        auto_hdr.lane_height_changed.connect(self._on_automation_lane_height_changed)
+                        auto_hdr.add_lane_requested.connect(self._on_automation_lane_requested)
+                        self.headers_layout.insertWidget(self.headers_layout.count() - 1, auto_hdr)
 
         # S'assurer que l'inspecteur et le panneau des en-têtes conservent une largeur confortable
         cur_sizes = self.arranger_splitter.sizes()
@@ -1464,12 +1484,35 @@ class MainWindow(QMainWindow):
         if not self.project.move_track(from_index, to_index):
             return False
 
-        # Réordonner le TrackHeaderWidget en place dans headers_layout sans deleteLater()
+        # Réordonner le bloc complet (TrackHeaderWidget + ses AutomationHeaderWidget enfants)
+        # sans détruire les widgets (compatible avec le glisser-déposer actif)
         header_count = self.headers_layout.count() - 1  # exclut le stretch final
-        if 0 <= from_index < header_count and 0 <= to_index < header_count:
-            item = self.headers_layout.takeAt(from_index)
-            if item and item.widget():
-                self.headers_layout.insertWidget(to_index, item.widget())
+        groups = []
+        current_group = []
+        current_tid = None
+        for i in range(header_count):
+            w = self.headers_layout.itemAt(i).widget()
+            if w is None:
+                continue
+            tid = getattr(getattr(w, "track", None), "id", None)
+            if isinstance(w, TrackHeaderWidget) or tid != current_tid:
+                if current_group:
+                    groups.append(current_group)
+                current_group = [w]
+                current_tid = tid
+            else:
+                current_group.append(w)
+        if current_group:
+            groups.append(current_group)
+
+        if 0 <= from_index < len(groups) and 0 <= to_index < len(groups):
+            moving_group = groups.pop(from_index)
+            groups.insert(to_index, moving_group)
+            for w in moving_group:
+                self.headers_layout.removeWidget(w)
+            insert_pos = sum(len(g) for g in groups[:to_index])
+            for offset, w in enumerate(moving_group):
+                self.headers_layout.insertWidget(insert_pos + offset, w)
             self.headers_layout.activate()
             self.headers_container.updateGeometry()
             self.headers_container.update()
@@ -1491,11 +1534,15 @@ class MainWindow(QMainWindow):
         return True
 
     def _get_tracks_vertical_bounds(self) -> list:
-        """Retourne [(track, top_y, height)] pour calculer les échanges lors du glisser-déposer."""
+        """Retourne [(track, top_y, total_group_height)] pour calculer les échanges lors du glisser-déposer."""
         bounds = []
         curr_y = 0
         for t in self.project.tracks:
             h = max(46, int(getattr(t, "height", 76)))
+            if getattr(t, "automation_expanded", True):
+                for lane in getattr(t, "automation_lanes", []):
+                    if getattr(lane, "visible", True):
+                        h += max(40, int(getattr(lane, "height", 56)))
             bounds.append((t, curr_y, h))
             curr_y += h
         return bounds
@@ -1599,8 +1646,72 @@ class MainWindow(QMainWindow):
 
     def _on_tool_changed(self, tool_name: str):
         self.timeline_grid.set_active_tool(tool_name)
-        tool_labels = {"select": "Pointeur (1)", "split": "Ciseaux / Scission (2)", "erase": "Gomme (3)"}
+        tool_labels = {
+            "select": "Pointeur (1)",
+            "split": "Ciseaux / Scission (2)",
+            "erase": "Gomme (3)",
+            "draw": "Crayon (4)",
+        }
         self.statusBar().showMessage(f"Outil actif : {tool_labels.get(tool_name, tool_name)}", 2500)
+
+    def _on_automation_lane_requested(self, track_id: str, target_param: str):
+        track = self.project.get_track(track_id)
+        if not track:
+            return
+        lane = track.add_automation_lane(target_param)
+        self.refresh_project_ui()
+        self.set_dirty(True)
+        self.statusBar().showMessage(
+            f"📈 Piste d'automatisation « {lane.name} » ajoutée sous « {track.name} ».", 3000
+        )
+
+    def _on_automation_toggled(self, track_id: str, expanded: bool):
+        track = self.project.get_track(track_id)
+        if not track:
+            return
+        track.automation_expanded = bool(expanded)
+        self.refresh_project_ui()
+        self.set_dirty(True)
+        state_lbl = "dépliées" if expanded else "repliées"
+        self.statusBar().showMessage(
+            f"📈 Pistes d'automatisation de « {track.name} » {state_lbl}.", 2000
+        )
+
+    def _on_automation_lane_deleted(self, track_id: str, lane_id: str):
+        track = self.project.get_track(track_id)
+        if not track:
+            return
+        if track.remove_automation_lane(lane_id):
+            self.refresh_project_ui()
+            self.set_dirty(True)
+            self.statusBar().showMessage(
+                f"🗑️ Piste d'automatisation supprimée de « {track.name} ».", 2500
+            )
+
+    def _on_automation_lane_height_changed(self, track_id: str, lane_id: str, height: int):
+        track = self.project.get_track(track_id)
+        if track:
+            lane = track.get_automation_lane_by_id(lane_id)
+            if lane:
+                lane.height = max(40, min(220, int(height)))
+        if hasattr(self, "headers_layout"):
+            for i in range(self.headers_layout.count() - 1):
+                w = self.headers_layout.itemAt(i).widget()
+                if isinstance(w, AutomationHeaderWidget) and w.lane.id == lane_id:
+                    w.set_lane_height(height)
+                    break
+        self.timeline_grid.update_dimensions()
+        self.timeline_grid.update()
+        self.set_dirty(True)
+
+    def _on_automation_modified(self):
+        beat = getattr(self.audio_engine, "current_beat", 0.0)
+        if hasattr(self, "headers_layout"):
+            for i in range(self.headers_layout.count() - 1):
+                w = self.headers_layout.itemAt(i).widget()
+                if isinstance(w, AutomationHeaderWidget):
+                    w.sync_at_beat(beat)
+        self.set_dirty(True)
 
     def _on_copy_clip(self):
         if self.piano_roll.note_grid.hasFocus():
@@ -1629,6 +1740,8 @@ class MainWindow(QMainWindow):
     def _on_delete_clip(self):
         if self.piano_roll.note_grid.hasFocus():
             self.piano_roll.note_grid.delete_selected()
+            return
+        if self.timeline_grid.delete_selected_automation_points():
             return
         self.timeline_grid.delete_selected_clip()
 
@@ -2156,6 +2269,29 @@ class MainWindow(QMainWindow):
             self.timeline_grid.set_playhead(beat)
             self.piano_roll.set_playhead(beat)
             self.transport_bar.update_position(beat, self.project.bpm)
+
+            # Collecte des points d'automatisation émis par des plugins (ex: futur Vocal Rider)
+            if hasattr(self.audio_engine, "drain_pending_automation_writes"):
+                writes = self.audio_engine.drain_pending_automation_writes()
+                if writes:
+                    wrote_any = False
+                    for tid, param, w_beat, w_val, w_plugin_id in writes:
+                        t_obj = self.project.get_track(tid)
+                        if not t_obj:
+                            continue
+                        lane = t_obj.get_automation_lane(param, w_plugin_id or None) or t_obj.get_automation_lane(param)
+                        if lane and lane.mode in ("write", "touch", "latch"):
+                            lane.add_point(w_beat, w_val, curve_type="linear", merge_tol=0.04)
+                            wrote_any = True
+                    if wrote_any:
+                        self.timeline_grid.update()
+                        self.set_dirty(True)
+
+            if hasattr(self, "headers_layout"):
+                for i in range(self.headers_layout.count() - 1):
+                    w = self.headers_layout.itemAt(i).widget()
+                    if isinstance(w, AutomationHeaderWidget):
+                        w.sync_at_beat(beat)
 
             # Défilement automatique pendant la lecture (Follow Playhead / Auto-scroll)
             if getattr(self, "autoscroll_enabled", True):

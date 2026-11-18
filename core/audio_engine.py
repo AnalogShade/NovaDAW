@@ -175,6 +175,11 @@ class AudioEngine:
         self._master_clip_time: float = 0.0
         self._master_peak_lock = threading.Lock()
 
+        # File d'attente thread-safe pour les écritures d'automatisation pilotées par plugins (ex: futur Vocal Rider)
+        self._automation_write_lock = threading.Lock()
+        self._pending_automation_writes: List[tuple[str, str, float, float, str]] = []
+        self._live_automation_values: Dict[str, Dict[str, float]] = {}
+
         # Tête de lecture et notification UI
         self.playhead_callback: Optional[Callable[[float], None]] = None
         self.caching_progress_callback: Optional[Callable[[int, int, str], None]] = None
@@ -1511,13 +1516,16 @@ class AudioEngine:
 
                 track_signal = self._render_track_slice(track, start_beat, end_beat, frames, bpm)
                 if track_signal is not None:
-                    # Application du volume et panoramique
-                    vol = track.volume
-                    pan = max(-1.0, min(1.0, track.pan))
-                    left_gain = vol * (1.0 - max(0.0, pan))
-                    right_gain = vol * (1.0 + min(0.0, pan))
+                    # Application du volume et panoramique (avec automatisation sample-accurate si active)
+                    left_gain, right_gain, eff_vol, eff_pan = self._compute_track_automation_gains(
+                        track, start_beat, end_beat, frames
+                    )
                     track_signal[:, 0] *= left_gain
                     track_signal[:, 1] *= right_gain
+                    self._live_automation_values[track.id] = {
+                        "volume": eff_vol,
+                        "pan": eff_pan,
+                    }
                     out += track_signal
 
                     if len(track_signal) > 0:
@@ -2443,29 +2451,136 @@ class AudioEngine:
 
         track_buf = self._process_vst_effects(track, track_buf)
 
-        # 4. Traitement de la pile de plugins modulaires de la piste (Égaliseur, Compresseur, etc.)
+        # 4. Traitement de la pile de plugins modulaires de la piste (Égaliseur, Compresseur, futur Vocal Rider...)
         if hasattr(track, "plugins") and track.plugins and track_buf is not None:
+            from plugins.base import AutomationProcessContext
+            ctx = AutomationProcessContext(
+                track_id=track.id,
+                start_beat=start_b,
+                end_beat=end_b,
+                bpm=bpm,
+                sample_rate=self.sample_rate,
+                is_playing=self.is_playing,
+                automation_sink=self._enqueue_plugin_automation_write,
+                read_automation=lambda param, beat: self._read_track_automation_value(track, param, beat),
+            )
             for plugin in track.plugins:
                 if track.track_type == "midi" and (plugin is native_inst or getattr(plugin, "is_instrument", False)):
                     continue
                 if getattr(plugin, "enabled", True):
                     try:
-                        track_buf = plugin.process(track_buf, self.sample_rate)
-                    except Exception as e:
+                        if hasattr(plugin, "process_with_context"):
+                            track_buf = plugin.process_with_context(track_buf, self.sample_rate, ctx)
+                        else:
+                            track_buf = plugin.process(track_buf, self.sample_rate)
+                    except Exception:
                         pass
 
         # 5. Envoi des niveaux de crête au plugin Mixeur pour les VU-mètres (post-fader)
         mixer_plugin = self._get_active_mixer_plugin()
         if mixer_plugin and track_buf is not None and len(track_buf) > 0:
-            vol = getattr(track, "volume", 1.0)
-            pan = max(-1.0, min(1.0, getattr(track, "pan", 0.0)))
-            gain_l = vol * (1.0 - max(0.0, pan))
-            gain_r = vol * (1.0 + min(0.0, pan))
-            pk_l = float(np.max(np.abs(track_buf[:, 0]))) * gain_l
-            pk_r = float(np.max(np.abs(track_buf[:, 1]))) * gain_r
+            left_gain, right_gain, _, _ = self._compute_track_automation_gains(track, start_b, end_b, frames)
+            if isinstance(left_gain, np.ndarray):
+                pk_l = float(np.max(np.abs(track_buf[:, 0] * left_gain)))
+                pk_r = float(np.max(np.abs(track_buf[:, 1] * right_gain)))
+            else:
+                pk_l = float(np.max(np.abs(track_buf[:, 0]))) * float(left_gain)
+                pk_r = float(np.max(np.abs(track_buf[:, 1]))) * float(right_gain)
             mixer_plugin.update_track_peak(track.id, pk_l, pk_r)
 
         return track_buf
+
+    def _enqueue_plugin_automation_write(
+        self,
+        track_id: str,
+        target_param: str,
+        beat: float,
+        value: float,
+        plugin_id: str = "",
+    ) -> None:
+        """Collecte sans blocage les points d'automatisation émis par un plugin DSP."""
+        with self._automation_write_lock:
+            if len(self._pending_automation_writes) < 4096:
+                self._pending_automation_writes.append(
+                    (track_id, target_param, float(beat), float(value), plugin_id)
+                )
+
+    def drain_pending_automation_writes(self) -> List[tuple[str, str, float, float, str]]:
+        """Vide et retourne les points d'automatisation émis par les plugins pour le thread UI."""
+        with self._automation_write_lock:
+            items = self._pending_automation_writes
+            self._pending_automation_writes = []
+            return items
+
+    def _read_track_automation_value(self, track: Track, target_param: str, beat: float) -> Optional[float]:
+        """Lit la valeur automatisée d'un paramètre pour un plugin consultant le contexte."""
+        lane = track.get_automation_lane(target_param) if hasattr(track, "get_automation_lane") else None
+        if lane and lane.enabled and lane.points:
+            return lane.evaluate(beat)
+        if target_param == "volume":
+            return float(track.volume)
+        if target_param == "pan":
+            return float(track.pan)
+        return None
+
+    def _compute_track_automation_gains(
+        self,
+        track: Track,
+        start_beat: float,
+        end_beat: float,
+        frames: int,
+    ) -> tuple[Any, Any, float, float]:
+        """
+        Calcule les gains gauche/droite (scalaires ou vecteurs NumPy par échantillon)
+        en tenant compte des pistes d'automatisation Volume et Panoramique actives.
+        """
+        lanes = getattr(track, "automation_lanes", None) or []
+        vol_lane = None
+        pan_lane = None
+        for lane in lanes:
+            if not getattr(lane, "enabled", True) or not getattr(lane, "points", None):
+                continue
+            if getattr(lane, "target_scope", "track") != "track":
+                continue
+            if lane.target_param == "volume" and vol_lane is None:
+                vol_lane = lane
+            elif lane.target_param == "pan" and pan_lane is None:
+                pan_lane = lane
+
+        if vol_lane is None and pan_lane is None:
+            vol = float(getattr(track, "volume", 1.0))
+            pan = max(-1.0, min(1.0, float(getattr(track, "pan", 0.0))))
+            return vol * (1.0 - max(0.0, pan)), vol * (1.0 + min(0.0, pan)), vol, pan
+
+        if vol_lane is not None:
+            vol_arr = np.clip(
+                vol_lane.evaluate_range(start_beat, end_beat, frames, fallback_value=track.volume),
+                0.0,
+                1.5,
+            )
+            eff_vol = float(vol_arr[-1]) if len(vol_arr) > 0 else float(track.volume)
+        else:
+            vol_arr = float(getattr(track, "volume", 1.0))
+            eff_vol = vol_arr
+
+        if pan_lane is not None:
+            pan_arr = np.clip(
+                pan_lane.evaluate_range(start_beat, end_beat, frames, fallback_value=track.pan),
+                -1.0,
+                1.0,
+            )
+            eff_pan = float(pan_arr[-1]) if len(pan_arr) > 0 else float(track.pan)
+        else:
+            pan_arr = max(-1.0, min(1.0, float(getattr(track, "pan", 0.0))))
+            eff_pan = pan_arr
+
+        left_gain = vol_arr * (1.0 - np.maximum(0.0, pan_arr))
+        right_gain = vol_arr * (1.0 + np.minimum(0.0, pan_arr))
+        return left_gain, right_gain, eff_vol, eff_pan
+
+    def get_track_live_automation_values(self, track_id: str) -> Optional[Dict[str, float]]:
+        """Retourne les dernières valeurs Volume/Pan évaluées pendant la lecture."""
+        return self._live_automation_values.get(track_id)
 
     def export_wav(self, file_path: str, end_bar: int = 8) -> bool:
         """Render from fresh native DSP state, never from the live playback cache."""
@@ -2531,10 +2646,9 @@ class AudioEngine:
                     continue
                 sig = self._render_track_slice(track, start_b, end_b, frames, bpm)
                 if sig is not None:
-                    vol = track.volume
-                    pan = max(-1.0, min(1.0, track.pan))
-                    sig[:, 0] *= vol * (1.0 - max(0.0, pan))
-                    sig[:, 1] *= vol * (1.0 + min(0.0, pan))
+                    left_gain, right_gain, _, _ = self._compute_track_automation_gains(track, start_b, end_b, frames)
+                    sig[:, 0] *= left_gain
+                    sig[:, 1] *= right_gain
                     out_chunk += sig
 
             # Traitement Master sur le mixage global

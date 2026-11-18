@@ -1,6 +1,7 @@
 """
 ui/track_header.py - En-tête de piste individuel (Mute, Solo, Arm, Volume, Pan, Couleur)
 """
+import os
 from typing import Optional
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
@@ -8,7 +9,10 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, QEvent, QRectF
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush
-from core.project import Track
+from core.project import (
+    Track, AutomationLane, AUTOMATION_PARAM_SPECS,
+    get_automation_param_spec, format_automation_value
+)
 from core.plugin_manager import global_plugin_manager
 from ui.glow_effects import set_button_glow
 
@@ -166,6 +170,8 @@ class TrackHeaderWidget(QFrame):
     track_reorder_finished = Signal(str)      # track_id
     track_moved = Signal(str, int)            # (track_id, delta: -1 or +1)
     track_duplicated = Signal(str)            # track_id
+    automation_lane_requested = Signal(str, str)  # (track_id, target_param)
+    automation_toggled = Signal(str, bool)        # (track_id, expanded)
 
     RESIZE_MARGIN = 6
 
@@ -275,6 +281,20 @@ class TrackHeaderWidget(QFrame):
         self.btn_rec.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.btn_rec.toggled.connect(self._on_rec_toggled)
         row1.addWidget(self.btn_rec)
+
+        # Bouton Automatisation (▾ / +) : ajoute ou déplie les sous-pistes d'automatisation
+        self.btn_automation = QPushButton("▾")
+        self.btn_automation.setObjectName("btn_track_automation")
+        self.btn_automation.setFixedSize(20, 20)
+        self.btn_automation.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.btn_automation.setCursor(Qt.PointingHandCursor)
+        self.btn_automation.clicked.connect(self._on_automation_button_clicked)
+        self.btn_automation.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.btn_automation.customContextMenuRequested.connect(
+            lambda pos: self._show_automation_menu(self.btn_automation.mapToGlobal(pos))
+        )
+        row1.addWidget(self.btn_automation)
+        self._update_automation_button_state()
 
         # Bouton Supprimer
         self.btn_delete = QPushButton("✕")
@@ -440,7 +460,7 @@ class TrackHeaderWidget(QFrame):
         # Sélectionner automatiquement la piste dès que l'utilisateur clique sur l'un de ses contrôles enfants
         watched_children = [
             self.lbl_icon, self.txt_name, self.btn_mute, self.btn_solo, self.btn_rec,
-            self.slider_vol, self.txt_vol, self.slider_pan, self.txt_pan
+            self.btn_automation, self.slider_vol, self.txt_vol, self.slider_pan, self.txt_pan
         ]
         if hasattr(self, "combo_plugin"):
             watched_children.append(self.combo_plugin)
@@ -595,6 +615,9 @@ class TrackHeaderWidget(QFrame):
         act_dup = menu.addAction(f"📑 Dupliquer la piste « {self.track.name} »")
         act_dup.triggered.connect(lambda: self.track_duplicated.emit(self.track.id))
 
+        auto_sub = menu.addMenu("📈 Automatisation")
+        self._populate_automation_menu(auto_sub)
+
         menu.addSeparator()
 
         proj = self.project
@@ -647,6 +670,122 @@ class TrackHeaderWidget(QFrame):
         self.is_selected = selected
         self.update_style()
 
+    def _update_automation_button_state(self):
+        if not hasattr(self, "btn_automation"):
+            return
+        lanes = getattr(self.track, "automation_lanes", []) or []
+        expanded = bool(getattr(self.track, "automation_expanded", True))
+        if not lanes:
+            self.btn_automation.setText("+")
+            self.btn_automation.setToolTip(
+                "Ajouter une piste d'automatisation (Volume, Panoramique)"
+            )
+            bg = "#1e2230" if self.is_selected else "transparent"
+            col = "#38bdf8" if self.is_selected else "#94a3b8"
+            border = "#334155" if self.is_selected else "#2a2f40"
+        elif expanded:
+            self.btn_automation.setText("▾")
+            self.btn_automation.setToolTip(
+                f"Replier les pistes d'automatisation ({len(lanes)}) • Clic droit : Ajouter..."
+            )
+            bg = "#0c4a6e"
+            col = "#38bdf8"
+            border = "#0284c7"
+        else:
+            self.btn_automation.setText("▸")
+            self.btn_automation.setToolTip(
+                f"Déplier les pistes d'automatisation ({len(lanes)}) • Clic droit : Ajouter..."
+            )
+            bg = "#1e293b"
+            col = "#a855f7"
+            border = "#7c3aed"
+
+        self.btn_automation.setStyleSheet(f"""
+            QPushButton#btn_track_automation {{
+                background-color: {bg};
+                color: {col};
+                border: 1px solid {border};
+                border-radius: 3px;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 0px;
+            }}
+            QPushButton#btn_track_automation:hover {{
+                background-color: #0284c7;
+                color: #ffffff;
+                border-color: #38bdf8;
+            }}
+        """)
+
+    def _populate_automation_menu(self, menu: QMenu):
+        lanes = getattr(self.track, "automation_lanes", []) or []
+        existing_params = {l.target_param for l in lanes}
+
+        for param_key in ("volume", "pan"):
+            spec = get_automation_param_spec(param_key)
+            prefix = "✓ " if param_key in existing_params else "➕ "
+            act = menu.addAction(f"{prefix}{spec['icon']} {spec['label']}")
+            act.triggered.connect(
+                lambda _, p=param_key: self.automation_lane_requested.emit(self.track.id, p)
+            )
+
+        if lanes:
+            menu.addSeparator()
+            expanded = bool(getattr(self.track, "automation_expanded", True))
+            lbl_toggle = "🔼 Replier les pistes d'automatisation" if expanded else "🔽 Déplier les pistes d'automatisation"
+            act_toggle = menu.addAction(lbl_toggle)
+            act_toggle.triggered.connect(
+                lambda: self.automation_toggled.emit(self.track.id, not expanded)
+            )
+
+    def _show_automation_menu(self, global_pos):
+        self.track_selected.emit(self.track.id)
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #181b26;
+                color: #f1f5f9;
+                border: 1px solid #38bdf8;
+                border-radius: 4px;
+                padding: 4px;
+                font-size: 11px;
+            }
+            QMenu::item {
+                padding: 5px 16px 5px 10px;
+                border-radius: 3px;
+            }
+            QMenu::item:selected {
+                background-color: #0284c7;
+                color: #ffffff;
+                font-weight: bold;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #2b3042;
+                margin: 4px 6px;
+            }
+        """)
+        header_act = menu.addAction(f"📈 Automatisation — {self.track.name}")
+        header_act.setEnabled(False)
+        menu.addSeparator()
+        self._populate_automation_menu(menu)
+        self._last_automation_menu = menu
+        menu.exec(global_pos)
+
+    def _on_automation_button_clicked(self):
+        self.track_selected.emit(self.track.id)
+        lanes = getattr(self.track, "automation_lanes", []) or []
+        if not lanes:
+            # Aucune sous-piste existante : ouvrir le menu de sélection (Volume, Panoramique)
+            global_pos = self.btn_automation.mapToGlobal(self.btn_automation.rect().bottomLeft())
+            self._show_automation_menu(global_pos)
+        else:
+            # Déjà au moins une sous-piste : basculer l'affichage comme un menu déroulant de pistes
+            new_expanded = not bool(getattr(self.track, "automation_expanded", True))
+            self.track.automation_expanded = new_expanded
+            self._update_automation_button_state()
+            self.automation_toggled.emit(self.track.id, new_expanded)
+
     def update_style(self):
         if self._reordering_track:
             border_color = "#38bdf8"
@@ -677,6 +816,7 @@ class TrackHeaderWidget(QFrame):
             )
         if hasattr(self, "color_bar"):
             self.color_bar.update()
+        self._update_automation_button_state()
 
     def _on_name_changed(self):
         new_name = self.txt_name.text().strip()
@@ -758,6 +898,7 @@ class TrackHeaderWidget(QFrame):
             self.btn_delete.setToolTip(f"Supprimer la piste « {self.track.name} »")
         if hasattr(self, "color_bar"):
             self.color_bar.update()
+        self._update_automation_button_state()
         self._populate_plugin_combo()
 
     @staticmethod
@@ -1038,3 +1179,296 @@ class TrackHeaderWidget(QFrame):
             act.triggered.connect(lambda _, p=fx_path: (self.select_requested.emit(self.track.id), open_plugin_editor_gui(p, self, f"track:{self.track.id}:effect:{p}", track=self.track)))
 
         menu.exec(self.btn_edit_plugin.mapToGlobal(pos))
+
+
+class AutomationHeaderWidget(QFrame):
+    """
+    En-tête compact d'une sous-piste d'automatisation (Volume, Panoramique, futur Vocal Rider).
+    Visuellement indenté et rattaché à sa piste parente.
+    """
+    track_selected = Signal(str)                     # track_id
+    lane_modified = Signal()
+    lane_deleted = Signal(str, str)                  # (track_id, lane_id)
+    lane_height_changed = Signal(str, str, int)      # (track_id, lane_id, height)
+    add_lane_requested = Signal(str, str)            # (track_id, target_param)
+
+    RESIZE_MARGIN = 5
+
+    def __init__(self, track: Track, lane: AutomationLane, parent=None):
+        super().__init__(parent)
+        self.track = track
+        self.lane = lane
+        self._resizing_height = False
+        self._drag_start_y = 0
+        self._drag_start_h = lane.height
+        self.setFixedHeight(max(40, min(220, int(lane.height))))
+        self.setMinimumWidth(250)
+        self.setObjectName("automation_header")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setMouseTracking(True)
+
+        self._init_ui()
+        self._update_styles()
+
+    def _init_ui(self):
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 4, 0)
+        outer.setSpacing(4)
+
+        # Bande d'attache hiérarchique reprenant la couleur de la piste parente (atténuée)
+        self.parent_bar = QFrame()
+        self.parent_bar.setFixedWidth(8)
+        track_col = QColor(getattr(self.track, "color", "#38bdf8") or "#38bdf8")
+        self.parent_bar.setStyleSheet(
+            f"background-color: rgba({track_col.red()}, {track_col.green()}, {track_col.blue()}, 110);"
+        )
+        outer.addWidget(self.parent_bar)
+
+        # Retrait visuel + barre colorée du paramètre automatisé
+        indent = QLabel("└")
+        indent.setFixedWidth(12)
+        indent.setAlignment(Qt.AlignCenter)
+        indent.setStyleSheet("color: #64748b; font-size: 11px; font-weight: bold;")
+        outer.addWidget(indent)
+
+        content = QVBoxLayout()
+        content.setContentsMargins(0, 3, 2, 3)
+        content.setSpacing(2)
+
+        row1 = QHBoxLayout()
+        row1.setSpacing(4)
+
+        spec = get_automation_param_spec(self.lane.target_param)
+        lane_col = self.lane.color or spec["color"]
+
+        self.lbl_title = QLabel(f"{spec['icon']} {self.lane.name}")
+        self.lbl_title.setStyleSheet(f"color: {lane_col}; font-weight: bold; font-size: 10px;")
+        row1.addWidget(self.lbl_title, stretch=1)
+
+        # Lecture en direct de la valeur à la tête de lecture
+        init_val = self.lane.evaluate(0.0, fallback_value=self._fallback_value())
+        self.lbl_value = QLabel(format_automation_value(self.lane.target_param, init_val))
+        self.lbl_value.setFixedWidth(38)
+        self.lbl_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lbl_value.setStyleSheet("color: #e2e8f0; font-family: Consolas; font-size: 9px; font-weight: bold;")
+        row1.addWidget(self.lbl_value)
+
+        # Bouton On/Off (bypass de l'automatisation)
+        self.btn_enable = QPushButton("On")
+        self.btn_enable.setCheckable(True)
+        self.btn_enable.setChecked(self.lane.enabled)
+        self.btn_enable.setFixedSize(24, 18)
+        self.btn_enable.setCursor(Qt.PointingHandCursor)
+        self.btn_enable.setToolTip("Activer / contourner cette courbe d'automatisation")
+        self.btn_enable.toggled.connect(self._on_enable_toggled)
+        row1.addWidget(self.btn_enable)
+
+        # Bouton Mode (R = Lecture / W = Écriture plugin, préparé pour Vocal Rider)
+        self.btn_mode = QPushButton(self.lane.mode[0].upper())
+        self.btn_mode.setFixedSize(20, 18)
+        self.btn_mode.setCursor(Qt.PointingHandCursor)
+        self.btn_mode.setToolTip("Mode d'automatisation : R = Lecture (Read) / W = Écriture par plugin (Write)")
+        self.btn_mode.clicked.connect(self._cycle_mode)
+        row1.addWidget(self.btn_mode)
+
+        # Bouton + pour ajouter une autre sous-piste d'automatisation sur la même piste
+        self.btn_add = QPushButton("+")
+        self.btn_add.setFixedSize(18, 18)
+        self.btn_add.setCursor(Qt.PointingHandCursor)
+        self.btn_add.setToolTip("Ajouter une autre piste d'automatisation (Volume, Panoramique)")
+        self.btn_add.setStyleSheet("""
+            QPushButton {
+                background-color: #1e2230;
+                color: #94a3b8;
+                border: 1px solid #2e3448;
+                border-radius: 3px;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: #0284c7;
+                color: #ffffff;
+                border-color: #38bdf8;
+            }
+        """)
+        self.btn_add.clicked.connect(self._show_add_menu)
+        row1.addWidget(self.btn_add)
+
+        # Bouton Supprimer la sous-piste
+        self.btn_delete = QPushButton("✕")
+        self.btn_delete.setFixedSize(18, 18)
+        self.btn_delete.setCursor(Qt.PointingHandCursor)
+        self.btn_delete.setToolTip(f"Supprimer la piste d'automatisation « {self.lane.name} »")
+        self.btn_delete.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #64748b;
+                border: none;
+                border-radius: 3px;
+                font-size: 10px;
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: #ef4444;
+                color: #ffffff;
+            }
+        """)
+        self.btn_delete.clicked.connect(lambda: self.lane_deleted.emit(self.track.id, self.lane.id))
+        row1.addWidget(self.btn_delete)
+
+        content.addLayout(row1)
+
+        # Ligne 2 info discrète (nb de points / plage)
+        self.lbl_info = QLabel(self._format_info())
+        self.lbl_info.setStyleSheet("color: #64748b; font-size: 9px;")
+        content.addWidget(self.lbl_info)
+
+        outer.addLayout(content)
+
+    def _fallback_value(self) -> float:
+        if self.lane.target_param == "volume":
+            return float(self.track.volume)
+        if self.lane.target_param == "pan":
+            return float(self.track.pan)
+        return float(get_automation_param_spec(self.lane.target_param)["default_val"])
+
+    def _format_info(self) -> str:
+        n = len(self.lane.points)
+        pts_txt = f"{n} point{'s' if n > 1 else ''}" if n > 0 else "Aucun point"
+        if self.lane.target_param == "pan":
+            return f"L ← C → R  •  {pts_txt}"
+        return f"0% – 150%  •  {pts_txt}"
+
+    def _update_styles(self):
+        spec = get_automation_param_spec(self.lane.target_param)
+        lane_col = self.lane.color or spec["color"]
+        self.setStyleSheet("""
+            QFrame#automation_header {
+                background-color: #13151d;
+                border-top: 1px solid #1f2330;
+                border-bottom: 1px solid #262b3b;
+                border-right: 1px solid #252834;
+                border-left: 2px solid #282a36;
+            }
+        """)
+        if self.lane.enabled:
+            self.btn_enable.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #064e3b;
+                    color: #34d399;
+                    border: 1px solid #10b981;
+                    border-radius: 3px;
+                    font-size: 9px;
+                    font-weight: bold;
+                    padding: 0px;
+                }}
+            """)
+        else:
+            self.btn_enable.setStyleSheet("""
+                QPushButton {
+                    background-color: #1e2230;
+                    color: #64748b;
+                    border: 1px solid #2f354a;
+                    border-radius: 3px;
+                    font-size: 9px;
+                    font-weight: bold;
+                    padding: 0px;
+                }
+            """)
+
+        is_write = self.lane.mode in ("write", "touch", "latch")
+        mode_bg = "#7f1d1d" if is_write else "#1e2230"
+        mode_fg = "#fca5a5" if is_write else lane_col
+        mode_bd = "#ef4444" if is_write else "#2f354a"
+        self.btn_mode.setText("W" if is_write else "R")
+        self.btn_mode.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {mode_bg};
+                color: {mode_fg};
+                border: 1px solid {mode_bd};
+                border-radius: 3px;
+                font-size: 9px;
+                font-weight: bold;
+                padding: 0px;
+            }}
+        """)
+
+    def _on_enable_toggled(self, checked: bool):
+        self.lane.enabled = bool(checked)
+        self._update_styles()
+        self.lane_modified.emit()
+
+    def _cycle_mode(self):
+        self.lane.mode = "write" if self.lane.mode == "read" else "read"
+        self._update_styles()
+        self.lane_modified.emit()
+
+    def _show_add_menu(self):
+        self.track_selected.emit(self.track.id)
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #181b26;
+                color: #f1f5f9;
+                border: 1px solid #38bdf8;
+                border-radius: 4px;
+                padding: 4px;
+                font-size: 11px;
+            }
+            QMenu::item { padding: 5px 14px; border-radius: 3px; }
+            QMenu::item:selected { background-color: #0284c7; color: #ffffff; }
+        """)
+        existing = {l.target_param for l in getattr(self.track, "automation_lanes", [])}
+        for key in ("volume", "pan"):
+            spec = get_automation_param_spec(key)
+            prefix = "✓ " if key in existing else "➕ "
+            act = menu.addAction(f"{prefix}{spec['icon']} {spec['label']}")
+            act.triggered.connect(lambda _, p=key: self.add_lane_requested.emit(self.track.id, p))
+        menu.exec(self.btn_add.mapToGlobal(self.btn_add.rect().bottomLeft()))
+
+    def sync_at_beat(self, beat: float):
+        val = self.lane.evaluate(beat, fallback_value=self._fallback_value())
+        self.lbl_value.setText(format_automation_value(self.lane.target_param, val))
+        self.lbl_info.setText(self._format_info())
+
+    def set_lane_height(self, h: int):
+        h = max(40, min(220, int(h)))
+        self.lane.height = h
+        self.setFixedHeight(h)
+
+    def mousePressEvent(self, event):
+        self.track_selected.emit(self.track.id)
+        if event.button() == Qt.LeftButton and event.position().y() >= self.height() - self.RESIZE_MARGIN:
+            self._resizing_height = True
+            self._drag_start_y = event.globalPosition().y()
+            self._drag_start_h = self.height()
+            self.grabMouse()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._resizing_height:
+            dy = int(event.globalPosition().y() - self._drag_start_y)
+            new_h = max(40, min(220, self._drag_start_h + dy))
+            self.set_lane_height(new_h)
+            self.lane_height_changed.emit(self.track.id, self.lane.id, new_h)
+            event.accept()
+            return
+        if event.position().y() >= self.height() - self.RESIZE_MARGIN:
+            self.setCursor(Qt.SizeVerCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._resizing_height:
+            self._resizing_height = False
+            self.releaseMouse()
+            self.unsetCursor()
+            self.lane_height_changed.emit(self.track.id, self.lane.id, self.height())
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)

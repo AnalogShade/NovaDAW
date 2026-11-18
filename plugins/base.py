@@ -9,8 +9,44 @@ Définit l'interface commune que tout plugin (interne ou externe) doit implémen
 """
 import uuid
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from dataclasses import dataclass, field
+from typing import Dict, Any, Optional, List, Callable
 import numpy as np
+
+
+@dataclass
+class AutomationProcessContext:
+    """
+    Contexte temporel et d'automatisation transmis aux plugins lors du traitement audio.
+    Permet à un plugin (ex: futur Vocal Rider) de lire ou écrire des points d'automatisation
+    sur sa piste hôte sans dépendre de l'interface graphique.
+    """
+    track_id: str
+    start_beat: float
+    end_beat: float
+    bpm: float
+    sample_rate: int
+    is_playing: bool = False
+    automation_sink: Optional[Callable[[str, str, float, float, str], None]] = None
+    read_automation: Optional[Callable[[str, float], Optional[float]]] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def emit_automation(
+        self,
+        target_param: str,
+        beat: float,
+        value: float,
+        plugin_id: Optional[str] = None,
+    ) -> None:
+        """Émet un point d'automatisation vers le collecteur du moteur audio."""
+        if self.automation_sink is not None:
+            self.automation_sink(
+                self.track_id,
+                target_param,
+                float(beat),
+                float(value),
+                plugin_id or "",
+            )
 
 
 class BasePlugin(ABC):
@@ -35,6 +71,8 @@ class BasePlugin(ABC):
         self.icon: str = icon
         self.enabled: bool = True
         self.description: str = ""
+        self.supports_automation_write: bool = False
+        self.automatable_outputs: List[str] = []
 
     @abstractmethod
     def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -45,6 +83,18 @@ class BasePlugin(ABC):
         Retourne: ndarray (N, 2) en float32
         """
         pass
+
+    def process_with_context(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
+        context: Optional[AutomationProcessContext] = None,
+    ) -> np.ndarray:
+        """
+        Point d'entrée étendu avec contexte temporel et bus d'automatisation.
+        Par défaut, délègue à `process(audio, sample_rate)` pour préserver la compatibilité.
+        """
+        return self.process(audio, sample_rate)
 
     @abstractmethod
     def get_state(self) -> Dict[str, Any]:
