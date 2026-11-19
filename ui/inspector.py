@@ -561,6 +561,22 @@ class TrackInspector(QFrame):
                 "Échantillonneur de batterie FP32 avec réverbération stéréo intégrée."
             )
             self.lbl_inst_status.setVisible(True)
+        elif plugin_path == "novadaw.guitar":
+            self.lbl_inst_status.setStyleSheet("""
+                QLabel {
+                    background-color: #24190d;
+                    color: #fbbf24;
+                    border: 1px solid #d97706;
+                    border-radius: 4px;
+                    padding: 6px;
+                    font-size: 11px;
+                }
+            """)
+            self.lbl_inst_status.setText(
+                "🎸 <b>Nova Guitar Actif</b><br>"
+                "Guitare à modélisation physique Digital Waveguide (Acoustique & Électrique DI)."
+            )
+            self.lbl_inst_status.setVisible(True)
         else:
             self.lbl_inst_status.setText(
                 "Instrument du projet. Ouvrez son interface pour choisir un son ou une banque. "
@@ -584,21 +600,25 @@ class TrackInspector(QFrame):
         # Option 3 : Nova Drums VSTi
         self.combo_instrument.addItem("🥁 Nova Drums VSTi (Batterie IA)", userData="novadaw.drum_machine")
 
+        # Option 4 : Nova Guitar
+        self.combo_instrument.addItem("🎸 Nova Guitar (Modélisation Physique)", userData="novadaw.guitar")
+
         def format_inst_label(name: str) -> str:
             return f"🎹 {name}"
 
-        # Option 4 : Instruments du Rack du projet
+        # Option 5 : Instruments du Rack du projet
+        native_inst_ids = ("novadaw.drum_machine", "novadaw.synth", "novadaw.guitar")
         rack_insts = [p for p in self.project.plugin_rack if p.get("plugin_type") == "instrument"]
         if rack_insts:
             for r in rack_insts:
-                if r.get("file_path") not in ("novadaw.drum_machine", "novadaw.synth"):
+                if r.get("file_path") not in native_inst_ids:
                     self.combo_instrument.addItem(format_inst_label(r['name']) + " (Rack)", userData=r["file_path"])
 
-        # Option 5 : Tous les instruments compatibles scannés
+        # Option 6 : Tous les instruments compatibles scannés
         all_insts = global_plugin_manager.get_compatible_instruments()
         for inst in all_insts:
             # Éviter doublons déjà dans le rack
-            if not any(r.get("file_path") == inst.file_path for r in rack_insts) and inst.file_path not in ("novadaw.drum_machine", "novadaw.synth"):
+            if not any(r.get("file_path") == inst.file_path for r in rack_insts) and inst.file_path not in native_inst_ids:
                 self.combo_instrument.addItem(format_inst_label(inst.name), userData=inst.file_path)
 
         # Option 6 : Charger manuellement un .vst3 ou .dll
@@ -663,40 +683,29 @@ class TrackInspector(QFrame):
         if data != self.current_track.plugin_path:
             self.current_track.plugins = [p for p in self.current_track.plugins
                                           if not getattr(p, "is_instrument", False)]
-        if data == "novadaw.synth":
-            self.current_track.plugin_path = "novadaw.synth"
-            self.current_track.plugin_name = "NovaSynth"
-            # S'assurer que le plugin est dans track.plugins
-            has_synth = any(getattr(p, "plugin_type_id", None) == "novadaw.synth" for p in self.current_track.plugins)
-            if not has_synth:
+        native_names = {
+            "novadaw.synth": "NovaSynth",
+            "novadaw.drum_machine": "Nova Drums VSTi",
+            "novadaw.guitar": "Nova Guitar",
+        }
+        if data in native_names:
+            self.current_track.plugin_path = data
+            self.current_track.plugin_name = native_names[data]
+            has_native = any(getattr(p, "plugin_type_id", None) == data for p in self.current_track.plugins)
+            if not has_native:
                 ensure_plugins_loaded()
-                sp = plugin_registry.create_plugin("novadaw.synth")
-                if sp:
+                np_inst = plugin_registry.create_plugin(data)
+                if np_inst:
                     template = self.project.get_rack_native_plugin(data)
                     if template:
-                        sp.set_state(template.get_state())
-                    self.current_track.plugins.insert(0, sp)
-            self.btn_edit_instrument.setEnabled(True)
-            self._rebuild_plugin_stack()
-        elif data == "novadaw.drum_machine":
-            self.current_track.plugin_path = "novadaw.drum_machine"
-            self.current_track.plugin_name = "Nova Drums VSTi"
-            # S'assurer que le plugin est dans track.plugins
-            has_drums = any(getattr(p, "plugin_type_id", None) == "novadaw.drum_machine" for p in self.current_track.plugins)
-            if not has_drums:
-                ensure_plugins_loaded()
-                dp = plugin_registry.create_plugin("novadaw.drum_machine")
-                if dp:
-                    template = self.project.get_rack_native_plugin(data)
-                    if template:
-                        dp.set_state(template.get_state())
-                    self.current_track.plugins.insert(0, dp)
+                        np_inst.set_state(template.get_state())
+                    self.current_track.plugins.insert(0, np_inst)
             self.btn_edit_instrument.setEnabled(True)
             self._rebuild_plugin_stack()
         elif data:
             self.current_track.plugin_path = data
             raw_text = self.combo_instrument.currentText()
-            cleaned = raw_text.replace("🎹 ", "").replace("⚡ ", "").replace("🥁 ", "").replace(" (Rack)", "")
+            cleaned = raw_text.replace("🎹 ", "").replace("⚡ ", "").replace("🥁 ", "").replace("🎸 ", "").replace(" (Rack)", "")
             for badge in [" (Sampler Multi-bus) ⚠️", " (VST3 Direct) ✅"]:
                 cleaned = cleaned.replace(badge, "")
             self.current_track.plugin_name = cleaned.strip()
@@ -717,7 +726,7 @@ class TrackInspector(QFrame):
         """Met à jour l'apparence des boutons d'édition selon si la fenêtre est ouverte ou fermée"""
         if self.current_track and self.current_track.track_type == "midi":
             is_open = False
-            if self.current_track.plugin_path in ("novadaw.synth", "novadaw.drum_machine"):
+            if self.current_track.plugin_path in ("novadaw.synth", "novadaw.drum_machine", "novadaw.guitar"):
                 for p in self.current_track.plugins:
                     if getattr(p, "plugin_type_id", None) == self.current_track.plugin_path:
                         is_open = is_native_plugin_editor_open(p)
@@ -758,7 +767,7 @@ class TrackInspector(QFrame):
     def _on_open_instrument_editor(self):
         if not self.current_track:
             return
-        if self.current_track.plugin_path in ("novadaw.drum_machine", "novadaw.synth"):
+        if self.current_track.plugin_path in ("novadaw.drum_machine", "novadaw.synth", "novadaw.guitar"):
             native_id = self.current_track.plugin_path
             native_plugin = None
             for p in self.current_track.plugins:
@@ -811,6 +820,12 @@ class TrackInspector(QFrame):
 
             act_drums = menu.addAction("🥁 Nova Drums (Instrument VSTi Batterie)")
             act_drums.triggered.connect(self._add_drum_plugin)
+
+            act_guitar = menu.addAction("🎸 Nova Guitar (Guitare Physique)")
+            act_guitar.triggered.connect(self._add_guitar_plugin)
+
+        act_amp = menu.addAction("🔊 Nova Guitar Amp (Ampli Guitare)")
+        act_amp.triggered.connect(self._add_guitar_amp_plugin)
 
         act_eq = menu.addAction("📊 Égaliseur Paramétrique (3/10/12/24 bandes)")
         act_eq.triggered.connect(self._add_equalizer_plugin)
@@ -868,6 +883,34 @@ class TrackInspector(QFrame):
             self._rebuild_plugin_stack()
             self.track_modified.emit()
             open_native_plugin_editor(drums, self, track=self.current_track)
+
+    def _add_guitar_plugin(self):
+        if not self.current_track:
+            return
+        ensure_plugins_loaded()
+        guitar = plugin_registry.create_plugin("novadaw.guitar")
+        if guitar:
+            self.current_track.add_plugin(guitar)
+            self.project.add_rack_plugin("novadaw.guitar", "Nova Guitar", "instrument")
+            if self.current_track.track_type == "midi":
+                self.current_track.plugin_path = "novadaw.guitar"
+                self.current_track.plugin_name = "Nova Guitar"
+                self._populate_instrument_combo()
+            self._rebuild_plugin_stack()
+            self.track_modified.emit()
+            open_native_plugin_editor(guitar, self, track=self.current_track)
+
+    def _add_guitar_amp_plugin(self):
+        if not self.current_track:
+            return
+        ensure_plugins_loaded()
+        amp = plugin_registry.create_plugin("novadaw.guitar_amp")
+        if amp:
+            self.current_track.add_plugin(amp)
+            self.project.add_rack_plugin("novadaw.guitar_amp", "Nova Guitar Amp", "effect")
+            self._rebuild_plugin_stack()
+            self.track_modified.emit()
+            open_native_plugin_editor(amp, self, track=self.current_track)
 
     def _add_equalizer_plugin(self):
         if not self.current_track:

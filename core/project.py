@@ -873,6 +873,7 @@ class Project:
                 p_name = getattr(track, "plugin_name", None) or (
                     "NovaSynth" if p_path == "novadaw.synth"
                     else "Nova Drums VSTi" if p_path == "novadaw.drum_machine"
+                    else "Nova Guitar" if p_path == "novadaw.guitar"
                     else os.path.splitext(os.path.basename(p_path))[0]
                 )
                 self.add_rack_plugin(p_path, p_name, "instrument")

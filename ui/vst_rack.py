@@ -258,6 +258,10 @@ class VstRackWidget(QWidget):
             icon_char = "🗜️"
         elif path == "novadaw.vocal_glide":
             icon_char = "🎤"
+        elif path == "novadaw.guitar":
+            icon_char = "🎸"
+        elif path == "novadaw.guitar_amp":
+            icon_char = "🔊"
         elif path == "novadaw.mixer":
             icon_char = "🎚️"
 

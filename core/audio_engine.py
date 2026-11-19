@@ -926,6 +926,7 @@ class AudioEngine:
                 "start_beat": self.current_beat,
                 "velocity": velocity,
                 "record_track": track,
+                "native_inst": native_inst,
                 "releasing": is_drum,
             })
 
@@ -1001,10 +1002,23 @@ class AudioEngine:
                     release_start = max(cur, min(len(buf), min_gate_frames))
                     rem = len(buf) - release_start
                     if rem > 0:
-                        fade_len = min(rem, max(1, int(0.18 * self.sample_rate)))
-                        buf[release_start:release_start + fade_len] *= np.linspace(
-                            1.0, 0.0, fade_len, dtype=np.float32
-                        )[:, None]
+                        inst = item.get("native_inst")
+                        rel_param = getattr(inst, "release_sec", None) if inst is not None else None
+                        if rel_param is not None:
+                            rel_sec = max(0.02, float(rel_param))
+                            # Courbe exponentielle : -30 dB à rel_sec, -60 dB à 2.0 * rel_sec
+                            fade_len = min(rem, max(1, int(rel_sec * 2.0 * self.sample_rate)))
+                            t_arr = np.arange(fade_len, dtype=np.float32) / float(self.sample_rate)
+                            env = np.exp(-3.45388 * t_arr / rel_sec).astype(np.float32)
+                            tail_ramp = min(fade_len, max(1, int(0.015 * self.sample_rate)))
+                            if tail_ramp > 1:
+                                env[-tail_ramp:] *= np.linspace(1.0, 0.0, tail_ramp, dtype=np.float32)
+                            buf[release_start:release_start + fade_len] *= env[:, None]
+                        else:
+                            fade_len = min(rem, max(1, int(0.18 * self.sample_rate)))
+                            buf[release_start:release_start + fade_len] *= np.linspace(
+                                1.0, 0.0, fade_len, dtype=np.float32
+                            )[:, None]
                         item["buffer"] = buf[:release_start + fade_len]
 
         if matched_info is not None:
@@ -1849,6 +1863,26 @@ class AudioEngine:
                     for l in getattr(inst, "layers", [])
                 ),
             )
+        if ptype == "novadaw.guitar":
+            return (
+                getattr(inst, "enabled", True),
+                getattr(inst, "preset_name", ""),
+                getattr(inst, "guitar_mode", "acoustic_steel"),
+                round(getattr(inst, "string_tension", 0.62), 4),
+                round(getattr(inst, "pluck_position", 0.22), 4),
+                round(getattr(inst, "brightness", 0.72), 4),
+                round(getattr(inst, "sustain_sec", 4.8), 4),
+                round(getattr(inst, "release_sec", 0.24), 4),
+                round(getattr(inst, "pick_attack", 0.60), 4),
+                round(getattr(inst, "palm_mute", 0.0), 4),
+                round(getattr(inst, "body_resonance", 0.75), 4),
+                round(getattr(inst, "pickup_position", 0.22), 4),
+                round(getattr(inst, "stereo_width", 0.35), 4),
+                round(getattr(inst, "reverb_mix", 0.16), 4),
+                round(getattr(inst, "reverb_room", 0.45), 4),
+                bool(getattr(inst, "dual_polarization", True)),
+                round(getattr(inst, "master_volume", 0.95), 4),
+            )
         if ptype == "novadaw.drum_machine":
             r = getattr(inst, "reverb", None)
             return (
@@ -1947,6 +1981,18 @@ class AudioEngine:
         import hashlib
         return hashlib.md5("".join(parts).encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _compute_native_release_tail_beats(native_inst: Any, is_drum: bool, beats_per_sec: float, default_beats: float) -> float:
+        """Calcule la marge de queue en temps (beats) adaptée au paramètre release de l'instrument natif."""
+        if is_drum:
+            return 0.0
+        if native_inst is not None and hasattr(native_inst, "get_release_tail_sec"):
+            try:
+                return max(default_beats, float(native_inst.get_release_tail_sec()) * max(0.2, float(beats_per_sec)))
+            except Exception:
+                pass
+        return default_beats
+
     def _render_track_offline(self, track: Track, bpm: float, sample_rate: int, end_beat: float, progress_callback: Optional[Callable[[float], None]] = None) -> Optional[np.ndarray]:
         """Synchronous compatibility entry point; the worker consumes the same blocks."""
         buf = None
@@ -1974,7 +2020,7 @@ class AudioEngine:
             if native_inst and hasattr(native_inst, "render_slice"):
                 is_drum = (getattr(native_inst, "plugin_type_id", None) == "novadaw.drum_machine" or
                            getattr(track, "plugin_path", None) == "novadaw.drum_machine")
-                release_tail_beats = 0.0 if is_drum else 2.0
+                release_tail_beats = self._compute_native_release_tail_beats(native_inst, is_drum, beats_per_sec, 2.0)
                 bus_idx = getattr(track, "synth_output_bus", None)
 
                 # Pré-collecter toutes les notes MIDI de la piste une seule fois
@@ -1992,11 +2038,17 @@ class AudioEngine:
                         ))
                 all_midi_notes.sort(key=lambda n: n.start_beat)
 
-                # Créer des instances isolées pour NovaSynth afin de ne jamais perturber les états de lecture temps réel
+                # Créer des instances isolées pour NovaSynth / Nova Guitar afin de ne jamais perturber les états de lecture temps réel
                 iso_delay = None
                 iso_reverb = None
                 iso_svfs = None
-                if getattr(native_inst, "plugin_type_id", None) == "novadaw.synth" and hasattr(native_inst, "_render_slice_internal"):
+                iso_guitar_ctx = None
+                if getattr(native_inst, "plugin_type_id", None) == "novadaw.guitar" and hasattr(native_inst, "create_isolated_context"):
+                    try:
+                        iso_guitar_ctx = native_inst.create_isolated_context(sample_rate)
+                    except Exception:
+                        iso_guitar_ctx = None
+                elif getattr(native_inst, "plugin_type_id", None) == "novadaw.synth" and hasattr(native_inst, "_render_slice_internal"):
                     try:
                         from plugins.synth.synth_dsp import StereoPingPongDelay, StereoStudioReverb
                         iso_delay = StereoPingPongDelay(sample_rate=sample_rate)
@@ -2050,7 +2102,13 @@ class AudioEngine:
 
                     if chunk_notes or has_active_drum_voices:
                         try:
-                            if iso_delay is not None:
+                            if iso_guitar_ctx is not None:
+                                rendered = native_inst._render_slice_internal(
+                                    chunk_notes, sb, eb, beats_per_sec, n, sample_rate,
+                                    isolated_ctx=iso_guitar_ctx,
+                                    use_live_state=False
+                                )
+                            elif iso_delay is not None:
                                 rendered = native_inst._render_slice_internal(
                                     chunk_notes, sb, eb, beats_per_sec, n, sample_rate,
                                     bus_index=bus_idx,
@@ -2348,7 +2406,7 @@ class AudioEngine:
                 # Marge de queue de release ADSR adaptée (0 pour batterie one-shot, 1.5 pour synthé)
                 is_drum = (getattr(native_inst, "plugin_type_id", None) == "novadaw.drum_machine" or
                            getattr(track, "plugin_path", None) == "novadaw.drum_machine")
-                release_tail_beats = 0.0 if is_drum else 1.5
+                release_tail_beats = self._compute_native_release_tail_beats(native_inst, is_drum, beats_per_sec, 1.5)
                 for clip in track.clips:
                     if not isinstance(clip, MidiClip):
                         continue
