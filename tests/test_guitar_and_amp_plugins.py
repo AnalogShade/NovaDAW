@@ -205,6 +205,45 @@ def test_guitar_release_note_off_across_paths(monkeypatch):
     assert lengths[1.50] > lengths[0.04] * 10
 
 
+def test_guitar_stereo_width_mono_compatible_and_balanced():
+    sr = 44100
+    for mode in ("acoustic_steel", "electric_clean"):
+        for pitch in (40, 57, 64):
+            g_mono = NovaGuitarPlugin()
+            g_mono.guitar_mode = mode
+            g_mono.reverb_mix = 0.0
+            g_mono.stereo_width = 0.0
+            w_mono = g_mono.render_note(pitch, duration_sec=0.7, sample_rate=sr, velocity=100)
+            assert np.allclose(w_mono[:, 0], w_mono[:, 1], atol=1e-7)
+
+            g_wide = NovaGuitarPlugin()
+            g_wide.guitar_mode = mode
+            g_wide.reverb_mix = 0.0
+            g_wide.stereo_width = 1.0
+            w_wide = g_wide.render_note(pitch, duration_sec=0.7, sample_rate=sr, velocity=100)
+
+            l, r = w_wide[:, 0], w_wide[:, 1]
+            corr = float(np.corrcoef(l, r)[0, 1])
+            assert corr < 0.45, f"Largeur stéréo insuffisante sur {mode} pitch={pitch} (corr={corr:.3f})"
+
+            l_rms = float(np.sqrt(np.mean(l ** 2)))
+            r_rms = float(np.sqrt(np.mean(r ** 2)))
+            m_rms = float(np.sqrt(np.mean(w_mono[:, 0] ** 2)))
+            assert 0.85 < (l_rms / max(1e-9, r_rms)) < 1.18
+            assert 0.90 < ((0.5 * (l_rms + r_rms)) / max(1e-9, m_rms)) < 1.10
+
+            # Compatibilité mono : la somme (L+R)/2 conserve le spectre sans filtrage en peigne
+            fold = 0.5 * (l + r)
+            n = min(len(fold), len(w_mono))
+            win = np.hanning(n)
+            s_orig = np.abs(np.fft.rfft(w_mono[:n, 0] * win))
+            s_fold = np.abs(np.fft.rfft(fold[:n] * win))
+            # Normaliser par RMS de la somme pour comparer uniquement la réponse en fréquence
+            s_orig_n = s_orig / max(1e-9, np.linalg.norm(s_orig))
+            s_fold_n = s_fold / max(1e-9, np.linalg.norm(s_fold))
+            assert float(np.linalg.norm(s_orig_n - s_fold_n)) < 0.02
+
+
 def test_guitar_render_slice_continuity_and_bypass():
     guitar = NovaGuitarPlugin()
     guitar.apply_preset("Acoustique Folk Acier (Dreadnought)")

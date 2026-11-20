@@ -22,6 +22,7 @@ from plugins.synth.synth_dsp import StereoStudioReverb
 from plugins.guitar.guitar_dsp import (
     GuitarStringVoice,
     GuitarBodyOrPickupProcessor,
+    GuitarStereoWidener,
 )
 
 
@@ -195,6 +196,8 @@ class NovaGuitarPlugin(BasePlugin):
         self._dsp_lock = threading.RLock()
         self._live_voices: Dict[Tuple[Any, ...], GuitarStringVoice] = {}
         self._body_proc = GuitarBodyOrPickupProcessor(44100)
+        self._body_proc_side = GuitarBodyOrPickupProcessor(44100)
+        self._stereo_widener = GuitarStereoWidener()
         self._reverb = StereoStudioReverb(44100)
         self._sync_reverb()
 
@@ -244,6 +247,8 @@ class NovaGuitarPlugin(BasePlugin):
         with self._dsp_lock:
             self._live_voices.clear()
             self._body_proc.reset()
+            self._body_proc_side.reset()
+            self._stereo_widener.reset()
             self._reverb.reset()
 
     def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -300,6 +305,8 @@ class NovaGuitarPlugin(BasePlugin):
         return {
             "voices": {},
             "body_proc": GuitarBodyOrPickupProcessor(sample_rate),
+            "body_proc_side": GuitarBodyOrPickupProcessor(sample_rate),
+            "stereo_widener": GuitarStereoWidener(),
             "reverb": rev,
         }
 
@@ -345,11 +352,15 @@ class NovaGuitarPlugin(BasePlugin):
         if use_live_state or isolated_ctx is None:
             voices_dict = self._live_voices
             body_proc = self._body_proc
+            body_proc_side = self._body_proc_side
+            stereo_widener = self._stereo_widener
             reverb = self._reverb
             self._sync_reverb()
         else:
             voices_dict = isolated_ctx["voices"]
             body_proc = isolated_ctx["body_proc"]
+            body_proc_side = isolated_ctx["body_proc_side"]
+            stereo_widener = isolated_ctx["stereo_widener"]
             reverb = isolated_ctx["reverb"]
 
         slice_start_sec = start_b / beats_per_sec
@@ -377,7 +388,7 @@ class NovaGuitarPlugin(BasePlugin):
         slice_start_sample_abs = int(round(slice_start_sec * sample_rate))
 
         mono_mix = np.zeros(frames, dtype=np.float64)
-        stereo_pan_accum = np.zeros((frames, 2), dtype=np.float64)
+        side_mix = np.zeros(frames, dtype=np.float64)
         active_keys = set()
 
         for note, n_start_b, n_dur_b, n_start_sec, n_off_sec in candidates:
@@ -416,15 +427,15 @@ class NovaGuitarPlugin(BasePlugin):
 
             voice_mono = voice.render_samples(render_count)
 
-            # Légère spatialisation naturelle selon la hauteur (cordes graves légèrement gauche, aiguës droite)
+            # Légère spatialisation naturelle du manche selon la hauteur (grave léger gauche, aigu léger droite)
+            # Limitée à ±0.16 pour préserver le centrage d'une note seule tout en aérant les accords
             pitch_norm = max(-1.0, min(1.0, (pitch - 58.0) / 18.0))
-            pan = pitch_norm * max(0.0, min(1.0, self.stereo_width)) * 0.45
+            pan = pitch_norm * max(0.0, min(1.0, self.stereo_width)) * 0.16
             g_l = math.sqrt(0.5 * (1.0 - pan))
             g_r = math.sqrt(0.5 * (1.0 + pan))
 
-            stereo_pan_accum[local_start:local_start + render_count, 0] += voice_mono * g_l
-            stereo_pan_accum[local_start:local_start + render_count, 1] += voice_mono * g_r
             mono_mix[local_start:local_start + render_count] += voice_mono
+            side_mix[local_start:local_start + render_count] += voice_mono * ((g_l - g_r) * 0.5)
 
         # Nettoyage des voix terminées
         if len(voices_dict) > len(active_keys):
@@ -432,20 +443,30 @@ class NovaGuitarPlugin(BasePlugin):
                 if k not in active_keys:
                     voices_dict.pop(k, None)
 
-        # Traitement Caisse acoustique ou Micro électrique sur les deux canaux de manière cohérente
-        # (On passe le signal mono puis on applique l'image stéréo pour garder une caisse mono-compatible)
-        body_out = body_proc.process_mono(
+        # Traitement Caisse acoustique ou Micro électrique sur Mid et Side pour garder le même timbre
+        body_m = body_proc.process_mono(
             mono_mix,
             mode=self.guitar_mode,
             body_resonance=self.body_resonance,
             pickup_position=self.pickup_position,
             sample_rate=sample_rate,
         )
+        widened_l, widened_r = stereo_widener.process(body_m, self.stereo_width)
 
-        # Reconstituer la stéréo en combinant caisse filtrée + différence stéréo des cordes
-        stereo_diff = (stereo_pan_accum[:, 0] - stereo_pan_accum[:, 1]) * 0.5
-        out_l = body_out + stereo_diff
-        out_r = body_out - stereo_diff
+        if self.stereo_width > 0.001 and float(np.max(np.abs(side_mix))) > 1e-7:
+            body_s = body_proc_side.process_mono(
+                side_mix,
+                mode=self.guitar_mode,
+                body_resonance=self.body_resonance,
+                pickup_position=self.pickup_position,
+                sample_rate=sample_rate,
+            )
+            out_l = widened_l + body_s
+            out_r = widened_r - body_s
+        else:
+            out_l = widened_l
+            out_r = widened_r
+
         stereo = np.column_stack((out_l, out_r)).astype(np.float32)
 
         # Compensation douce si accord dense
@@ -569,6 +590,8 @@ class NovaGuitarPlugin(BasePlugin):
             self._sync_reverb()
             self._live_voices.clear()
             self._body_proc.reset()
+            self._body_proc_side.reset()
+            self._stereo_widener.reset()
         self.notify_modified()
 
     def create_editor(self, parent=None):

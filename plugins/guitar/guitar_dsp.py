@@ -621,3 +621,63 @@ class GuitarStringVoice:
             out_b = self.plane_b.step(exc * 0.85, is_released=is_released)
             return 0.72 * out_a + 0.28 * out_b
         return out_a
+
+
+class GuitarStereoWidener:
+    """
+    Élargisseur stéréo Mid/Side par réseau all-pass en quadrature (90° sur 40 Hz – 16 kHz).
+    - Compatibilité mono 100 % : (L + R) / 2 préserve exactement l'amplitude spectrale (0 filtrage en peigne).
+    - Symétrie L/R parfaite même sur une note isolée (pas de bascule de panoramique sur E2/A3/E4).
+    - Conservation de la sonie globale grâce à la normalisation énergétique 1 / sqrt(1 + k²).
+    """
+
+    _COEFFS_A = (0.6923878, 0.9360654322959, 0.9882295226860, 0.9987488452737)
+    _COEFFS_B = (0.4021921162426, 0.8561710882420, 0.9722909545651, 0.9952884791278)
+
+    def __init__(self) -> None:
+        self._stages_a = self._build_stages(self._COEFFS_A, with_delay=True)
+        self._stages_b = self._build_stages(self._COEFFS_B, with_delay=False)
+
+    @staticmethod
+    def _build_stages(coeffs: Tuple[float, ...], with_delay: bool) -> list:
+        stages = []
+        if with_delay:
+            stages.append({
+                "b": np.array([0.0, 1.0], dtype=np.float64),
+                "a": np.array([1.0, 0.0], dtype=np.float64),
+                "zi": np.zeros(1, dtype=np.float64),
+            })
+        for a_val in coeffs:
+            c = a_val * a_val
+            stages.append({
+                "b": np.array([-c, 0.0, 1.0], dtype=np.float64),
+                "a": np.array([1.0, 0.0, -c], dtype=np.float64),
+                "zi": np.zeros(2, dtype=np.float64),
+            })
+        return stages
+
+    def reset(self) -> None:
+        for st in self._stages_a:
+            st["zi"].fill(0.0)
+        for st in self._stages_b:
+            st["zi"].fill(0.0)
+
+    def process(self, mono: np.ndarray, stereo_width: float) -> Tuple[np.ndarray, np.ndarray]:
+        w = max(0.0, min(1.0, float(stereo_width)))
+        if len(mono) == 0 or w <= 0.001:
+            return mono, mono
+
+        x = mono.astype(np.float64, copy=False)
+        sig_i = x
+        for st in self._stages_a:
+            sig_i, st["zi"] = _lfilter_fast(st["b"], st["a"], sig_i, st["zi"])
+
+        sig_q = x
+        for st in self._stages_b:
+            sig_q, st["zi"] = _lfilter_fast(st["b"], st["a"], sig_q, st["zi"])
+
+        k = w * 0.78
+        norm = 1.0 / math.sqrt(1.0 + k * k)
+        out_l = (sig_i + k * sig_q) * norm
+        out_r = (sig_i - k * sig_q) * norm
+        return out_l, out_r
