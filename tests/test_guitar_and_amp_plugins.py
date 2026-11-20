@@ -331,6 +331,92 @@ def test_guitar_amp_dsp_bypass_distortion_tonestack_cab():
     assert _spectral_centroid(y_cab[1024:, 0], sr) < _spectral_centroid(y_nocab[1024:, 0], sr)
 
 
+def test_guitar_amp_distortion_constant_volume_and_tube_harmonics():
+    """
+    Vérifie les deux correctifs clés sur l'ampli :
+    1. L'augmentation de la distorsion n'augmente pas le volume perçu (Auto-Gain RMS).
+    2. La saturation lampe multi-étages génère des harmoniques paires & impaires riches
+       et atteint une forte distorsion même sur un signal guitare modéré (-25 dBFS).
+    """
+    sr = 44100
+    t = np.arange(sr, dtype=np.float32) / sr
+
+    # 1. Signal sinusoïdal modéré (0.06 ≈ -24.4 dBFS) : niveau constant + THD élevée
+    sine_06 = np.column_stack((0.06 * np.sin(2.0 * np.pi * 220.0 * t),
+                               0.06 * np.sin(2.0 * np.pi * 220.0 * t))).astype(np.float32)
+    ref_sine = NovaGuitarAmpPlugin(distortion=0.0, low_db=0.0, mid_db=0.0, treble_db=0.0,
+                                   volume=1.0, cab_enabled=False).process(sine_06, sr)
+    ref_sine_rms = float(np.sqrt(np.mean(ref_sine ** 2)))
+
+    thds = []
+    h2_ratios = []
+    for d in (0.15, 0.45, 0.75, 1.0):
+        amp = NovaGuitarAmpPlugin(distortion=d, low_db=0.0, mid_db=0.0, treble_db=0.0,
+                                  volume=1.0, cab_enabled=False)
+        out = amp.process(sine_06, sr)
+        rms = float(np.sqrt(np.mean(out ** 2)))
+        diff_db = abs(20.0 * math.log10(max(1e-9, rms) / max(1e-9, ref_sine_rms)))
+        assert diff_db < 0.5, f"Le volume varie trop à dist={d}: {diff_db:.2f} dB"
+
+        seg = out[4096:, 0]
+        sp = np.abs(np.fft.rfft(seg * np.hanning(len(seg))))
+        fr = np.fft.rfftfreq(len(seg), 1.0 / sr)
+        f0 = float(sp[int(np.argmin(np.abs(fr - 220.0)))])
+        harm_sq = sum(float(sp[int(np.argmin(np.abs(fr - 220.0 * k)))]) ** 2 for k in range(2, 8))
+        thds.append(math.sqrt(harm_sq) / max(1e-9, f0))
+        h2_ratios.append(float(sp[int(np.argmin(np.abs(fr - 440.0)))]) / max(1e-9, f0))
+
+    # Progression claire de la distorsion et fort maximum à 100 %
+    assert thds[-1] > thds[1] > thds[0]
+    assert thds[-1] > 0.38, f"Distorsion max trop faible : THD={thds[-1]*100:.1f}%"
+    # Présence d'harmoniques paires (2e harmonique) issues de la triode asymétrique
+    assert max(h2_ratios) > 0.05
+
+    # 2. Signal réel Nova Guitar DI : volume stable sur toute la plage 0% -> 100%
+    guitar = NovaGuitarPlugin()
+    guitar.apply_preset("Électrique Tele Twang (Chevalet)")
+    di = guitar.render_note(40, duration_sec=1.0, sample_rate=sr, velocity=100)
+    ref_g = NovaGuitarAmpPlugin(distortion=0.0, low_db=0.0, mid_db=0.0, treble_db=0.0,
+                                volume=1.0, cab_enabled=True).process(di, sr)
+    ref_g_rms = float(np.sqrt(np.mean(ref_g ** 2)))
+
+    for d in (0.25, 0.50, 0.75, 1.0):
+        out_g = NovaGuitarAmpPlugin(distortion=d, low_db=0.0, mid_db=0.0, treble_db=0.0,
+                                    volume=1.0, cab_enabled=True).process(di, sr)
+        rms_g = float(np.sqrt(np.mean(out_g ** 2)))
+        diff_db = abs(20.0 * math.log10(max(1e-9, rms_g) / max(1e-9, ref_g_rms)))
+        assert diff_db < 1.8, f"Le volume guitare dérive trop à dist={d}: {diff_db:.2f} dB"
+
+    # 3. Le contrôle Volume Master reste indépendant
+    out_v1 = NovaGuitarAmpPlugin(distortion=0.8, volume=1.0, cab_enabled=True).process(di, sr)
+    out_v05 = NovaGuitarAmpPlugin(distortion=0.8, volume=0.5, cab_enabled=True).process(di, sr)
+    assert np.allclose(out_v05, out_v1 * 0.5, atol=1e-4)
+
+
+def test_guitar_amp_block_continuity_and_numpy_fallback(monkeypatch):
+    import plugins.guitar_amp.amp_dsp as amp_dsp_mod
+
+    sr = 44100
+    guitar = NovaGuitarPlugin()
+    guitar.apply_preset("Électrique Strat Clean (Manche)")
+    di = guitar.render_note(45, duration_sec=0.25, sample_rate=sr, velocity=105)
+
+    # Rendu bloc unique vs blocs de 512 échantillons
+    amp_single = NovaGuitarAmpPlugin(distortion=0.85, low_db=2.0, mid_db=1.0, treble_db=3.0, cab_enabled=True)
+    y_single = amp_single.process(di, sr)
+
+    amp_chunks = NovaGuitarAmpPlugin(distortion=0.85, low_db=2.0, mid_db=1.0, treble_db=3.0, cab_enabled=True)
+    y_chunks = np.vstack([amp_chunks.process(di[i:i + 512], sr) for i in range(0, len(di), 512)])
+    assert np.allclose(y_single, y_chunks, atol=1e-5)
+
+    # Repli NumPy pur (sans SciPy) cohérent et sans NaN
+    monkeypatch.setattr(amp_dsp_mod, "HAS_SCIPY", False)
+    amp_np = NovaGuitarAmpPlugin(distortion=0.85, low_db=2.0, mid_db=1.0, treble_db=3.0, cab_enabled=True)
+    y_np = amp_np.process(di[:2048], sr)
+    assert np.all(np.isfinite(y_np))
+    assert np.allclose(y_np, y_single[:2048], atol=1e-3)
+
+
 def test_presets_and_project_serialization(tmp_path):
     pm = PresetManager(base_dir=tmp_path)
 
