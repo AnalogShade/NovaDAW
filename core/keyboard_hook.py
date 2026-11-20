@@ -6,6 +6,7 @@ Permet au Clavier Musical Virtuel (Musical Typing) de capturer les frappes du cl
 """
 import ctypes
 import os
+import queue
 import sys
 import threading
 import time
@@ -128,6 +129,8 @@ class LowLevelKeyboardHook:
         self._key_callback: Optional[Callable[[int, bool], None]] = None
         self._toggle_callback: Optional[Callable[[], None]] = None
         self._window_focus_callback: Optional[Callable[[int], None]] = None
+        self._event_queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._dispatch_thread: Optional[threading.Thread] = None
         self._last_fg_hwnd: int = 0
         self._cached_hwnd: int = 0
         self._cached_hwnd_ok: bool = False
@@ -260,10 +263,7 @@ class LowLevelKeyboardHook:
             if fg_hwnd and fg_hwnd != self._last_fg_hwnd:
                 self._last_fg_hwnd = fg_hwnd
                 if self._window_focus_callback:
-                    try:
-                        self._window_focus_callback(fg_hwnd)
-                    except Exception:
-                        pass
+                    self._event_queue.put(("focus", fg_hwnd))
 
             # Si la fenêtre au premier plan n'est ni NovaDAW ni un plugin NovaDAW, ne rien intercepter
             if not self.is_novadaw_or_plugin_window(fg_hwnd):
@@ -276,10 +276,7 @@ class LowLevelKeyboardHook:
                     if vk not in self._held_vks:
                         self._held_vks.add(vk)
                         if self._toggle_callback:
-                            try:
-                                self._toggle_callback()
-                            except Exception:
-                                pass
+                            self._event_queue.put(("toggle", None))
                 elif is_up:
                     self._held_vks.discard(vk)
                 return 1  # Intercepter et consommer
@@ -304,24 +301,18 @@ class LowLevelKeyboardHook:
             if qt_key not in MUSICAL_QT_KEYS:
                 return self._user32.CallNextHookEx(None, nCode, wParam, lParam)
 
-            # Traitement de la touche musicale (Note ou Contrôle)
+            # Traitement de la touche musicale (Note ou Contrôle) — file asynchrone pour ne jamais bloquer WH_KEYBOARD_LL
             if is_down:
                 # Éviter l'auto-répétition des touches sous Windows
                 if vk in self._held_vks:
                     return 1
                 self._held_vks.add(vk)
                 if self._key_callback:
-                    try:
-                        self._key_callback(qt_key, True)
-                    except Exception:
-                        pass
+                    self._event_queue.put(("key", (qt_key, True)))
             elif is_up:
                 self._held_vks.discard(vk)
                 if self._key_callback:
-                    try:
-                        self._key_callback(qt_key, False)
-                    except Exception:
-                        pass
+                    self._event_queue.put(("key", (qt_key, False)))
 
             # Consommer l'événement pour que le plugin externe ne reçoive pas de raccourcis indésirables
             return 1
@@ -363,6 +354,24 @@ class LowLevelKeyboardHook:
                 pass
             self._hook_handle = None
 
+    def _dispatch_loop(self):
+        """Dépile et exécute les callbacks clavier hors du hook Win32 critique (évite LowLevelHooksTimeout)."""
+        while True:
+            item = self._event_queue.get()
+            if item is None:
+                break
+            kind, payload = item
+            try:
+                if kind == "key" and self._key_callback:
+                    qt_key, is_down = payload
+                    self._key_callback(qt_key, is_down)
+                elif kind == "toggle" and self._toggle_callback:
+                    self._toggle_callback()
+                elif kind == "focus" and self._window_focus_callback:
+                    self._window_focus_callback(payload)
+            except Exception:
+                pass
+
     def start(self, key_callback: Callable[[int, bool], None],
               toggle_callback: Callable[[], None],
               window_focus_callback: Optional[Callable[[int], None]] = None):
@@ -374,6 +383,14 @@ class LowLevelKeyboardHook:
 
             if sys.platform != "win32":
                 return
+
+            if self._dispatch_thread is None or not self._dispatch_thread.is_alive():
+                self._dispatch_thread = threading.Thread(
+                    target=self._dispatch_loop,
+                    daemon=True,
+                    name="NovaDAW-KeyHook-Dispatcher"
+                )
+                self._dispatch_thread.start()
 
             if self._thread is not None and self._thread.is_alive():
                 return
@@ -403,6 +420,10 @@ class LowLevelKeyboardHook:
             self._thread = None
             self._thread_id = None
             self._hook_handle = None
+            if self._dispatch_thread and self._dispatch_thread.is_alive():
+                self._event_queue.put(None)
+                self._dispatch_thread.join(timeout=1.0)
+            self._dispatch_thread = None
 
     def set_active(self, active: bool):
         """Active ou désactive la prise en charge des notes musicales par le hook."""

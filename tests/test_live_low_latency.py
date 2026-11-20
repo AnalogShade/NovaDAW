@@ -231,3 +231,30 @@ def test_wasapi_exclusive_setting_and_dialog(qapp):
     assert engine._wasapi_exclusive is False
     dlg.close()
     engine.close()
+
+
+def test_keyboard_hook_dispatches_asynchronously():
+    """Vérifie que LowLevelKeyboardHook exécute les callbacks hors du hook Win32 critique."""
+    from core.keyboard_hook import LowLevelKeyboardHook
+
+    hook = LowLevelKeyboardHook()
+    received = []
+    done = threading.Event()
+
+    def slow_cb(qt_key, is_down):
+        received.append((qt_key, is_down, threading.current_thread().name))
+        if len(received) >= 2:
+            done.set()
+
+    hook._key_callback = slow_cb
+    t = threading.Thread(target=hook._dispatch_loop, daemon=True, name="NovaDAW-KeyHook-Dispatcher")
+    t.start()
+    try:
+        hook._event_queue.put(("key", (Qt.Key_A, True)))
+        hook._event_queue.put(("key", (Qt.Key_D, True)))
+        assert done.wait(timeout=1.5) is True
+        assert [(r[0], r[1]) for r in received] == [(Qt.Key_A, True), (Qt.Key_D, True)]
+        assert all(r[2] == "NovaDAW-KeyHook-Dispatcher" for r in received)
+    finally:
+        hook._event_queue.put(None)
+        t.join(timeout=1.0)

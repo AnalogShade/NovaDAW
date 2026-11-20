@@ -408,13 +408,20 @@ class NovaGuitarPlugin(BasePlugin):
             # Position relative désirée depuis le début de la note
             desired_voice_sample = max(0, slice_start_sample_abs + local_start - note_start_sample_abs)
 
-            v_key = (pitch, round(n_start_b, 4), round(n_dur_b, 4), vel, sample_rate, param_sig)
+            live_id = getattr(note, "_live_id", None)
+            if live_id is not None:
+                v_key = ("live", live_id, sample_rate, param_sig)
+            else:
+                v_key = (pitch, round(n_start_b, 4), round(n_dur_b, 4), vel, sample_rate, param_sig)
             active_keys.add(v_key)
 
             voice = voices_dict.get(v_key)
             if voice is None or desired_voice_sample < voice.rendered_samples:
                 voice = self._create_voice(pitch, vel, note_dur_samples, sample_rate)
                 voices_dict[v_key] = voice
+            elif live_id is not None:
+                # Synchronise la frontière Note-Off lorsque la note live est relâchée
+                voice.note_dur_samples = max(voice.rendered_samples, note_dur_samples)
 
             # Avance rapide si on démarre en milieu de note (seek)
             if desired_voice_sample > voice.rendered_samples:

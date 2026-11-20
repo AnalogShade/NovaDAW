@@ -1144,7 +1144,8 @@ class NovaSynthPlugin(BasePlugin):
         target_delay: Optional[StereoPingPongDelay] = None,
         target_reverb: Optional[StereoStudioReverb] = None,
         voice_svf_dict: Optional[Dict] = None,
-        use_live_state: bool = True
+        use_live_state: bool = True,
+        clean_stale_voices: bool = False,
     ) -> np.ndarray:
         if not self.enabled or frames <= 0:
             return np.zeros((frames, 2), dtype=np.float32)
@@ -1226,7 +1227,7 @@ class NovaSynthPlugin(BasePlugin):
                 bus_dest = max(0, min(9, layer.output_bus))
                 if bus_index is not None and bus_dest != bus_index:
                     continue
-                voice_key = (pitch, round(note_start_b, 4), layer.layer_id)
+                voice_key = (pitch, round(note_start_b, 4), layer.layer_id, getattr(note, "_live_id", None))
                 active_keys.add(voice_key)
 
                 # Pitch final avec octave, demitons et fine tuning
@@ -1317,7 +1318,7 @@ class NovaSynthPlugin(BasePlugin):
                 bus_buf[:, 1] += voice_out_r
 
         # Nettoyage automatique des voix éteintes pour libérer la mémoire et éviter tout résidu sonore au redémarrage
-        if use_live_state and len(voice_svf_dict) > len(active_keys):
+        if (use_live_state or clean_stale_voices) and len(voice_svf_dict) > len(active_keys):
             stale_keys = [k for k in list(voice_svf_dict.keys()) if k not in active_keys]
             for sk in stale_keys:
                 voice_svf_dict.pop(sk, None)

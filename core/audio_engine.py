@@ -5,6 +5,7 @@ import os
 import copy
 import threading
 import time
+from types import SimpleNamespace
 from typing import Optional, List, Dict, Callable, Any, Iterator
 import numpy as np
 try:
@@ -174,6 +175,16 @@ class AudioEngine:
         self._live_vst_buf: Optional[np.ndarray] = None
         self._live_vst_event = threading.Event()
         self._live_vst_thread: Optional[threading.Thread] = None
+
+        # Streaming temps réel continu bloc-à-bloc pour instruments natifs & synthé interne
+        self._live_native_lock = threading.Lock()
+        self._live_native_notes: List[Dict[str, Any]] = []
+        self._live_native_sample_pos: int = 0
+        self._live_native_tail_until: Dict[str, float] = {}
+        self._live_native_tracks: Dict[str, Track] = {}
+        self._live_native_contexts: Dict[tuple[str, str], Any] = {}
+        self._next_live_note_id: int = 1
+        self._playback_live_step: Optional[tuple[float, float, Dict[str, List[Dict[str, Any]]]]] = None
 
         # Mesure des niveaux de crête et distorsion Master (VU-mètre)
         self._master_peak_l: float = 0.0
@@ -395,6 +406,11 @@ class AudioEngine:
         with self._cache_job_lock:
             self._cache_closed = True
             self._cache_request_pending = False
+        with self._live_native_lock:
+            self._live_native_notes.clear()
+            self._live_native_tail_until.clear()
+            self._live_native_tracks.clear()
+            self._live_native_contexts.clear()
         self._live_vst_event.set()
         self._cache_generation += 1
         timer = getattr(self, "_debounce_timer", None)
@@ -736,6 +752,8 @@ class AudioEngine:
 
     def _reset_all_plugins(self):
         """Réinitialise les mémoires des filtres et compresseurs lors d'un arrêt ou repositionnement"""
+        with self._live_native_lock:
+            self._live_native_contexts.clear()
         if not self.project:
             return
         for plugin in list(self.track_plugins.values()):
@@ -867,68 +885,63 @@ class AudioEngine:
                     self._live_vst_event.set()
                 return
 
-        # Instruments natifs (NovaSynth, Nova Drums) ou SynthVoice par défaut
+        # Instruments natifs (Nova Guitar, NovaSynth, Nova Drums) ou SynthVoice par défaut :
+        # enregistrement instantané (< 0.05 ms) pour rendu temps réel bloc-à-bloc dans _audio_callback.
+        if native_inst is None and target_track and target_track.plugin_path:
+            return
+
         is_drum = bool(
             (native_inst and getattr(native_inst, "plugin_type_id", None) == "novadaw.drum_machine")
             or (target_track and getattr(target_track, "plugin_path", None) == "novadaw.drum_machine")
         )
-        render_dur = 1.2 if is_drum else 4.0
-        wave = None
-        if native_inst and hasattr(native_inst, "render_note"):
-            try:
-                bus_idx = getattr(track, "synth_output_bus", None) if track else None
-                wave = native_inst.render_note(
-                    pitch, duration_sec=render_dur, sample_rate=self.sample_rate, velocity=velocity, bus_index=bus_idx
-                )
-            except TypeError:
-                try:
-                    wave = native_inst.render_note(
-                        pitch, duration_sec=render_dur, sample_rate=self.sample_rate, velocity=velocity
-                    )
-                except Exception:
-                    wave = None
-            except Exception:
-                wave = None
-
-        if wave is None and target_track and target_track.plugin_path:
-            return
-        if wave is None:
-            wave = SynthVoice.generate_note(pitch, render_dur, self.sample_rate, velocity)
-
-        if wave is not None and len(wave) > 0 and track:
-            wave = self._process_track_effects_isolated(track, wave.copy(), native_inst)
-            vol = float(getattr(track, "volume", 0.8))
-            pan = max(-1.0, min(1.0, float(getattr(track, "pan", 0.0))))
-            left_gain = vol * (1.0 - max(0.0, pan))
-            right_gain = vol * (1.0 + min(0.0, pan))
-            wave[:, 0] *= left_gain
-            wave[:, 1] *= right_gain
-
-        live_key = (track.id if track else "", int(pitch))
+        tid = target_track.id if target_track else ""
+        bus_idx = getattr(track, "synth_output_bus", None) if track else None
         now = time.time()
-        with self._preview_lock:
+        sr = max(8000, int(self.sample_rate))
+        tail_sec = self._compute_native_tail_sec(native_inst, is_drum)
+
+        with self._live_native_lock:
+            live_beat = (self._live_native_sample_pos / float(sr)) * 2.0
             if not is_drum:
-                for item in self._preview_buffers:
-                    if item.get("live_key") == live_key and not item.get("releasing", False):
-                        buf = item["buffer"]
-                        cur = item["cursor"]
-                        rem = len(buf) - cur
-                        if rem > 0:
-                            fade_len = min(rem, max(1, int(0.012 * self.sample_rate)))
-                            buf[cur:cur + fade_len] *= np.linspace(1.0, 0.0, fade_len, dtype=np.float32)[:, None]
-                            item["buffer"] = buf[:cur + fade_len]
-                            item["releasing"] = True
-            self._preview_buffers.append({
-                "buffer": np.ascontiguousarray(wave, dtype=np.float32),
-                "cursor": 0,
-                "live_key": None if is_drum else live_key,
-                "press_time": now,
-                "start_beat": self.current_beat,
-                "velocity": velocity,
+                for n in self._live_native_notes:
+                    if n["track_id"] == tid and n["pitch"] == int(pitch) and not n["released"]:
+                        n["released"] = True
+                        n["release_at"] = None
+                        n["duration"] = max(0.01, live_beat - n["start_beat"])
+                        n["release_beat"] = live_beat
+                        n["tail_sec"] = tail_sec
+
+            note_id = self._next_live_note_id
+            self._next_live_note_id += 1
+            if target_track is not None:
+                self._live_native_tracks[tid] = target_track
+
+            self._live_native_notes.append({
+                "live_id": note_id,
+                "track": target_track,
+                "track_id": tid,
                 "record_track": track,
                 "native_inst": native_inst,
-                "releasing": is_drum,
+                "bus_idx": bus_idx,
+                "is_drum": is_drum,
+                "pitch": int(pitch),
+                "velocity": max(1, min(127, int(velocity))),
+                "press_time": now,
+                "press_beat_proj": self.current_beat,
+                "start_beat": live_beat,
+                "duration": 0.25 if is_drum else 10000.0,
+                "released": is_drum,
+                "release_at": None,
+                "release_beat": live_beat if is_drum else None,
+                "tail_sec": tail_sec,
+                "env_sample": 0,
+                "off_sample": None,
+                "_synth_done": False,
             })
+            self._live_native_tail_until[tid] = max(
+                self._live_native_tail_until.get(tid, 0.0),
+                now + max(1.5, tail_sec + 0.5),
+            )
 
     def _flush_scheduled_live_note_offs(self, now: float):
         """Convertit les Note-Off différés arrivés à échéance en messages MIDI immédiats."""
@@ -989,6 +1002,50 @@ class AudioEngine:
                         ))
                 return
 
+        tid = target_track.id if target_track else (track.id if track else "")
+        matched_native = None
+        sr = max(8000, int(self.sample_rate))
+        with self._live_native_lock:
+            cur_live_beat = (self._live_native_sample_pos / float(sr)) * 2.0
+            for n in reversed(self._live_native_notes):
+                if n["track_id"] == tid and n["pitch"] == int(pitch) and not n["released"] and n["release_at"] is None:
+                    matched_native = n
+                    held_sec = max(0.0, now - float(n["press_time"]))
+                    tail_sec = self._compute_native_tail_sec(n["native_inst"], n["is_drum"])
+                    n["tail_sec"] = tail_sec
+                    if gate_sec > 0.0 and held_sec < gate_sec:
+                        release_at = float(n["press_time"]) + gate_sec
+                        n["release_at"] = release_at
+                        self._live_native_tail_until[tid] = max(
+                            self._live_native_tail_until.get(tid, 0.0),
+                            release_at + tail_sec + 0.5,
+                        )
+                    else:
+                        n["released"] = True
+                        n["duration"] = max(0.01, cur_live_beat - n["start_beat"])
+                        n["release_beat"] = cur_live_beat
+                        self._live_native_tail_until[tid] = max(
+                            self._live_native_tail_until.get(tid, 0.0),
+                            now + tail_sec + 0.5,
+                        )
+                    break
+
+        if matched_native is not None:
+            rec_track = matched_native.get("record_track") or track
+            if self.is_recording and rec_track and rec_track.track_type == "midi" and getattr(rec_track, "armed", False):
+                bpm = self.project.bpm if self.project else 120.0
+                held_sec = max(0.25, now - float(matched_native.get("press_time", now)))
+                dur_beats = max(0.25, (held_sec * bpm) / 60.0)
+                rel_beat = max(0.0, float(matched_native.get("press_beat_proj", self.current_beat)) - self.recording_start_beat)
+                with self._record_lock:
+                    self._recorded_midi_notes.append(MidiNote(
+                        pitch=int(pitch),
+                        start_beat=rel_beat,
+                        duration=dur_beats,
+                        velocity=int(matched_native.get("velocity", 100))
+                    ))
+            return
+
         live_key = (track.id if track else "", int(pitch))
         matched_info = None
         with self._preview_lock:
@@ -1035,6 +1092,314 @@ class AudioEngine:
                         duration=dur_beats,
                         velocity=int(matched_info.get("velocity", 100))
                     ))
+
+    @staticmethod
+    def _compute_native_tail_sec(native_inst: Any, is_drum: bool) -> float:
+        """Retourne la durée de queue (relâchement + effets intégrés) d'un instrument natif."""
+        if is_drum:
+            return 3.0
+        if native_inst is None:
+            return 0.20
+        if hasattr(native_inst, "get_release_tail_sec"):
+            try:
+                return max(0.15, float(native_inst.get_release_tail_sec()))
+            except Exception:
+                pass
+        if hasattr(native_inst, "layers"):
+            max_rel = max((float(getattr(l, "release", 0.35)) for l in native_inst.layers), default=0.35)
+            has_fx = bool(getattr(getattr(native_inst, "reverb", None), "enabled", False) or getattr(getattr(native_inst, "delay", None), "enabled", False))
+            return max(0.15, max_rel + (0.60 if has_fx else 0.12))
+        return 0.35
+
+    def _render_default_live_synth(self, notes: List[Dict[str, Any]], frames: int, sr: int) -> np.ndarray:
+        """Rendu polyphonique bloc-à-bloc sans clic pour le synthétiseur interne par défaut."""
+        out_mono = np.zeros(frames, dtype=np.float32)
+        if not notes or frames <= 0:
+            return np.zeros((frames, 2), dtype=np.float32)
+
+        sr_f = float(max(8000, sr))
+        att_s = max(1, int(0.012 * sr_f))
+        dec_s = max(1, int(0.060 * sr_f))
+        rel_s = max(1, int(0.120 * sr_f))
+        sus_lvl = 0.75
+        idx = np.arange(frames, dtype=np.float64)
+
+        for n in notes:
+            if n.get("_synth_done"):
+                continue
+            start_s = int(n["env_sample"])
+            t = (start_s + idx) / sr_f
+            freq = midi_to_freq(int(n["pitch"]))
+            sine = np.sin(2.0 * np.pi * freq * t)
+            saw = 0.5 * (2.0 * (t * freq - np.floor(0.5 + t * freq)))
+            sub = 0.3 * np.sin(2.0 * np.pi * (freq * 0.5) * t)
+            sig = 0.6 * sine + 0.3 * saw + 0.2 * sub
+
+            s_pos = start_s + idx
+            env = np.empty(frames, dtype=np.float64)
+            if not n["released"]:
+                env[:] = sus_lvl
+                m_att = s_pos < att_s
+                if np.any(m_att):
+                    env[m_att] = s_pos[m_att] / float(att_s)
+                m_dec = (~m_att) & (s_pos < (att_s + dec_s))
+                if np.any(m_dec):
+                    env[m_dec] = 1.0 - ((s_pos[m_dec] - att_s) / float(dec_s)) * (1.0 - sus_lvl)
+            else:
+                if n["off_sample"] is None:
+                    n["off_sample"] = start_s
+                off_s = int(n["off_sample"])
+                if off_s < att_s:
+                    off_lvl = max(0.0, off_s / float(att_s))
+                elif off_s < (att_s + dec_s):
+                    off_lvl = 1.0 - ((off_s - att_s) / float(dec_s)) * (1.0 - sus_lvl)
+                else:
+                    off_lvl = sus_lvl
+                rel_pos = np.maximum(0.0, s_pos - off_s)
+                env[:] = off_lvl * np.maximum(0.0, 1.0 - (rel_pos / float(rel_s)))
+                if (start_s + frames - off_s) >= rel_s:
+                    n["_synth_done"] = True
+
+            n["env_sample"] = start_s + frames
+            vel_scale = (float(n["velocity"]) / 127.0) * 0.4
+            out_mono += (sig * env * vel_scale).astype(np.float32)
+
+        return np.column_stack((out_mono, out_mono))
+
+    def _flush_and_advance_live_native(self, frames: int, now: float) -> Optional[tuple[float, float, Dict[str, List[Dict[str, Any]]]]]:
+        """Met à jour les relâchements différés, purge les voix éteintes et avance l'horloge live native."""
+        sr = max(8000, int(self.sample_rate))
+        with self._live_native_lock:
+            cur_pos = self._live_native_sample_pos
+            cur_live_beat = (cur_pos / float(sr)) * 2.0
+
+            kept: List[Dict[str, Any]] = []
+            active_tids = set()
+            for n in self._live_native_notes:
+                if not n["released"] and n["release_at"] is not None and now >= float(n["release_at"]):
+                    n["released"] = True
+                    n["release_at"] = None
+                    n["duration"] = max(0.01, cur_live_beat - n["start_beat"])
+                    n["release_beat"] = cur_live_beat
+                    n["tail_sec"] = self._compute_native_tail_sec(n["native_inst"], n["is_drum"])
+
+                if n["released"]:
+                    if n["native_inst"] is None and n.get("_synth_done"):
+                        continue
+                    if n["native_inst"] is not None:
+                        end_beat_with_tail = n["start_beat"] + n["duration"] + (n["tail_sec"] * 2.0) + 0.35
+                        if cur_live_beat > end_beat_with_tail:
+                            continue
+
+                kept.append(n)
+                active_tids.add(n["track_id"])
+
+            self._live_native_notes = kept
+
+            # Purger les queues d'effets expirées
+            expired_tids = []
+            for tid, until in self._live_native_tail_until.items():
+                if tid in active_tids or now < until:
+                    continue
+                trk = self._live_native_tracks.get(tid)
+                inst = self.get_native_instrument(trk) if trk else None
+                if inst is not None and getattr(inst, "_active_voices", None):
+                    continue
+                expired_tids.append(tid)
+            for tid in expired_tids:
+                self._live_native_tail_until.pop(tid, None)
+                self._live_native_tracks.pop(tid, None)
+
+            if not self._live_native_notes and not self._live_native_tail_until:
+                return None
+
+            self._live_native_sample_pos = cur_pos + frames
+            end_live_beat = ((cur_pos + frames) / float(sr)) * 2.0
+
+            grouped: Dict[str, List[Dict[str, Any]]] = {}
+            for tid in self._live_native_tail_until:
+                grouped[tid] = []
+            for n in self._live_native_notes:
+                grouped.setdefault(n["track_id"], []).append(n)
+
+            return cur_live_beat, end_live_beat, grouped
+
+    def _render_track_live_native_audio(
+        self,
+        tid: str,
+        track: Optional[Track],
+        notes: List[Dict[str, Any]],
+        start_b: float,
+        end_b: float,
+        frames: int,
+        use_isolated_ctx: bool = False,
+    ) -> tuple[np.ndarray, Optional[Any]]:
+        """Rend un bloc stéréo de `frames` échantillons pour les notes live d'une piste native."""
+        native_inst = None
+        bus_idx = None
+        for n in notes:
+            if n.get("native_inst") is not None:
+                native_inst = n["native_inst"]
+            if n.get("bus_idx") is not None:
+                bus_idx = n["bus_idx"]
+            if native_inst is not None:
+                break
+        if native_inst is None and track is not None:
+            native_inst = self.get_native_instrument(track)
+        if bus_idx is None and track is not None:
+            bus_idx = getattr(track, "synth_output_bus", None)
+
+        if native_inst is None:
+            return self._render_default_live_synth(notes, frames, self.sample_rate), None
+
+        note_objs = [
+            SimpleNamespace(
+                pitch=n["pitch"],
+                start_beat=n["start_beat"],
+                duration=n["duration"],
+                velocity=n["velocity"],
+                _live_id=n["live_id"],
+            )
+            for n in notes
+        ]
+
+        if use_isolated_ctx:
+            ptype = getattr(native_inst, "plugin_type_id", None)
+            if ptype == "novadaw.guitar" and hasattr(native_inst, "create_isolated_context") and hasattr(native_inst, "_render_slice_internal"):
+                ctx_key = ("guitar", tid)
+                ctx = self._live_native_contexts.get(ctx_key)
+                if ctx is None:
+                    ctx = native_inst.create_isolated_context(self.sample_rate)
+                    self._live_native_contexts[ctx_key] = ctx
+                rev = ctx.get("reverb")
+                if rev is not None:
+                    rev.enabled = native_inst.reverb_mix > 0.005
+                    rev.room_size = max(0.1, min(0.95, float(native_inst.reverb_room)))
+                    rev.width = max(0.2, min(1.0, float(native_inst.stereo_width) + 0.35))
+                    rev.mix = max(0.0, min(0.65, float(native_inst.reverb_mix)))
+                with native_inst._dsp_lock:
+                    wave = native_inst._render_slice_internal(
+                        notes=note_objs,
+                        start_b=start_b,
+                        end_b=end_b,
+                        beats_per_sec=2.0,
+                        frames=frames,
+                        sample_rate=self.sample_rate,
+                        isolated_ctx=ctx,
+                        use_live_state=False,
+                    )
+                return wave, native_inst
+
+            if ptype == "novadaw.synth" and hasattr(native_inst, "_render_slice_internal"):
+                ctx_key = ("synth", tid)
+                ctx = self._live_native_contexts.get(ctx_key)
+                if ctx is None:
+                    from plugins.synth.synth_dsp import StereoPingPongDelay, StereoStudioReverb
+                    ctx = {
+                        "delay": StereoPingPongDelay(self.sample_rate),
+                        "reverb": StereoStudioReverb(self.sample_rate),
+                        "svfs": {},
+                    }
+                    self._live_native_contexts[ctx_key] = ctx
+                d, r = ctx["delay"], ctx["reverb"]
+                d.enabled = native_inst.delay.enabled
+                d.time_sec = native_inst.delay.time_sec
+                d.feedback = native_inst.delay.feedback
+                d.ping_pong = native_inst.delay.ping_pong
+                d.mix = native_inst.delay.mix
+                r.enabled = native_inst.reverb.enabled
+                r.room_size = native_inst.reverb.room_size
+                r.damping = native_inst.reverb.damping
+                r.width = native_inst.reverb.width
+                r.mix = native_inst.reverb.mix
+                with native_inst._dsp_lock:
+                    wave = native_inst._render_slice_internal(
+                        notes=note_objs,
+                        start_b=start_b,
+                        end_b=end_b,
+                        beats_per_sec=2.0,
+                        frames=frames,
+                        sample_rate=self.sample_rate,
+                        bus_index=bus_idx,
+                        target_delay=d,
+                        target_reverb=r,
+                        voice_svf_dict=ctx["svfs"],
+                        use_live_state=False,
+                        clean_stale_voices=True,
+                    )
+                return wave, native_inst
+
+        if hasattr(native_inst, "render_slice"):
+            try:
+                if bus_idx is not None:
+                    try:
+                        wave = native_inst.render_slice(
+                            note_objs, start_b, end_b, 2.0, frames, self.sample_rate, bus_index=bus_idx
+                        )
+                    except TypeError:
+                        wave = native_inst.render_slice(
+                            note_objs, start_b, end_b, 2.0, frames, self.sample_rate
+                        )
+                else:
+                    wave = native_inst.render_slice(
+                        note_objs, start_b, end_b, 2.0, frames, self.sample_rate
+                    )
+                if wave is not None:
+                    return wave, native_inst
+            except Exception:
+                pass
+
+        return np.zeros((frames, 2), dtype=np.float32), native_inst
+
+    def _render_live_native_direct(
+        self,
+        live_step: tuple[float, float, Dict[str, List[Dict[str, Any]]]],
+        frames: int,
+        out: np.ndarray,
+        block_track_peaks: Dict[str, tuple[float, float]],
+    ) -> None:
+        """Rendu temps réel bloc-à-bloc des voix live natives + chaîne d'effets de piste (ampli, EQ, comp...)."""
+        start_b, end_b, grouped = live_step
+        now = time.time()
+        for tid, notes in grouped.items():
+            track = self._live_native_tracks.get(tid)
+            if track is None and tid and self.project:
+                track = self.project.get_track(tid)
+
+            wave, native_inst = self._render_track_live_native_audio(
+                tid, track, notes, start_b, end_b, frames, use_isolated_ctx=False
+            )
+            if wave is None or len(wave) == 0:
+                continue
+            if len(wave) != frames:
+                buf = np.zeros((frames, 2), dtype=np.float32)
+                n_cp = min(frames, len(wave))
+                buf[:n_cp] = wave[:n_cp]
+                wave = buf
+
+            if track is not None:
+                wave = self._process_track_effects_chain(track, wave, start_b, end_b, frames, 120.0, native_inst=native_inst)
+                vol = float(getattr(track, "volume", 0.8))
+                pan = max(-1.0, min(1.0, float(getattr(track, "pan", 0.0))))
+                left_gain = vol * (1.0 - max(0.0, pan))
+                right_gain = vol * (1.0 + min(0.0, pan))
+                wave[:, 0] *= left_gain
+                wave[:, 1] *= right_gain
+
+            pk_l = float(np.max(np.abs(wave[:, 0])))
+            pk_r = float(np.max(np.abs(wave[:, 1])))
+            if max(pk_l, pk_r) > 1e-4:
+                with self._live_native_lock:
+                    if tid in self._live_native_tail_until:
+                        self._live_native_tail_until[tid] = max(self._live_native_tail_until[tid], now + 0.5)
+
+            out += wave
+            if tid:
+                if tid not in block_track_peaks:
+                    block_track_peaks[tid] = (pk_l, pk_r)
+                else:
+                    old_l, old_r = block_track_peaks[tid]
+                    block_track_peaks[tid] = (max(old_l, pk_l), max(old_r, pk_r))
 
     def _render_live_vst_direct(self, frames: int, out: np.ndarray, block_track_peaks: Dict[str, tuple[float, float]]) -> bool:
         """
@@ -1549,7 +1914,12 @@ class AudioEngine:
                     active_previews.append(item)
             self._preview_buffers = active_previews
 
-        # 1.bis Rendu VST live synchrone (mémoire partagée, 0 bloc de FIFO) ou fallback FIFO
+        # 1.bis Rendu live natif bloc-à-bloc (Nova Guitar, NovaSynth, Nova Drums + effets de piste)
+        live_native_step = self._flush_and_advance_live_native(frames, time.time())
+        if not self.is_playing and live_native_step is not None:
+            self._render_live_native_direct(live_native_step, frames, out, block_track_peaks)
+
+        # 1.ter Rendu VST live synchrone (mémoire partagée, 0 bloc de FIFO) ou fallback FIFO
         handled_direct = self._render_live_vst_direct(frames, out, block_track_peaks)
         if not handled_direct or self._live_stream_chunks:
             need_wake = False
@@ -1607,39 +1977,43 @@ class AudioEngine:
 
             # Rendu piste par piste
             mixer_plugin = self._get_active_mixer_plugin()
-            for track in self.project.tracks:
-                if track.muted or (has_solo and not track.soloed):
-                    if mixer_plugin:
-                        mixer_plugin.update_track_peak(track.id, 0.0, 0.0)
-                    continue
+            self._playback_live_step = live_native_step
+            try:
+                for track in self.project.tracks:
+                    if track.muted or (has_solo and not track.soloed):
+                        if mixer_plugin:
+                            mixer_plugin.update_track_peak(track.id, 0.0, 0.0)
+                        continue
 
-                track_live = (
-                    live_in_buf
-                    if (live_in_buf is not None and track.track_type == "audio" and getattr(track, "monitoring", False))
-                    else None
-                )
-                track_signal = self._render_track_slice(track, start_beat, end_beat, frames, bpm, live_input_buf=track_live)
-                if track_signal is not None:
-                    # Application du volume et panoramique (avec automatisation sample-accurate si active)
-                    left_gain, right_gain, eff_vol, eff_pan = self._compute_track_automation_gains(
-                        track, start_beat, end_beat, frames
+                    track_live = (
+                        live_in_buf
+                        if (live_in_buf is not None and track.track_type == "audio" and getattr(track, "monitoring", False))
+                        else None
                     )
-                    track_signal[:, 0] *= left_gain
-                    track_signal[:, 1] *= right_gain
-                    self._live_automation_values[track.id] = {
-                        "volume": eff_vol,
-                        "pan": eff_pan,
-                    }
-                    out += track_signal
+                    track_signal = self._render_track_slice(track, start_beat, end_beat, frames, bpm, live_input_buf=track_live)
+                    if track_signal is not None:
+                        # Application du volume et panoramique (avec automatisation sample-accurate si active)
+                        left_gain, right_gain, eff_vol, eff_pan = self._compute_track_automation_gains(
+                            track, start_beat, end_beat, frames
+                        )
+                        track_signal[:, 0] *= left_gain
+                        track_signal[:, 1] *= right_gain
+                        self._live_automation_values[track.id] = {
+                            "volume": eff_vol,
+                            "pan": eff_pan,
+                        }
+                        out += track_signal
 
-                    if len(track_signal) > 0:
-                        pk_l = float(np.max(np.abs(track_signal[:, 0])))
-                        pk_r = float(np.max(np.abs(track_signal[:, 1])))
-                        if track.id not in block_track_peaks:
-                            block_track_peaks[track.id] = (pk_l, pk_r)
-                        else:
-                            old_l, old_r = block_track_peaks[track.id]
-                            block_track_peaks[track.id] = (max(old_l, pk_l), max(old_r, pk_r))
+                        if len(track_signal) > 0:
+                            pk_l = float(np.max(np.abs(track_signal[:, 0])))
+                            pk_r = float(np.max(np.abs(track_signal[:, 1])))
+                            if track.id not in block_track_peaks:
+                                block_track_peaks[track.id] = (pk_l, pk_r)
+                            else:
+                                old_l, old_r = block_track_peaks[track.id]
+                                block_track_peaks[track.id] = (max(old_l, pk_l), max(old_r, pk_r))
+            finally:
+                self._playback_live_step = None
 
             # Avancement de la tête de lecture
             if wrapped and self.project.loop_enabled:
@@ -2597,6 +2971,12 @@ class AudioEngine:
         for tid, _p in self._live_active_notes:
             if tid == track_id:
                 return True
+        with self._live_native_lock:
+            if track_id in self._live_native_tail_until and time.time() < self._live_native_tail_until[track_id]:
+                return True
+            for n in self._live_native_notes:
+                if n["track_id"] == track_id:
+                    return True
         return False
 
     def _process_track_effects_chain(
@@ -2670,6 +3050,20 @@ class AudioEngine:
         if live_input_buf is not None and len(live_input_buf) > 0:
             n_copy = min(len(track_buf), len(live_input_buf))
             track_buf[:n_copy] += live_input_buf[:n_copy]
+
+        # 3.bis Notes live natives jouées pendant la lecture (mixées avant l'ampli / chaîne FX)
+        live_step = self._playback_live_step
+        if live_step is not None:
+            l_start_b, l_end_b, l_grouped = live_step
+            if track.id in l_grouped:
+                live_wave, live_inst = self._render_track_live_native_audio(
+                    track.id, track, l_grouped[track.id], l_start_b, l_end_b, frames, use_isolated_ctx=True
+                )
+                if live_wave is not None and len(live_wave) > 0:
+                    n_cp = min(len(track_buf), len(live_wave))
+                    track_buf[:n_cp] += live_wave[:n_cp]
+                if native_inst is None:
+                    native_inst = live_inst
 
         # 4. Traitement VST + pile de plugins modulaires (Égaliseur, Compresseur, Nova Vocal Glide...)
         track_buf = self._process_track_effects_chain(track, track_buf, start_b, end_b, frames, bpm, native_inst=native_inst)

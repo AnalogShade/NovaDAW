@@ -126,6 +126,10 @@ def _phase_delay_at(b: np.ndarray, a: np.ndarray, w0: float) -> float:
     return -ang / w0
 
 
+_DC_B = np.array([1.0, -1.0], dtype=np.float64)
+_DC_A = np.array([1.0, -0.995], dtype=np.float64)
+
+
 def _lfilter_fast(b: np.ndarray, a: np.ndarray, x: np.ndarray, zi: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Filtre IIR rapide utilisant SciPy en C avec repli NumPy pur."""
     if HAS_SCIPY:
@@ -291,12 +295,7 @@ class WaveguideStringPlane:
 
         self.ring_pos = pos
         # Suppression de toute composante continue
-        out, self.zi_dc = _lfilter_fast(
-            np.array([1.0, -1.0], dtype=np.float64),
-            np.array([1.0, -0.995], dtype=np.float64),
-            out,
-            self.zi_dc,
-        )
+        out, self.zi_dc = _lfilter_fast(_DC_B, _DC_A, out, self.zi_dc)
         return out
 
 

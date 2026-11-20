@@ -192,17 +192,37 @@ def test_guitar_release_note_off_across_paths(monkeypatch):
     rendered = eng._render_track_offline(trk, bpm=120.0, sample_rate=sr, end_beat=8.0)
     assert float(np.sqrt(np.mean(rendered[int(1.5 * sr):int(2.1 * sr)] ** 2))) > 0.001
 
-    # 3. Clavier virtuel (start_live_note / stop_live_note) respecte release_sec
+    # 3. Clavier virtuel (start_live_note / stop_live_note) respecte release_sec en streaming temps réel
     monkeypatch.delenv("NOVADAW_SILENT_TESTS", raising=False)
+    eng.sample_rate = sr
     eng._stream = type("FakeStream", (), {"active": True})()
-    lengths = {}
+    tail_rms = {}
+    blk = 512
     for rel in (0.04, 1.50):
         g_seq.release_sec = rel
-        eng._preview_buffers.clear()
+        g_seq.reset()
+        with eng._live_native_lock:
+            eng._live_native_notes.clear()
+            eng._live_native_tail_until.clear()
         eng.start_live_note(57, velocity=100, track=trk)
+        out_blk = np.zeros((blk, 2), dtype=np.float32)
+        # 10 blocs maintenus (~0.116 s)
+        for _ in range(10):
+            eng._audio_callback(out_blk, blk, None, None)
         eng.stop_live_note(57, track=trk, min_gate_sec=0.0)
-        lengths[rel] = len(eng._preview_buffers[-1]["buffer"])
-    assert lengths[1.50] > lengths[0.04] * 10
+        # Pomper 0.8 s après Note-Off et mesurer les derniers 0.3 s de queue
+        post_blocks = []
+        n_post = int(0.8 * sr / blk)
+        for _ in range(n_post):
+            b = np.zeros((blk, 2), dtype=np.float32)
+            eng._audio_callback(b, blk, None, None)
+            post_blocks.append(b)
+        post_wave = np.vstack(post_blocks)
+        late_seg = post_wave[int(0.45 * sr):]
+        tail_rms[rel] = float(np.sqrt(np.mean(late_seg ** 2)))
+    assert tail_rms[1.50] > tail_rms[0.04] * 5.0
+    eng._stream = None
+    eng.close()
 
 
 def test_guitar_stereo_width_mono_compatible_and_balanced():
@@ -514,3 +534,65 @@ def test_gui_editors_instantiate_and_sync():
     assert a_ed.btn_bypass.isChecked() is True
     assert a_ed._sliders["distortion"][0].value() == 64
     a_ed.close()
+
+
+def test_guitar_plus_amp_live_low_latency_chords_and_playback(monkeypatch):
+    """Vérifie que Nova Guitar + Nova Guitar Amp en live ont < 10 ms d'overhead d'appel et jouent les accords."""
+    import time
+
+    sr = 44100
+    blk = 256
+    proj = Project.create_default()
+    proj.bpm = 120.0
+    trk = Track(name="Guitare Live", track_type="midi", plugin_path="novadaw.guitar", plugin_name="Nova Guitar")
+    guitar = NovaGuitarPlugin()
+    guitar.apply_preset("Électrique Strat Clean (Manche)")
+    guitar.reverb_mix = 0.0
+    amp = NovaGuitarAmpPlugin()
+    amp.apply_preset("Blues Crunch")
+    trk.add_plugin(guitar)
+    trk.add_plugin(amp)
+    proj.tracks.append(trk)
+
+    monkeypatch.delenv("NOVADAW_SILENT_TESTS", raising=False)
+    engine = AudioEngine(sample_rate=sr, block_size=blk)
+    engine.project = proj
+    engine._stream = type("FakeStream", (), {"active": True})()
+    try:
+        # 1. Déclenchement d'un accord (E2=40, B2=47, E3=52) quasi-instantané
+        t0 = time.perf_counter()
+        for p in (40, 47, 52):
+            engine.start_live_note(p, velocity=100, track=trk)
+        trigger_ms = (time.perf_counter() - t0) * 1000.0
+        assert trigger_ms < 20.0, f"start_live_note trop lent : {trigger_ms:.2f} ms"
+
+        # 2. Premier bloc immédiatement audible (< 1 bloc de latence)
+        first_blk = np.zeros((blk, 2), dtype=np.float32)
+        engine._audio_callback(first_blk, blk, None, None)
+        assert float(np.max(np.abs(first_blk))) > 0.01
+
+        # 3. Pomper ~0.35 s et vérifier par FFT que les deux notes (82.4 Hz et 123.5 Hz) résonnent ensemble
+        chunks = [first_blk]
+        for _ in range(60):
+            b = np.zeros((blk, 2), dtype=np.float32)
+            engine._audio_callback(b, blk, None, None)
+            chunks.append(b)
+        wave = np.vstack(chunks)[:, 0]
+        spec = np.abs(np.fft.rfft(wave * np.hanning(len(wave))))
+        freqs = np.fft.rfftfreq(len(wave), 1.0 / sr)
+        e_e2 = float(np.max(spec[(freqs > 76.0) & (freqs < 89.0)]))
+        e_b2 = float(np.max(spec[(freqs > 117.0) & (freqs < 130.0)]))
+        assert e_e2 > 5.0 and e_b2 > 5.0, f"Accord incomplet : E2={e_e2:.2f}, B2={e_b2:.2f}"
+
+        # 4. Pendant la lecture (is_playing=True), les notes live restent audibles sans crash ni blocage
+        engine.is_playing = True
+        assert engine._is_track_live_active(trk.id) is True
+        play_blk = np.zeros((blk, 2), dtype=np.float32)
+        engine._audio_callback(play_blk, blk, None, None)
+        assert float(np.max(np.abs(play_blk))) > 0.005
+
+        for p in (40, 47, 52):
+            engine.stop_live_note(p, track=trk, min_gate_sec=0.0)
+    finally:
+        engine._stream = None
+        engine.close()
