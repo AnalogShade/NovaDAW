@@ -1351,6 +1351,33 @@ class AudioEngine:
 
         return np.zeros((frames, 2), dtype=np.float32), native_inst
 
+    def _has_any_solo(self) -> bool:
+        """Retourne True si au moins une piste du projet actif est en Solo."""
+        if not self.project or not getattr(self.project, "tracks", None):
+            return False
+        return any(getattr(t, "soloed", False) for t in self.project.tracks)
+
+    @staticmethod
+    def _resolve_live_track_gains(track: Optional[Track], has_solo: bool = False) -> Optional[tuple[float, float]]:
+        """Retourne (left_gain, right_gain) pour une piste ou None si elle est coupée (Mute/Solo)."""
+        if track is None:
+            return 1.0, 1.0
+        if getattr(track, "muted", False) or (has_solo and not getattr(track, "soloed", False)):
+            return None
+        vol = max(0.0, float(getattr(track, "volume", 0.8)))
+        pan = max(-1.0, min(1.0, float(getattr(track, "pan", 0.0))))
+        return vol * (1.0 - max(0.0, pan)), vol * (1.0 + min(0.0, pan))
+
+    @staticmethod
+    def _record_block_peak(block_track_peaks: Dict[str, tuple[float, float]], tid: Optional[str], pk_l: float, pk_r: float) -> None:
+        if not tid:
+            return
+        if tid not in block_track_peaks:
+            block_track_peaks[tid] = (pk_l, pk_r)
+        else:
+            old_l, old_r = block_track_peaks[tid]
+            block_track_peaks[tid] = (max(old_l, pk_l), max(old_r, pk_r))
+
     def _render_live_native_direct(
         self,
         live_step: tuple[float, float, Dict[str, List[Dict[str, Any]]]],
@@ -1361,6 +1388,7 @@ class AudioEngine:
         """Rendu temps réel bloc-à-bloc des voix live natives + chaîne d'effets de piste (ampli, EQ, comp...)."""
         start_b, end_b, grouped = live_step
         now = time.time()
+        has_solo = self._has_any_solo()
         for tid, notes in grouped.items():
             track = self._live_native_tracks.get(tid)
             if track is None and tid and self.project:
@@ -1377,12 +1405,14 @@ class AudioEngine:
                 buf[:n_cp] = wave[:n_cp]
                 wave = buf
 
+            gains = self._resolve_live_track_gains(track, has_solo)
+            if gains is None:
+                self._record_block_peak(block_track_peaks, tid, 0.0, 0.0)
+                continue
+
             if track is not None:
                 wave = self._process_track_effects_chain(track, wave, start_b, end_b, frames, 120.0, native_inst=native_inst)
-                vol = float(getattr(track, "volume", 0.8))
-                pan = max(-1.0, min(1.0, float(getattr(track, "pan", 0.0))))
-                left_gain = vol * (1.0 - max(0.0, pan))
-                right_gain = vol * (1.0 + min(0.0, pan))
+                left_gain, right_gain = gains
                 wave[:, 0] *= left_gain
                 wave[:, 1] *= right_gain
 
@@ -1394,12 +1424,7 @@ class AudioEngine:
                         self._live_native_tail_until[tid] = max(self._live_native_tail_until[tid], now + 0.5)
 
             out += wave
-            if tid:
-                if tid not in block_track_peaks:
-                    block_track_peaks[tid] = (pk_l, pk_r)
-                else:
-                    old_l, old_r = block_track_peaks[tid]
-                    block_track_peaks[tid] = (max(old_l, pk_l), max(old_r, pk_r))
+            self._record_block_peak(block_track_peaks, tid, pk_l, pk_r)
 
     def _render_live_vst_direct(self, frames: int, out: np.ndarray, block_track_peaks: Dict[str, tuple[float, float]]) -> bool:
         """
@@ -1482,22 +1507,19 @@ class AudioEngine:
                     self._live_tail_until = max(self._live_tail_until, now + 1.2)
 
         if target_track is not None:
+            gains = self._resolve_live_track_gains(target_track, self._has_any_solo())
+            if gains is None:
+                self._record_block_peak(block_track_peaks, target_track.id, 0.0, 0.0)
+                return True
             processed = self._process_track_effects_isolated(target_track, wave, None)
-            vol = float(getattr(target_track, "volume", 0.8))
-            pan = max(-1.0, min(1.0, float(getattr(target_track, "pan", 0.0))))
-            left_gain = vol * (1.0 - max(0.0, pan))
-            right_gain = vol * (1.0 + min(0.0, pan))
+            left_gain, right_gain = gains
             processed[:, 0] *= left_gain
             processed[:, 1] *= right_gain
             out += processed
             if len(processed) > 0:
                 pk_l = float(np.max(np.abs(processed[:, 0])))
                 pk_r = float(np.max(np.abs(processed[:, 1])))
-                if target_track.id not in block_track_peaks:
-                    block_track_peaks[target_track.id] = (pk_l, pk_r)
-                else:
-                    old_l, old_r = block_track_peaks[target_track.id]
-                    block_track_peaks[target_track.id] = (max(old_l, pk_l), max(old_r, pk_r))
+                self._record_block_peak(block_track_peaks, target_track.id, pk_l, pk_r)
         else:
             out += wave
         return True
@@ -1630,17 +1652,12 @@ class AudioEngine:
 
                     if target_track is not None:
                         wave = self._process_track_effects_isolated(target_track, wave, None)
-                        vol = float(getattr(target_track, "volume", 0.8))
-                        pan = max(-1.0, min(1.0, float(getattr(target_track, "pan", 0.0))))
-                        left_gain = vol * (1.0 - max(0.0, pan))
-                        right_gain = vol * (1.0 + min(0.0, pan))
-                        wave[:, 0] *= left_gain
-                        wave[:, 1] *= right_gain
 
                     with self._live_stream_lock:
                         self._live_stream_chunks.append({
                             "buffer": np.ascontiguousarray(wave, dtype=np.float32),
                             "cursor": 0,
+                            "track": target_track,
                             "track_id": target_track.id if target_track else None,
                         })
             except Exception:
@@ -1695,20 +1712,15 @@ class AudioEngine:
         if wave is None:
             wave = SynthVoice.generate_note(pitch, duration_sec, self.sample_rate, velocity)
 
-        # Application de la chaîne d'effets de la piste (Égaliseur, Compresseur, VST) et du volume/pan
+        # Application de la chaîne d'effets de la piste (Égaliseur, Compresseur, VST) ; volume/pan appliqués en direct dans _audio_callback
         if wave is not None and len(wave) > 0 and track:
             wave = self._process_track_effects_isolated(track, wave.copy(), native_inst)
-            vol = float(getattr(track, "volume", 0.8))
-            pan = max(-1.0, min(1.0, float(getattr(track, "pan", 0.0))))
-            left_gain = vol * (1.0 - max(0.0, pan))
-            right_gain = vol * (1.0 + min(0.0, pan))
-            wave[:, 0] *= left_gain
-            wave[:, 1] *= right_gain
 
         with self._preview_lock:
             self._preview_buffers.append({
                 "buffer": np.ascontiguousarray(wave, dtype=np.float32),
                 "cursor": 0,
+                "track": track,
                 "record_track": track,
                 "track_id": track.id if track else None,
             })
@@ -1726,6 +1738,40 @@ class AudioEngine:
                     velocity=velocity
                 ))
 
+    @staticmethod
+    def _is_non_insert_plugin(plugin: Any, track: Track, native_inst: Optional[Any] = None) -> bool:
+        """Retourne True si le plugin est un instrument générateur ou un mixeur Master à exclure des inserts de piste."""
+        if plugin is native_inst:
+            return True
+        if getattr(plugin, "is_instrument", False) or getattr(plugin, "category", "") == "instrument":
+            return True
+        if getattr(plugin, "plugin_type_id", None) == "novadaw.mixer" and getattr(track, "track_type", "") != "master":
+            return True
+        return False
+
+    @staticmethod
+    def _normalize_plugin_output(res: Any, fallback: np.ndarray, expected_frames: int) -> np.ndarray:
+        """Garantit qu'un plugin d'effet renvoie toujours un buffer stéréo float32 (expected_frames, 2) valide."""
+        if res is None:
+            return fallback
+        arr = np.asarray(res, dtype=np.float32)
+        if arr.size == 0:
+            return fallback
+        if arr.ndim == 1:
+            arr = np.column_stack((arr, arr))
+        elif arr.shape[1] == 1:
+            arr = np.column_stack((arr[:, 0], arr[:, 0]))
+        elif arr.shape[1] > 2:
+            arr = arr[:, :2]
+        if len(arr) != expected_frames:
+            out = np.zeros((expected_frames, 2), dtype=np.float32)
+            n = min(expected_frames, len(arr))
+            out[:n] = arr[:n]
+            arr = out
+        if not np.isfinite(arr).all():
+            arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=-1.0)
+        return arr
+
     def _process_track_effects_isolated(self, track: Track, audio: np.ndarray, native_inst: Optional[Any] = None) -> np.ndarray:
         """
         Traite le buffer audio d'une note ou prévisualisation à travers tous les effets de la piste
@@ -1740,7 +1786,7 @@ class AudioEngine:
         has_native_fx = False
         if getattr(track, "plugins", None):
             for p in track.plugins:
-                if p is native_inst or getattr(p, "is_instrument", False):
+                if self._is_non_insert_plugin(p, track, native_inst):
                     continue
                 if getattr(p, "enabled", True):
                     has_native_fx = True
@@ -1756,6 +1802,7 @@ class AudioEngine:
             out_audio = np.column_stack((audio, audio)).astype(np.float32)
         else:
             out_audio = audio.copy().astype(np.float32)
+        expected_frames = len(out_audio)
 
         # 1. Effets VST3 d'inserts
         if hasattr(track, "insert_effects") and track.insert_effects:
@@ -1787,8 +1834,8 @@ class AudioEngine:
         # 2. Plugins natifs empilés (Égaliseur, Compresseur, etc.)
         if hasattr(track, "plugins") and track.plugins:
             for plugin in track.plugins:
-                # Sauter l'instrument générateur
-                if plugin is native_inst or getattr(plugin, "is_instrument", False):
+                # Sauter l'instrument générateur et le mixeur master
+                if self._is_non_insert_plugin(plugin, track, native_inst):
                     continue
                 if not getattr(plugin, "enabled", True):
                     continue
@@ -1804,7 +1851,8 @@ class AudioEngine:
                         )
 
                 try:
-                    out_audio = plugin.process(out_audio, self.sample_rate)
+                    res = plugin.process(out_audio, self.sample_rate)
+                    out_audio = self._normalize_plugin_output(res, out_audio, expected_frames)
                 except Exception:
                     pass
 
@@ -1817,47 +1865,61 @@ class AudioEngine:
         return out_audio
 
     def get_track_for_plugin(self, plugin: Any) -> Optional[Track]:
-        """Retrouve la piste qui héberge le plugin donné."""
-        if not self.project:
+        """Retrouve la piste qui héberge le plugin donné (instance exacte d'abord, puis fallback)."""
+        if not self.project or plugin is None:
             return None
+        all_tracks = list(getattr(self.project, "tracks", []) or [])
+        if getattr(self.project, "master_track", None):
+            all_tracks.append(self.project.master_track)
+
+        # Passe 1 : correspondance exacte par référence d'objet
+        for t in all_tracks:
+            if hasattr(t, "plugins") and any(p is plugin for p in t.plugins):
+                return t
+
+        # Passe 2 : correspondance par instance_id
         target_inst_id = getattr(plugin, "instance_id", None)
+        if target_inst_id:
+            for t in all_tracks:
+                if hasattr(t, "plugins") and any(getattr(p, "instance_id", None) == target_inst_id for p in t.plugins):
+                    return t
+
+        # Passe 3 : fallback par plugin_path sur les pistes (si ouvert depuis le Rack avant instanciation)
         target_type_id = getattr(plugin, "plugin_type_id", None)
-        for t in self.project.tracks:
-            if hasattr(t, "plugins") and plugin in t.plugins:
-                return t
-            if target_inst_id and hasattr(t, "plugins"):
-                for p in t.plugins:
-                    if getattr(p, "instance_id", None) == target_inst_id:
-                        return t
-            if target_type_id and t.plugin_path == target_type_id:
-                return t
+        if target_type_id:
+            for t in getattr(self.project, "tracks", []) or []:
+                if getattr(t, "plugin_path", None) == target_type_id:
+                    return t
         return None
 
     def play_preview_buffer(self, wave: np.ndarray, choke_group: int = 0, track: Optional[Track] = None) -> bool:
         """
         Joue immédiatement un buffer audio stéréo en direct dans le flux en temps réel (latence < 10ms).
         Prend en charge les choke groups et applique la chaîne d'inserts de la piste si spécifiée.
+        Le volume, le panoramique et Mute/Solo de la piste sont appliqués en temps réel dans _audio_callback.
         """
         if wave is None or len(wave) == 0:
             return False
         if not (self._stream and getattr(self._stream, "active", False)):
             return False
 
+        if wave.ndim == 1:
+            wave = np.column_stack((wave, wave)).astype(np.float32)
+        else:
+            wave = np.ascontiguousarray(wave[:, :2], dtype=np.float32)
+
         if track is not None:
             native_inst = self.get_native_instrument(track)
             wave = self._process_track_effects_isolated(track, wave.copy(), native_inst)
-            vol = float(getattr(track, "volume", 0.8))
-            pan = max(-1.0, min(1.0, float(getattr(track, "pan", 0.0))))
-            left_gain = vol * (1.0 - max(0.0, pan))
-            right_gain = vol * (1.0 + min(0.0, pan))
-            wave[:, 0] *= left_gain
-            wave[:, 1] *= right_gain
 
+        target_tid = track.id if track else None
         with self._preview_lock:
             if choke_group > 0:
-                # Choke group : étouffer immédiatement les voix actives du même groupe
+                # Choke group : étouffer immédiatement les voix actives du même groupe sur la piste
                 for item in self._preview_buffers:
-                    if item.get("choke_group") == choke_group:
+                    if item.get("choke_group") == choke_group and (
+                        target_tid is None or item.get("track_id") in (None, target_tid)
+                    ):
                         buf = item["buffer"]
                         cur = item["cursor"]
                         rem = len(buf) - cur
@@ -1870,8 +1932,9 @@ class AudioEngine:
                 "buffer": np.ascontiguousarray(wave, dtype=np.float32),
                 "cursor": 0,
                 "choke_group": choke_group,
+                "track": track,
                 "record_track": track,
-                "track_id": track.id if track else None,
+                "track_id": target_tid,
             })
         return True
 
@@ -1885,8 +1948,10 @@ class AudioEngine:
 
         # Collecte des niveaux de crête post-fader par piste pour ce bloc audio
         block_track_peaks: Dict[str, tuple[float, float]] = {}
+        has_solo_global = self._has_any_solo()
+        dt_sec = frames / float(max(8000, int(self.sample_rate)))
 
-        # 1. Mixer les sons de prévisualisation (clics clavier piano, synthétiseur live)
+        # 1. Mixer les sons de prévisualisation (clics clavier piano, pads Nova Drums, synthétiseur live)
         with self._preview_lock:
             active_previews = []
             for item in self._preview_buffers:
@@ -1896,19 +1961,21 @@ class AudioEngine:
                 to_copy = min(frames, avail)
                 if to_copy > 0:
                     slice_data = buf[cur:cur + to_copy]
-                    out[:to_copy] += slice_data
                     item["cursor"] += to_copy
 
-                    rec_track = item.get("record_track")
-                    tid = getattr(rec_track, "id", None) if rec_track else item.get("track_id")
-                    if tid and len(slice_data) > 0:
-                        pk_l = float(np.max(np.abs(slice_data[:, 0])))
-                        pk_r = float(np.max(np.abs(slice_data[:, 1])))
-                        if tid not in block_track_peaks:
-                            block_track_peaks[tid] = (pk_l, pk_r)
-                        else:
-                            old_l, old_r = block_track_peaks[tid]
-                            block_track_peaks[tid] = (max(old_l, pk_l), max(old_r, pk_r))
+                    item_track = item.get("track") or item.get("record_track")
+                    tid = getattr(item_track, "id", None) if item_track else item.get("track_id")
+                    gains = self._resolve_live_track_gains(item_track, has_solo_global)
+                    if gains is None:
+                        self._record_block_peak(block_track_peaks, tid, 0.0, 0.0)
+                    else:
+                        g_l, g_r = gains
+                        out[:to_copy, 0] += slice_data[:, 0] * g_l
+                        out[:to_copy, 1] += slice_data[:, 1] * g_r
+                        if tid and len(slice_data) > 0:
+                            pk_l = float(np.max(np.abs(slice_data[:, 0]))) * g_l
+                            pk_r = float(np.max(np.abs(slice_data[:, 1]))) * g_r
+                            self._record_block_peak(block_track_peaks, tid, pk_l, pk_r)
 
                 if item["cursor"] < len(buf):
                     active_previews.append(item)
@@ -1933,19 +2000,21 @@ class AudioEngine:
                     take = min(frames - written, avail)
                     if take > 0:
                         slice_data = buf[cur:cur + take]
-                        out[written:written + take] += slice_data
+                        head_track = head.get("track")
+                        tid = getattr(head_track, "id", None) if head_track else head.get("track_id")
+                        gains = self._resolve_live_track_gains(head_track, has_solo_global)
+                        if gains is None:
+                            self._record_block_peak(block_track_peaks, tid, 0.0, 0.0)
+                        else:
+                            g_l, g_r = gains
+                            out[written:written + take, 0] += slice_data[:, 0] * g_l
+                            out[written:written + take, 1] += slice_data[:, 1] * g_r
+                            if tid and len(slice_data) > 0:
+                                pk_l = float(np.max(np.abs(slice_data[:, 0]))) * g_l
+                                pk_r = float(np.max(np.abs(slice_data[:, 1]))) * g_r
+                                self._record_block_peak(block_track_peaks, tid, pk_l, pk_r)
                         head["cursor"] = cur + take
                         written += take
-
-                        tid = head.get("track_id")
-                        if tid and len(slice_data) > 0:
-                            pk_l = float(np.max(np.abs(slice_data[:, 0])))
-                            pk_r = float(np.max(np.abs(slice_data[:, 1])))
-                            if tid not in block_track_peaks:
-                                block_track_peaks[tid] = (pk_l, pk_r)
-                            else:
-                                old_l, old_r = block_track_peaks[tid]
-                                block_track_peaks[tid] = (max(old_l, pk_l), max(old_r, pk_r))
 
                     if head["cursor"] >= len(buf):
                         self._live_stream_chunks.pop(0)
@@ -1973,16 +2042,14 @@ class AudioEngine:
                     wrapped = True
 
             # Vérifier les pistes en Solo
-            has_solo = any(t.soloed for t in self.project.tracks)
+            has_solo = has_solo_global
 
             # Rendu piste par piste
-            mixer_plugin = self._get_active_mixer_plugin()
             self._playback_live_step = live_native_step
             try:
                 for track in self.project.tracks:
                     if track.muted or (has_solo and not track.soloed):
-                        if mixer_plugin:
-                            mixer_plugin.update_track_peak(track.id, 0.0, 0.0)
+                        self._record_block_peak(block_track_peaks, track.id, 0.0, 0.0)
                         continue
 
                     track_live = (
@@ -1990,7 +2057,10 @@ class AudioEngine:
                         if (live_in_buf is not None and track.track_type == "audio" and getattr(track, "monitoring", False))
                         else None
                     )
-                    track_signal = self._render_track_slice(track, start_beat, end_beat, frames, bpm, live_input_buf=track_live)
+                    track_signal = self._render_track_slice(
+                        track, start_beat, end_beat, frames, bpm,
+                        live_input_buf=track_live, update_mixer_peaks=False
+                    )
                     if track_signal is not None:
                         # Application du volume et panoramique (avec automatisation sample-accurate si active)
                         left_gain, right_gain, eff_vol, eff_pan = self._compute_track_automation_gains(
@@ -2007,11 +2077,7 @@ class AudioEngine:
                         if len(track_signal) > 0:
                             pk_l = float(np.max(np.abs(track_signal[:, 0])))
                             pk_r = float(np.max(np.abs(track_signal[:, 1])))
-                            if track.id not in block_track_peaks:
-                                block_track_peaks[track.id] = (pk_l, pk_r)
-                            else:
-                                old_l, old_r = block_track_peaks[track.id]
-                                block_track_peaks[track.id] = (max(old_l, pk_l), max(old_r, pk_r))
+                            self._record_block_peak(block_track_peaks, track.id, pk_l, pk_r)
             finally:
                 self._playback_live_step = None
 
@@ -2032,11 +2098,12 @@ class AudioEngine:
         elif self._monitor_enabled and self.project and live_in_buf is not None:
             # Mode Monitoring Live à l'arrêt : permet de chanter et voir/entendre les plugins en direct
             bpm = max(20.0, self.project.bpm)
-            has_solo = any(t.soloed for t in self.project.tracks)
+            has_solo = has_solo_global
             for track in self.project.tracks:
                 if track.track_type != "audio" or not getattr(track, "monitoring", False):
                     continue
                 if track.muted or (has_solo and not track.soloed):
+                    self._record_block_peak(block_track_peaks, track.id, 0.0, 0.0)
                     continue
                 mon_sig = self._process_track_effects_chain(track, live_in_buf.copy(), 0.0, 0.0, frames, bpm)
                 if mon_sig is not None and len(mon_sig) > 0:
@@ -2048,26 +2115,26 @@ class AudioEngine:
                     out += mon_sig
                     pk_l = float(np.max(np.abs(mon_sig[:, 0])))
                     pk_r = float(np.max(np.abs(mon_sig[:, 1])))
-                    block_track_peaks[track.id] = (pk_l, pk_r)
+                    self._record_block_peak(block_track_peaks, track.id, pk_l, pk_r)
 
         # Mise à jour des niveaux de crête des pistes dans le mixeur (audio live + lecture)
         mixer_plugin = self._get_active_mixer_plugin()
         if mixer_plugin and block_track_peaks:
             for tid, (pk_l, pk_r) in block_track_peaks.items():
-                mixer_plugin.update_track_peak(tid, pk_l, pk_r)
+                mixer_plugin.update_track_peak(tid, pk_l, pk_r, dt_sec=dt_sec)
 
         # 3. Traitement de la piste Master et de sa pile de plugins (Mixeur, EQ, Compresseur)
         has_active_mixer = False
         if self.project and getattr(self.project, "master_track", None):
             master_t = self.project.master_track
             has_active_mixer = any(getattr(p, "plugin_type_id", "") == "novadaw.mixer" and getattr(p, "enabled", True) for p in getattr(master_t, "plugins", []))
-            if not master_t.muted:
-                # Si le Mixeur est actif, il gère déjà le volume, le pan, le mono et le dim
-                if not has_active_mixer:
-                    vol = master_t.volume
-                    pan = max(-1.0, min(1.0, master_t.pan))
-                    out[:, 0] *= vol * (1.0 - max(0.0, pan))
-                    out[:, 1] *= vol * (1.0 + min(0.0, pan))
+            if master_t.muted:
+                out.fill(0.0)
+            elif not has_active_mixer:
+                vol = master_t.volume
+                pan = max(-1.0, min(1.0, master_t.pan))
+                out[:, 0] *= vol * (1.0 - max(0.0, pan))
+                out[:, 1] *= vol * (1.0 + min(0.0, pan))
             out = self._process_vst_effects(master_t, out)
             if hasattr(master_t, "plugins") and master_t.plugins:
                 for plugin in master_t.plugins:
@@ -3004,14 +3071,15 @@ class AudioEngine:
                 read_automation=lambda param, beat: self._read_track_automation_value(track, param, beat),
             )
             for plugin in track.plugins:
-                if track.track_type == "midi" and (plugin is native_inst or getattr(plugin, "is_instrument", False)):
+                if self._is_non_insert_plugin(plugin, track, native_inst):
                     continue
                 if getattr(plugin, "enabled", True):
                     try:
                         if hasattr(plugin, "process_with_context"):
-                            track_buf = plugin.process_with_context(track_buf, self.sample_rate, ctx)
+                            res = plugin.process_with_context(track_buf, self.sample_rate, ctx)
                         else:
-                            track_buf = plugin.process(track_buf, self.sample_rate)
+                            res = plugin.process(track_buf, self.sample_rate)
+                        track_buf = self._normalize_plugin_output(res, track_buf, frames)
                     except Exception:
                         pass
         return track_buf
@@ -3024,6 +3092,7 @@ class AudioEngine:
         frames: int,
         bpm: float,
         live_input_buf: Optional[np.ndarray] = None,
+        update_mixer_peaks: bool = True,
     ) -> Optional[np.ndarray]:
         track_buf = None
         native_inst = None
@@ -3068,17 +3137,19 @@ class AudioEngine:
         # 4. Traitement VST + pile de plugins modulaires (Égaliseur, Compresseur, Nova Vocal Glide...)
         track_buf = self._process_track_effects_chain(track, track_buf, start_b, end_b, frames, bpm, native_inst=native_inst)
 
-        # 5. Envoi des niveaux de crête au plugin Mixeur pour les VU-mètres (post-fader)
-        mixer_plugin = self._get_active_mixer_plugin()
-        if mixer_plugin and track_buf is not None and len(track_buf) > 0:
-            left_gain, right_gain, _, _ = self._compute_track_automation_gains(track, start_b, end_b, frames)
-            if isinstance(left_gain, np.ndarray):
-                pk_l = float(np.max(np.abs(track_buf[:, 0] * left_gain)))
-                pk_r = float(np.max(np.abs(track_buf[:, 1] * right_gain)))
-            else:
-                pk_l = float(np.max(np.abs(track_buf[:, 0]))) * float(left_gain)
-                pk_r = float(np.max(np.abs(track_buf[:, 1]))) * float(right_gain)
-            mixer_plugin.update_track_peak(track.id, pk_l, pk_r)
+        # 5. Envoi des niveaux de crête au plugin Mixeur pour les VU-mètres (post-fader) lors d'appels autonomes
+        if update_mixer_peaks:
+            mixer_plugin = self._get_active_mixer_plugin()
+            if mixer_plugin and track_buf is not None and len(track_buf) > 0:
+                left_gain, right_gain, _, _ = self._compute_track_automation_gains(track, start_b, end_b, frames)
+                if isinstance(left_gain, np.ndarray):
+                    pk_l = float(np.max(np.abs(track_buf[:, 0] * left_gain)))
+                    pk_r = float(np.max(np.abs(track_buf[:, 1] * right_gain)))
+                else:
+                    pk_l = float(np.max(np.abs(track_buf[:, 0]))) * float(left_gain)
+                    pk_r = float(np.max(np.abs(track_buf[:, 1]))) * float(right_gain)
+                dt_sec = frames / float(max(8000, int(self.sample_rate)))
+                mixer_plugin.update_track_peak(track.id, pk_l, pk_r, dt_sec=dt_sec)
 
         return track_buf
 

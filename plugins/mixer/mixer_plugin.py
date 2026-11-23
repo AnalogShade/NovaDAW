@@ -95,16 +95,17 @@ class MixerPlugin(BasePlugin):
         out[:, 0] *= gain_l
         out[:, 1] *= gain_r
 
-        # 3. Calcul des niveaux de crête (Peak Meters) avec peak-hold instantané et amortissement doux
+        # 3. Calcul des niveaux de crête (Peak Meters) avec maintien temporel pour capturer tous les transitoires
         max_l = float(np.max(np.abs(out[:, 0]))) if len(out) > 0 else 0.0
         max_r = float(np.max(np.abs(out[:, 1]))) if len(out) > 0 else 0.0
 
         cur_l = 20.0 * np.log10(max(1e-5, max_l))
         cur_r = 20.0 * np.log10(max(1e-5, max_r))
 
-        # Réaction d'attaque instantanée et maintien pour que le rafraîchissement UI capture tous les transitoires
-        self.peak_left_db = max(self.peak_left_db - 0.5, cur_l)
-        self.peak_right_db = max(self.peak_right_db - 0.5, cur_r)
+        dt_sec = len(out) / float(max(8000, int(sample_rate or 44100)))
+        decay_db = min(0.5, 18.0 * dt_sec)
+        self.peak_left_db = max(-60.0, self.peak_left_db - decay_db, cur_l)
+        self.peak_right_db = max(-60.0, self.peak_right_db - decay_db, cur_r)
 
         # Calcul RMS
         rms_l = float(np.sqrt(np.mean(out[:, 0] ** 2))) if len(out) > 0 else 0.0
@@ -114,14 +115,15 @@ class MixerPlugin(BasePlugin):
 
         return out
 
-    def update_track_peak(self, track_id: str, peak_l: float, peak_r: float):
-        """Appelé par le moteur audio pour mettre à jour les niveaux d'une piste individuelle"""
+    def update_track_peak(self, track_id: str, peak_l: float, peak_r: float, dt_sec: Optional[float] = None):
+        """Appelé par le moteur audio pour mettre à jour les niveaux d'une piste individuelle."""
         cur_l = 20.0 * np.log10(max(1e-5, peak_l))
         cur_r = 20.0 * np.log10(max(1e-5, peak_r))
+        decay_db = 0.5 if dt_sec is None else min(0.8, 18.0 * max(0.0, float(dt_sec)))
         old_l, old_r = self.track_peaks.get(track_id, (-60.0, -60.0))
         self.track_peaks[track_id] = (
-            max(old_l - 0.5, cur_l),
-            max(old_r - 0.5, cur_r)
+            max(-60.0, old_l - decay_db, cur_l),
+            max(-60.0, old_r - decay_db, cur_r),
         )
 
     def get_state(self) -> Dict[str, Any]:

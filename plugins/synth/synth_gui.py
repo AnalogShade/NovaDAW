@@ -2095,13 +2095,11 @@ class NovaSynthGUI(QWidget):
 
         self.scope.set_audio_data(wave)
 
-        # 1. Utiliser le moteur audio en direct du DAW si actif (latence ultra-faible < 5ms)
-        from core.audio_engine import get_global_audio_engine
-        engine = get_global_audio_engine()
-        if engine and hasattr(engine, "play_preview_buffer"):
-            track = engine.get_track_for_plugin(self.plugin) if hasattr(engine, "get_track_for_plugin") else None
-            if engine.play_preview_buffer(wave, choke_group=0, track=track):
-                return
-
-        # 2. Repli sur le lecteur audio dédié
-        LowLatencySynthAudition.get_instance().play(wave)
+        from plugins.base import play_plugin_audition
+        play_plugin_audition(
+            self.plugin,
+            wave,
+            widget=self,
+            choke_group=0,
+            fallback_player=LowLatencySynthAudition.get_instance().play,
+        )

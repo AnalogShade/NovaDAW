@@ -361,16 +361,18 @@ class MixerChannelStrip(QFrame):
             self._update_rec_style(self.track.armed)
 
         vol_val = int(round(self.track.volume * 100))
-        self.slider_vol.blockSignals(True)
-        self.slider_vol.setValue(vol_val)
-        self.slider_vol.blockSignals(False)
+        if self.slider_vol.value() != vol_val:
+            self.slider_vol.blockSignals(True)
+            self.slider_vol.setValue(vol_val)
+            self.slider_vol.blockSignals(False)
         self.lbl_vol_db.setText(f"{vol_val}%")
         self.slider_vol.setToolTip(f"Volume : {vol_val}% (Double-clic: 80%)")
 
         pan_val = int(round(self.track.pan * 100))
-        self.slider_pan.blockSignals(True)
-        self.slider_pan.setValue(pan_val)
-        self.slider_pan.blockSignals(False)
+        if self.slider_pan.value() != pan_val:
+            self.slider_pan.blockSignals(True)
+            self.slider_pan.setValue(pan_val)
+            self.slider_pan.blockSignals(False)
         self._update_pan_tooltip(pan_val)
 
         self._update_name_label()

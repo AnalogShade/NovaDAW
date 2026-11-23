@@ -721,32 +721,31 @@ class DrumMachineWidget(QWidget):
 
     def _play_pad(self, pad: DrumPad):
         """
-        Déclenche immédiatement l'échantillon pré-mis en tampon en RAM (< 5ms de latence globale).
-        Assure une restitution audio instantanée dès le clic.
+        Déclenche immédiatement l'échantillon pré-mis en tampon en RAM (< 5ms de latence globale)
+        via la tranche de mixeur de la piste (volume, pan, mute/solo, effets et VU-mètre).
         """
-        # Récupère l'audio pré-généré directement du cache en mémoire vive (0 ms de calcul CPU)
         wave = self.plugin.get_cached_pad_audio(pad.pad_id, velocity=115)
 
-        # 1. Tenter la lecture via le moteur audio maître NovaDAW (latence minimale et device ASIO/WASAPI)
-        try:
-            from core.audio_engine import get_global_audio_engine
-            engine = get_global_audio_engine()
-            if engine and getattr(engine, "_stream", None) and getattr(engine._stream, "active", False):
-                if engine.play_preview_buffer(wave, choke_group=pad.choke_group):
-                    return
-        except Exception:
-            pass
+        from plugins.base import play_plugin_audition
 
-        # 2. Repli vers le lecteur permanent dédié à ultra-faible latence (< 8ms)
-        try:
-            player = LowLatencySoundPlayer.get_instance()
-            player.play(wave, choke_group=pad.choke_group)
-        except Exception:
+        def _fallback_play(buf: np.ndarray):
             try:
-                import sounddevice as sd
-                sd.play(wave, 44100)
+                player = LowLatencySoundPlayer.get_instance()
+                player.play(buf, choke_group=pad.choke_group)
             except Exception:
-                pass
+                try:
+                    import sounddevice as sd
+                    sd.play(buf, 44100)
+                except Exception:
+                    pass
+
+        play_plugin_audition(
+            self.plugin,
+            wave,
+            widget=self,
+            choke_group=pad.choke_group,
+            fallback_player=_fallback_play,
+        )
 
     def _update_cache_badge(self):
         if not hasattr(self, "lbl_cache_badge"):

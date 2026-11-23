@@ -309,34 +309,50 @@ def open_plugin_editor_gui(file_path: str, parent=None, instance_key=None, track
 _open_native_editors: dict = {}
 
 
+def _match_plugin_in_project(plugin, proj):
+    """Recherche multi-passes d'un plugin dans un projet (référence, instance_id, puis plugin_path)."""
+    if not proj or not hasattr(proj, "tracks"):
+        return None
+    all_tracks = list(proj.tracks)
+    if getattr(proj, "master_track", None):
+        all_tracks.append(proj.master_track)
+    for trk in all_tracks:
+        if any(p is plugin for p in getattr(trk, "plugins", [])):
+            return trk
+    inst_id = getattr(plugin, "instance_id", None)
+    if inst_id:
+        for trk in all_tracks:
+            if any(getattr(p, "instance_id", None) == inst_id for p in getattr(trk, "plugins", [])):
+                return trk
+    type_id = getattr(plugin, "plugin_type_id", None)
+    if type_id:
+        for trk in proj.tracks:
+            if getattr(trk, "plugin_path", None) == type_id:
+                return trk
+    return None
+
+
 def find_track_for_plugin(plugin, parent=None):
     """Retrouve la piste associée à une instance de plugin natif."""
     if not plugin:
         return None
-    # 1. Vérifier si parent possède une piste
+    # 1. Vérifier si parent possède une piste ou un projet
     if parent:
         t = getattr(parent, "track", None) or getattr(parent, "current_track", None)
         if t:
             return t
         proj = getattr(parent, "project", None)
-        if proj and hasattr(proj, "tracks"):
-            for trk in proj.tracks:
-                if plugin in getattr(trk, "plugins", []):
-                    return trk
-                if getattr(trk, "plugin_path", None) == getattr(plugin, "plugin_type_id", None):
-                    return trk
+        matched = _match_plugin_in_project(plugin, proj)
+        if matched is not None:
+            return matched
     # 2. Chercher dans les fenêtres de premier niveau
     from PySide6.QtWidgets import QApplication
     app = QApplication.instance()
     if app:
         for w in app.topLevelWidgets():
-            proj = getattr(w, "project", None)
-            if proj and hasattr(proj, "tracks"):
-                for trk in proj.tracks:
-                    if plugin in getattr(trk, "plugins", []):
-                        return trk
-                    if getattr(trk, "plugin_path", None) == getattr(plugin, "plugin_type_id", None):
-                        return trk
+            matched = _match_plugin_in_project(plugin, getattr(w, "project", None))
+            if matched is not None:
+                return matched
     return None
 
 
@@ -514,10 +530,18 @@ class NativePluginDialog(QDialog):
             p = parent
             while p and not hasattr(p, "_on_track_mixer_changed"):
                 p = p.parent() if hasattr(p, "parent") else None
+            if p is None:
+                p = _find_main_window(parent)
             if p and hasattr(p, "_on_track_mixer_changed") and hasattr(self.editor, "track_mixer_changed"):
                 self.editor.track_mixer_changed.connect(p._on_track_mixer_changed)
             if p and hasattr(p, "_on_track_selected") and hasattr(self.editor, "track_selected"):
                 self.editor.track_selected.connect(p._on_track_selected)
+            if p and hasattr(p, "_on_track_deleted") and hasattr(self.editor, "track_deleted"):
+                self.editor.track_deleted.connect(p._on_track_deleted)
+            if p and hasattr(p, "_on_master_vol_changed") and hasattr(self.editor, "master_volume_changed"):
+                self.editor.master_volume_changed.connect(lambda v: p._on_master_vol_changed(v, origin="mixer"))
+            if p and hasattr(p, "show_master_fx_rack") and hasattr(self.editor, "master_fx_requested"):
+                self.editor.master_fx_requested.connect(p.show_master_fx_rack)
 
         # Raccourci pour basculer le clavier musical virtuel même depuis la fenêtre du plugin
         from PySide6.QtGui import QShortcut, QKeySequence

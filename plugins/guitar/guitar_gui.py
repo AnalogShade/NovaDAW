@@ -394,8 +394,15 @@ class NovaGuitarEditorWidget(QWidget):
                 if fade_n > 1:
                     wave[-fade_n:] *= np.linspace(1.0, 0.0, fade_n, dtype=np.float32)[:, None]
 
+            from plugins.base import play_plugin_audition
             from plugins.synth.synth_gui import LowLatencySynthAudition
-            LowLatencySynthAudition.get_instance().play(wave)
+            play_plugin_audition(
+                self.plugin,
+                wave,
+                widget=self,
+                choke_group=0,
+                fallback_player=LowLatencySynthAudition.get_instance().play,
+            )
         except Exception as e:
             print(f"[NovaGuitarGUI] Erreur audition : {e}")
 
