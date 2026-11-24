@@ -60,6 +60,28 @@ def test_soundboard_has_shared_position_dependent_and_continuous_state():
     assert not np.allclose(expected[:, 0], expected[:, 1])
 
 
+def test_soundboard_disperses_impulse_and_bass_has_piano_envelope():
+    rate = 44100
+    board = PianoSoundboard(rate)
+    impulse = np.zeros((rate // 4, BRIDGE_CHANNELS), dtype=np.float32)
+    impulse[0, 1] = 1.0
+    ir = board.process(impulse, 0.67).mean(axis=1)
+    # Soundboard must disperse significant energy past the first millisecond
+    # instead of passing a raw piezo-like impulse straight through.
+    energy_after_1ms = float(np.sum(ir[round(0.001 * rate):] ** 2) / np.sum(ir ** 2))
+    assert energy_after_1ms > 0.30
+
+    piano = NovaPianoPlugin()
+    piano.set_state({"reverb_mix": 0.0})
+    bass = piano.render_note(36, 1.2, rate, 100)[:, 0]
+    early_rms = float(np.sqrt(np.mean(bass[round(0.02 * rate):round(0.10 * rate)] ** 2)))
+    mid_rms = float(np.sqrt(np.mean(bass[round(0.15 * rate):round(0.45 * rate)] ** 2)))
+    # Two-stage piano decay: prompt sound clearly drops into the aftersound.
+    assert early_rms > 1.45 * mid_rms
+    # No single-millisecond plectrum spike dominating the attack window.
+    assert np.argmax(np.abs(bass[:round(0.05 * rate)])) > round(0.003 * rate)
+
+
 @pytest.mark.parametrize(("pitch", "threshold", "energy_range"), [
     (36, 500, (.11, .36)),
     (60, 1000, (.023, .11)),
