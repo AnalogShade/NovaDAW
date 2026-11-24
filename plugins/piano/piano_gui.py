@@ -161,10 +161,10 @@ class NovaPianoEditor(QWidget):
         engine = get_global_audio_engine()
         sample_rate = engine.sample_rate if engine is not None else 44100
         notes = [
-            SimpleNamespace(pitch=pitch, velocity=velocity, start_beat=0.0, duration=0.65)
+            SimpleNamespace(pitch=pitch, velocity=velocity, start_beat=0.0, duration=1.45)
             for pitch, velocity in ((48, 91), (55, 77), (64, 85), (71, 69))
         ]
-        frames = round((0.8 + self.plugin.get_release_tail_sec()) * sample_rate)
+        frames = round((1.55 + self.plugin.get_release_tail_sec()) * sample_rate)
         wave = self.plugin.render_in_context(
             notes, 0.0, 1.0, frames, sample_rate, self.plugin.create_isolated_context(sample_rate)
         )

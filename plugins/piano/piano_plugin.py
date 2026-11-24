@@ -95,7 +95,8 @@ class NovaPianoPlugin(BasePlugin):
 
     @staticmethod
     def _tail_sec(state):
-        return DRY_TAIL_SEC + (ROOMS[state["reverb_room"]][-1] if state["reverb_mix"] else 0)
+        extra_board = max(0.0, (state["soundboard_resonance"] - 0.67) * 2.2)
+        return DRY_TAIL_SEC + extra_board + (ROOMS[state["reverb_room"]][-1] if state["reverb_mix"] else 0)
 
     def get_release_tail_sec(self):
         return self._tail_sec(self.get_state())

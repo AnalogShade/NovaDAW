@@ -122,6 +122,36 @@ def test_keyboard_has_even_response_without_guitar_wolf_notes_or_dead_keys():
     assert float(np.max(steps_db)) < 3.5
 
 
+def test_soundboard_resonance_slider_shapes_body_sustain_and_sympathetic_halo():
+    """Verify soundboard_resonance (0% -> 100%) produces clear timbral, sustain, and halo changes."""
+    rate = 44100
+    piano = NovaPianoPlugin()
+    notes = [
+        SimpleNamespace(pitch=pitch, velocity=velocity, start_beat=0.0, duration=1.2)
+        for pitch, velocity in ((48, 91), (55, 77), (64, 85), (71, 69))
+    ]
+    frames = round(2.4 * rate)
+
+    piano.set_state({"reverb_mix": 0.0, "soundboard_resonance": 0.0})
+    dry_board = piano.render_in_context(notes, 0.0, 1.0, frames, rate, piano.create_isolated_context(rate))
+
+    piano.set_state({"reverb_mix": 0.0, "soundboard_resonance": 1.0})
+    full_board = piano.render_in_context(notes, 0.0, 1.0, frames, rate, piano.create_isolated_context(rate))
+
+    # 1. Held sustain (0.7s - 1.15s) must be dramatically stronger at 100% than at 0%.
+    sustain_0 = float(np.sqrt(np.mean(dry_board[round(0.70 * rate):round(1.15 * rate)] ** 2)))
+    sustain_1 = float(np.sqrt(np.mean(full_board[round(0.70 * rate):round(1.15 * rate)] ** 2)))
+    assert sustain_1 > 4.0 * sustain_0
+
+    # 2. Sympathetic soundboard & harp halo after note-off (1.35s - 1.95s, reverb=0) must be clearly audible.
+    halo_0 = float(np.sqrt(np.mean(dry_board[round(1.35 * rate):round(1.95 * rate)] ** 2)))
+    halo_1 = float(np.sqrt(np.mean(full_board[round(1.35 * rate):round(1.95 * rate)] ** 2)))
+    assert halo_1 > 0.005 and halo_1 > 20.0 * max(halo_0, 1e-7)
+
+    # 3. No digital clipping on full-resonance chords.
+    assert float(np.max(np.abs(full_board))) < 0.98
+
+
 def test_host_live_cache_and_export_keep_independent_modal_state(monkeypatch, tmp_path):
     # Exercise the host entry points in-process with no stream or application.
     from core import audio_engine, hardware_manager

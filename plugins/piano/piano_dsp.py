@@ -155,18 +155,21 @@ def string_modes(pitch, sample_rate, board_resonance):
     partial, frequency = partial[keep], frequency[keep]
 
     natural_loss = np.interp(pitch, KEYS, LATE_LOSS)
-    # Frequency-dependent internal steel friction + viscous air damping:
-    # upper partials sparkle at attack and melt smoothly into singing low partials.
-    slow = (
-        natural_loss
-        + (0.042 + 0.085 * register) * (partial - 1)
+    # Wide, perceptible sustain scaling: 0% gives a short, damped studio piano decay;
+    # 67% gives balanced concert-grand sustain; 100% gives lush, singing long sustain (~6x 0%).
+    load = float(np.interp(board_resonance, (0.0, 0.35, 0.67, 1.0), (2.65, 1.60, 1.00, 0.44)))
+    # Keep internal steel friction + viscous air damping independent of soundboard bridge load
+    # so 0% resonance stays crisp/dry rather than artificially muffled.
+    internal_air_loss = (
+        (0.042 + 0.085 * register) * (partial - 1)
         + 3.6 * (frequency / 2600.0) ** 1.62
     )
+    slow_loaded = natural_loss * load + internal_air_loss
     treble_handover = np.interp(pitch, (72, 78, 84, 90, 96, 108), (0.0, 1.4, 3.6, 5.2, 6.2, 7.2))
-    # Grand-piano vertical bridge-coupled prompt decay: clear two-stage onset bloom
-    # without collapsing abruptly after 150 ms like a low-tension plucked guitar string.
-    prompt = slow + 4.5 + 3.4 * (frequency / 800.0) ** 0.85 + treble_handover
-    load = 1.0 - 0.55 * (board_resonance - 0.67)
+    prompt_loaded = (
+        slow_loaded
+        + (4.5 + 3.4 * (frequency / 800.0) ** 0.85 + treble_handover) * (0.65 + 0.35 * load)
+    )
 
     # True multi-string unison & Weinreich two-polarization coupling:
     # - Prompt energy is shared across mistuned vertical unison components so even
@@ -243,7 +246,7 @@ def string_modes(pitch, sample_rate, board_resonance):
         detuned = frequency[selected] * 2 ** (cents * unison_rate[selected] / 1200)
         omega = 2 * np.pi * detuned
         angular_frequencies.append(omega)
-        losses.append((prompt if is_prompt else slow)[selected] * load)
+        losses.append((prompt_loaded if is_prompt else slow_loaded)[selected])
         forces.append((force * modal_share)[selected])
         bands.append(band_indices(partial[selected]))
 
@@ -259,7 +262,8 @@ def string_modes(pitch, sample_rate, board_resonance):
             dup_hz = duplex_hz[keep_dup]
             dup_omega = 2 * np.pi * dup_hz
             dup_loss = (2.1 + 0.0016 * dup_hz) * load
-            dup_level = np.interp(pitch, (58, 72, 88, 108), (0.018, 0.036, 0.052, 0.060))
+            dup_scale = float(np.interp(board_resonance, (0.0, 0.67, 1.0), (0.15, 1.00, 1.95)))
+            dup_level = np.interp(pitch, (58, 72, 88, 108), (0.018, 0.036, 0.052, 0.060)) * dup_scale
             dup_force = 2 * np.pi * fundamental * register_regulation * dup_level * np.array([1.0, -0.65])[:len(dup_hz)]
             angular_frequencies.append(dup_omega)
             losses.append(dup_loss)
@@ -268,7 +272,7 @@ def string_modes(pitch, sample_rate, board_resonance):
 
     poles = -np.concatenate(losses) + 1j * np.concatenate(angular_frequencies)
     bank = _modal_bank(poles, sample_rate)
-    longitudinal = _longitudinal_modes(pitch, frequency, slow * load, sample_rate)
+    longitudinal = _longitudinal_modes(pitch, frequency, slow_loaded, sample_rate)
     return StringModes(
         bank.poles, bank.kernel, bank.kernel_t, np.concatenate(forces), np.concatenate(bands),
         len(frequency), int(np.count_nonzero(ring)), ring_branches, longitudinal,
