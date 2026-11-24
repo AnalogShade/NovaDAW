@@ -1209,6 +1209,7 @@ class AudioEngine:
             for tid in expired_tids:
                 self._live_native_tail_until.pop(tid, None)
                 self._live_native_tracks.pop(tid, None)
+                self._live_native_contexts.pop(("novadaw.piano", tid), None)
 
             if not self._live_native_notes and not self._live_native_tail_until:
                 return None
@@ -1263,8 +1264,19 @@ class AudioEngine:
             for n in notes
         ]
 
+        ptype = getattr(native_inst, "plugin_type_id", None)
+        if ptype == "novadaw.piano":
+            # The live keyboard has its own clock, even during sequencer playback.
+            ctx_key = (ptype, tid)
+            owner, ctx = self._live_native_contexts.get(ctx_key, (None, None))
+            if owner is not native_inst:
+                ctx = native_inst.create_isolated_context(self.sample_rate)
+                self._live_native_contexts[ctx_key] = (native_inst, ctx)
+            return native_inst.render_in_context(
+                note_objs, start_b, 2.0, frames, self.sample_rate, ctx
+            ), native_inst
+
         if use_isolated_ctx:
-            ptype = getattr(native_inst, "plugin_type_id", None)
             if ptype == "novadaw.guitar" and hasattr(native_inst, "create_isolated_context") and hasattr(native_inst, "_render_slice_internal"):
                 ctx_key = ("guitar", tid)
                 ctx = self._live_native_contexts.get(ctx_key)
@@ -2304,6 +2316,8 @@ class AudioEngine:
                     for l in getattr(inst, "layers", [])
                 ),
             )
+        if ptype == "novadaw.piano":
+            return tuple(inst.get_state().items())
         if ptype == "novadaw.guitar":
             return (
                 getattr(inst, "enabled", True),
@@ -2479,12 +2493,15 @@ class AudioEngine:
                         ))
                 all_midi_notes.sort(key=lambda n: n.start_beat)
 
-                # Créer des instances isolées pour NovaSynth / Nova Guitar afin de ne jamais perturber les états de lecture temps réel
+                # Préserver les états de lecture temps réel pendant le pré-rendu.
                 iso_delay = None
                 iso_reverb = None
                 iso_svfs = None
                 iso_guitar_ctx = None
-                if getattr(native_inst, "plugin_type_id", None) == "novadaw.guitar" and hasattr(native_inst, "create_isolated_context"):
+                iso_piano_ctx = None
+                if getattr(native_inst, "plugin_type_id", None) == "novadaw.piano":
+                    iso_piano_ctx = native_inst.create_isolated_context(sample_rate)
+                elif getattr(native_inst, "plugin_type_id", None) == "novadaw.guitar" and hasattr(native_inst, "create_isolated_context"):
                     try:
                         iso_guitar_ctx = native_inst.create_isolated_context(sample_rate)
                     except Exception:
@@ -2543,7 +2560,11 @@ class AudioEngine:
 
                     if chunk_notes or has_active_drum_voices:
                         try:
-                            if iso_guitar_ctx is not None:
+                            if iso_piano_ctx is not None:
+                                rendered = native_inst.render_in_context(
+                                    chunk_notes, sb, beats_per_sec, n, sample_rate, iso_piano_ctx
+                                )
+                            elif iso_guitar_ctx is not None:
                                 rendered = native_inst._render_slice_internal(
                                     chunk_notes, sb, eb, beats_per_sec, n, sample_rate,
                                     isolated_ctx=iso_guitar_ctx,
@@ -2680,6 +2701,14 @@ class AudioEngine:
                 for clip in track.clips:
                     max_beat = max(max_beat, clip.start_beat + clip.length_beats)
             end_beat = max_beat + 4.0
+            for track in project.tracks:
+                if track.plugin_path == "novadaw.piano":
+                    piano = self.get_native_instrument(track)
+                    if piano is not None:
+                        tail_beats = piano.get_release_tail_sec() * bpm / 60.0
+                        for clip in track.clips:
+                            if isinstance(clip, MidiClip):
+                                end_beat = max(end_beat, clip.start_beat + clip.length_beats + tail_beats)
             total_frames = max(1024, int(end_beat / (bpm / 60.0) * sample_rate))
             jobs = []
             for track in sorted(list(project.tracks), key=lambda t: (not t.soloed, t.muted)):
@@ -3271,6 +3300,7 @@ class AudioEngine:
             renderer.project = project
             renderer._asio_guard_enabled = False
             renderer._track_audio_caches = {}
+            renderer._live_native_contexts = {}
             renderer.track_plugins = {}
             renderer._vst_midi_channels = {}
             renderer._master_peak_lock = threading.Lock()

@@ -1,0 +1,130 @@
+"""Headless tests for the Nova Piano modal core and its host contract."""
+
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+import soundfile as sf
+
+from plugins.piano.piano_dsp import HammerDrivenModes, _hammer_at_bridge, string_modes
+from plugins.piano.piano_plugin import NovaPianoPlugin
+from plugins.piano.piano_soundboard import BRIDGE_CHANNELS, PianoSoundboard
+
+
+def test_bridge_contact_projection_preserves_the_modal_phase():
+    rate = 44100
+    modes = string_modes(36, rate, .67)
+    duration = .00176
+    drive = .1 * modes.bridge_force
+    pressure, separation = _hammer_at_bridge(modes, drive, duration, .36, rate)
+    frames = len(pressure)
+    broad = HammerDrivenModes(modes.poles.imag, -modes.poles.real[None, :], duration, (.64,))
+    core = HammerDrivenModes(modes.poles.imag, -modes.poles.real[None, :], duration * .29, (.36,))
+    times = np.arange(frames) / rate
+    expected = (broad.response(times) + core.response(times)) @ drive
+    np.testing.assert_allclose(pressure, expected, atol=2e-6, rtol=1e-5)
+    terminal = broad.displacement_state(frames / rate) + core.displacement_state(frames / rate)
+    np.testing.assert_allclose(
+        separation, terminal[0] * drive, atol=1e-12
+    )
+
+
+def test_bass_modes_include_stiffness_and_longitudinal_sum_frequencies():
+    modes = string_modes(36, 44100, .67)
+    frequency = modes.poles.imag / (2 * np.pi)
+    assert frequency[modes.primary_count - 1] > 9000
+    assert frequency[9] > 1.004 * 10 * frequency[0]
+    assert modes.longitudinal is not None
+    phantoms = modes.longitudinal
+    even_odd = phantoms.bank.poles[:len(phantoms.left)].imag / (2 * np.pi)
+    np.testing.assert_allclose(even_odd, frequency[phantoms.left] + frequency[phantoms.right])
+
+
+def test_soundboard_has_shared_position_dependent_and_continuous_state():
+    board = PianoSoundboard(44100)
+    force = np.zeros((1337, BRIDGE_CHANNELS), dtype=np.float32)
+    force[0, 0] = 1.0
+    force[531, -1] = 0.8
+    expected = board.process(force, .67)
+    board.reset()
+    blocked = np.concatenate([
+        board.process(force[:93], .67),
+        board.process(force[93:712], .67),
+        board.process(force[712:], .67),
+    ])
+    np.testing.assert_allclose(blocked, expected, atol=1e-7)
+    assert np.max(np.abs(blocked[150:445])) > 1e-4
+    board.reset()
+    changed_position = board.process(force[:, ::-1].copy(), .67)
+    assert not np.allclose(expected, changed_position)
+    assert not np.allclose(expected[:, 0], expected[:, 1])
+
+
+@pytest.mark.parametrize(("pitch", "threshold", "energy_range"), [
+    (36, 500, (.11, .36)),
+    (60, 1000, (.023, .11)),
+    (84, 2000, (.00025, .009)),
+])
+def test_pressure_voicing_is_register_specific(pitch, threshold, energy_range):
+    piano = NovaPianoPlugin()
+    piano.set_state({"reverb_mix": 0})
+    rate = 44100
+    segment = piano.render_note(pitch, .45, rate, 80)[round(.02 * rate):round(.12 * rate)]
+    bins = np.fft.rfftfreq(len(segment), 1 / rate)
+    band = (30 < bins) & (bins < 8000)
+    power = np.sum(np.abs(np.fft.rfft(segment * np.hanning(len(segment))[:, None], axis=0))**2, axis=1)
+    fraction = power[band & (bins >= threshold)].sum() / power[band].sum()
+    assert energy_range[0] < fraction < energy_range[1]
+
+
+def test_host_live_cache_and_export_keep_independent_modal_state(monkeypatch, tmp_path):
+    # Exercise the host entry points in-process with no stream or application.
+    from core import audio_engine, hardware_manager
+    from core.actions.plugins import configure_piano
+    from core.project import MidiClip, MidiNote, Project, Track
+    from core.serializer import load_project, save_project
+
+    monkeypatch.setenv("NOVADAW_SILENT_TESTS", "1")
+    monkeypatch.setattr(audio_engine, "HAS_SOUNDDEVICE", False)
+    monkeypatch.setattr(hardware_manager, "HAS_SOUNDDEVICE", False)
+
+    project = Project(bpm=120)
+    track = Track(name="Piano", track_type="midi")
+    clip = MidiClip(start_beat=0, length_beats=4)
+    clip.notes = [MidiNote(pitch=60, start_beat=0, duration=1.2, velocity=99)]
+    track.clips.append(clip)
+    project.add_track(track)
+    result = configure_piano(
+        SimpleNamespace(project=project), track.id, reverb_room="cathedral",
+        reverb_mix=.48, hammer_hardness=.72, soundboard_resonance=.55,
+    )
+    assert result["status"] == "success"
+    project_path = tmp_path / "piano.ndaw"
+    save_project(project, str(project_path))
+    restored = load_project(str(project_path))
+    track = restored.get_track(track.id)
+    piano = track.get_plugin(result["plugin_instance_id"])
+    assert piano.get_state() == result["state"]
+
+    rate = 22050
+    engine = audio_engine.AudioEngine(sample_rate=rate, block_size=256, output_device=-1, input_device=-1)
+    try:
+        assert engine._stream is None
+        engine._asio_guard_enabled = False
+        engine.set_project(restored)
+        note = dict(pitch=60, start_beat=0., duration=1.2, velocity=99, live_id=1, native_inst=piano)
+        live, owner = engine._render_track_live_native_audio(track.id, track, [note], 0., 512 / rate, 256)
+        assert owner is piano
+        assert np.max(np.abs(live)) > .025
+        context = engine._live_native_contexts[("novadaw.piano", track.id)][1]
+        cached = engine._render_track_offline(track, 120, rate, 8)
+        np.testing.assert_allclose(live, cached[:256], atol=3e-6)
+        assert np.max(np.abs(cached[rate:])) > .001
+        output = tmp_path / "piano.wav"
+        assert engine.export_wav(str(output), end_bar=2)
+        recorded, written_rate = sf.read(output)
+        assert written_rate == rate and np.max(np.abs(recorded)) > .04
+        assert context.next_sample == 256
+        assert piano._timeline_room.next_sample is None
+    finally:
+        engine.close()

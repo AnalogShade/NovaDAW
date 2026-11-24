@@ -6,9 +6,65 @@ from core.action_registry import action_registry
 from plugins.registry import plugin_registry, ensure_plugins_loaded
 
 
+def _notify_plugin_change(app, track=None) -> None:
+    """Invalide le cache audio de la piste, marque le projet modifié et rafraîchit l'UI."""
+    if track is not None:
+        engine = getattr(app, "audio_engine", None)
+        if engine is not None and hasattr(engine, "invalidate_track_cache"):
+            engine.invalidate_track_cache(track.id, trigger_async=True)
+    if hasattr(app, "set_dirty"):
+        app.set_dirty(True)
+    if hasattr(app, "refresh_project_ui"):
+        app.refresh_project_ui()
+
+
+def _get_or_create_plugin(
+    app,
+    track_id_or_name: str,
+    plugin_type_id: str,
+    plugin_instance_id: Optional[str] = None,
+    insert_at_front: bool = False,
+):
+    """Trouve ou instancie un plugin natif donné sur la piste demandée."""
+    ensure_plugins_loaded()
+    track = app.project.get_track(track_id_or_name)
+    if not track:
+        raise ValueError(f"Piste '{track_id_or_name}' introuvable.")
+
+    plugin = None
+    if plugin_instance_id:
+        plugin = track.get_plugin(plugin_instance_id)
+
+    if not plugin:
+        for p in track.plugins:
+            if getattr(p, "plugin_type_id", None) == plugin_type_id:
+                plugin = p
+                break
+
+    if not plugin:
+        plugin = plugin_registry.create_plugin(plugin_type_id)
+        if not plugin:
+            raise RuntimeError(f"Impossible d'instancier le plugin '{plugin_type_id}'.")
+        if hasattr(plugin, "set_project"):
+            plugin.set_project(app.project)
+        if insert_at_front:
+            track.add_plugin(plugin, index=0)
+        else:
+            track.add_plugin(plugin)
+
+    if getattr(plugin, "is_instrument", False) or getattr(plugin, "category", "") == "instrument":
+        if track.track_type == "midi":
+            track.plugin_path = plugin_type_id
+            track.plugin_name = plugin.name
+            if hasattr(app.project, "add_rack_plugin"):
+                app.project.add_rack_plugin(plugin_type_id, plugin.name, "instrument")
+
+    return track, plugin
+
+
 @action_registry.register(
     name="novadaw_get_available_plugins",
-    description="Retourne la liste des plugins audio disponibles dans NovaDAW (Égaliseur, Compresseur, Nova Vocal Glide, Mixeur).",
+    description="Retourne la liste des plugins audio et instruments disponibles dans NovaDAW, dont Nova Piano.",
     tags=["plugins"]
 )
 def get_available_plugins(app) -> Dict[str, Any]:
@@ -22,7 +78,7 @@ def get_available_plugins(app) -> Dict[str, Any]:
 
 @action_registry.register(
     name="novadaw_add_plugin_to_track",
-    description="Ajoute un plugin (novadaw.equalizer, novadaw.compressor, novadaw.vocal_glide, novadaw.mixer) à la pile d'effets d'une piste ou du Master.",
+    description="Ajoute un plugin natif à une piste ou au Master. Nova Piano (novadaw.piano) est un instrument pour piste MIDI.",
     tags=["plugins", "track"]
 )
 def add_plugin_to_track(app, track_id: str, plugin_type_id: str) -> Dict[str, Any]:
@@ -30,6 +86,8 @@ def add_plugin_to_track(app, track_id: str, plugin_type_id: str) -> Dict[str, An
     track = app.project.get_track(track_id)
     if not track:
         return {"success": False, "error": f"Piste non trouvée : '{track_id}'"}
+    if plugin_type_id == "novadaw.piano" and track.track_type != "midi":
+        return {"success": False, "error": "Nova Piano nécessite une piste MIDI."}
 
     plugin = plugin_registry.create_plugin(plugin_type_id)
     if not plugin:
@@ -104,7 +162,7 @@ def set_plugin_bypass(app, track_id: str, plugin_instance_id: str, enabled: bool
 
 @action_registry.register(
     name="novadaw_configure_plugin",
-    description="Modifie les paramètres d'une instance de plugin (ex: seuil, ratio, bandes d'égaliseur).",
+    description="Modifie les paramètres d'une instance de plugin, dont les réglages de Nova Piano et le preset.",
     tags=["plugins", "track"]
 )
 def configure_plugin(app, track_id: str, plugin_instance_id: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
@@ -629,3 +687,59 @@ def configure_drum_machine(
         "state": drum_plugin.get_state()
     }
 
+
+@action_registry.register(
+    name="novadaw_configure_piano",
+    description=(
+        "Assigne et règle Nova Piano sur une piste MIDI. "
+        "Espaces de réverbération (reverb_room) : small_room, large_room, concert_hall, cathedral. "
+        "Dosage reverb_mix, dureté du marteau hammer_hardness et résonance de la table "
+        "soundboard_resonance de 0 à 1, master_volume de 0 à 2, et activation enabled."
+    ),
+    tags=["plugins", "piano", "instrument"],
+)
+def configure_piano(
+    app,
+    track_id_or_name: str,
+    reverb_room: Optional[str] = None,
+    reverb_mix: Optional[float] = None,
+    master_volume: Optional[float] = None,
+    enabled: Optional[bool] = None,
+    hammer_hardness: Optional[float] = None,
+    soundboard_resonance: Optional[float] = None,
+) -> Dict[str, Any]:
+    from math import isfinite
+    from plugins.piano.piano_dsp import ROOMS
+    from plugins.piano.piano_plugin import NovaPianoPlugin
+
+    track = app.project.get_track(track_id_or_name)
+    if track is None or track.track_type != "midi":
+        return {"status": "error", "message": "Sélectionnez une piste MIDI existante pour Nova Piano."}
+
+    room = reverb_room.strip().lower() if reverb_room is not None else None
+    if room is not None and room not in ROOMS:
+        return {"status": "error", "message": f"Espace inconnu : {reverb_room}", "rooms": list(ROOMS)}
+    parameters = {
+        "reverb_mix": reverb_mix,
+        "master_volume": master_volume,
+        "hammer_hardness": hammer_hardness,
+        "soundboard_resonance": soundboard_resonance,
+    }
+    for name, value in parameters.items():
+        limit = NovaPianoPlugin.PARAMETER_LIMITS[name]
+        if value is not None and (not isfinite(value) or not 0 <= value <= limit):
+            return {"status": "error", "message": f"{name} doit être compris entre 0 et {limit}."}
+
+    track, piano = _get_or_create_plugin(app, track.id, "novadaw.piano", insert_at_front=True)
+    parameters.update(reverb_room=room, enabled=enabled)
+    updates = {key: value for key, value in parameters.items() if value is not None}
+    piano.set_state(updates)
+    _notify_plugin_change(app, track)
+    return {
+        "status": "success",
+        "track_id": track.id,
+        "track_name": track.name,
+        "plugin_instance_id": piano.instance_id,
+        "state": piano.get_state(),
+        "rooms": {key: data[0] for key, data in ROOMS.items()},
+    }

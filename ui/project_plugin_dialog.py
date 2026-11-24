@@ -48,6 +48,7 @@ class ProjectPluginDialog(QDialog):
         entries = [
             ("Nova Drums VSTi (Batterie IA)", "novadaw.drum_machine", "instrument"),
             ("⚡ NovaSynth (Synthétiseur Polyphonique)", "novadaw.synth", "instrument"),
+            ("Nova Piano", "novadaw.piano", "instrument"),
             ("Égaliseur Paramétrique", "novadaw.equalizer", "effect"),
             ("Compresseur Dynamique", "novadaw.compressor", "effect"),
             ("🎤 Nova Vocal Glide (Auto-Volume)", "novadaw.vocal_glide", "effect"),

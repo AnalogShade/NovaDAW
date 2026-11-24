@@ -148,3 +148,8 @@ def ensure_plugins_loaded():
         import plugins.guitar_amp.amp_plugin
     except ImportError as e:
         print(f"[PluginRegistry] Erreur chargement Nova Guitar Amp: {e}")
+
+    try:
+        import plugins.piano.piano_plugin
+    except ImportError as e:
+        print(f"[PluginRegistry] Erreur chargement Nova Piano: {e}")

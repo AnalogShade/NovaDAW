@@ -670,8 +670,15 @@ class Track:
 
     def remove_plugin(self, instance_id: str) -> bool:
         """Retire un plugin de la pile d'effets par son instance_id"""
+        removed = self.get_plugin(instance_id)
         initial_len = len(self.plugins)
         self.plugins = [p for p in self.plugins if getattr(p, "instance_id", None) != instance_id]
+        if (
+            self.plugin_path == "novadaw.piano"
+            and getattr(removed, "plugin_type_id", None) == self.plugin_path
+            and not any(p.plugin_type_id == self.plugin_path for p in self.plugins)
+        ):
+            self.plugin_path = self.plugin_name = None
         return len(self.plugins) < initial_len
 
     def move_plugin(self, from_index: int, to_index: int) -> bool:
@@ -874,6 +881,7 @@ class Project:
                     "NovaSynth" if p_path == "novadaw.synth"
                     else "Nova Drums VSTi" if p_path == "novadaw.drum_machine"
                     else "Nova Guitar" if p_path == "novadaw.guitar"
+                    else "Nova Piano" if p_path == "novadaw.piano"
                     else os.path.splitext(os.path.basename(p_path))[0]
                 )
                 self.add_rack_plugin(p_path, p_name, "instrument")

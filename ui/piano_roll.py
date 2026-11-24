@@ -869,6 +869,8 @@ class PianoRoll(QWidget):
             inst_tag = f"⚡ {track.plugin_name} (Synthé Polyphonique Multi-Couches) ✅"
         elif track.plugin_path == "novadaw.drum_machine" or "drums" in (track.plugin_name or "").lower():
             inst_tag = f"🥁 {track.plugin_name} (Échantillonneur FP32) ✅"
+        elif track.plugin_path == "novadaw.piano":
+            inst_tag = "🎹 Nova Piano (Piano à queue)"
         elif track.plugin_path and not is_multibus:
             fmt_label = "VST2 Direct" if str(track.plugin_path).lower().endswith(".dll") else "VST3 Direct"
             inst_tag = f"{fmt_label} : {track.plugin_name} ✅"
@@ -919,6 +921,8 @@ class PianoRoll(QWidget):
             inst_tag = f"⚡ {track.plugin_name} (Synthé Polyphonique Multi-Couches) ✅"
         elif track.plugin_path == "novadaw.drum_machine" or "drums" in (track.plugin_name or "").lower():
             inst_tag = f"🥁 {track.plugin_name} (Échantillonneur FP32) ✅"
+        elif track.plugin_path == "novadaw.piano":
+            inst_tag = "🎹 Nova Piano (Piano à queue)"
         elif track.plugin_path and not is_multibus:
             fmt_label = "VST2 Direct" if str(track.plugin_path).lower().endswith(".dll") else "VST3 Direct"
             inst_tag = f"{fmt_label} : {track.plugin_name} ✅"
@@ -932,7 +936,7 @@ class PianoRoll(QWidget):
     def _on_open_instrument_editor(self):
         if not self.current_track or not self.current_track.plugin_path:
             return
-        if self.current_track.plugin_path in ("novadaw.synth", "novadaw.drum_machine"):
+        if self.current_track.plugin_path in ("novadaw.synth", "novadaw.drum_machine", "novadaw.piano"):
             from ui.plugin_dialogs import open_native_plugin_editor
             from plugins.registry import plugin_registry, ensure_plugins_loaded
             native_plugin = next((p for p in getattr(self.current_track, "plugins", []) if getattr(p, "plugin_type_id", None) == self.current_track.plugin_path), None)

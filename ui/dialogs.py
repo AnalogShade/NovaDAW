@@ -126,13 +126,14 @@ class AddTrackDialog(QDialog):
         self.combo_inst.addItem("⚡ NovaSynth (Synthétiseur Polyphonique)", userData="novadaw.synth")
         self.combo_inst.addItem("🥁 Nova Drums VSTi (Batterie IA)", userData="novadaw.drum_machine")
         self.combo_inst.addItem("🎸 Nova Guitar (Modélisation Physique)", userData="novadaw.guitar")
+        self.combo_inst.addItem("🎹 Nova Piano", userData="novadaw.piano")
         project = getattr(parent, "project", None)
         rack = project.plugin_rack if project else []
         for item in rack:
-            if item.get("plugin_type") == "instrument" and item["file_path"] not in ("novadaw.drum_machine", "novadaw.synth", "novadaw.guitar"):
+            if item.get("plugin_type") == "instrument" and item["file_path"] not in ("novadaw.drum_machine", "novadaw.synth", "novadaw.guitar", "novadaw.piano"):
                 self.combo_inst.addItem(item["name"], userData=item["file_path"])
         for inst in global_plugin_manager.get_compatible_instruments():
-            if not any(item["file_path"] == inst.file_path for item in rack) and inst.file_path not in ("novadaw.drum_machine", "novadaw.synth", "novadaw.guitar"):
+            if not any(item["file_path"] == inst.file_path for item in rack) and inst.file_path not in ("novadaw.drum_machine", "novadaw.synth", "novadaw.guitar", "novadaw.piano"):
                 self.combo_inst.addItem(inst.name, userData=inst.file_path)
         self.combo_inst.currentIndexChanged.connect(self._on_instrument_selected)
         layout.addWidget(self.combo_inst)
