@@ -1,4 +1,4 @@
-"""Modal-physical synthesis of struck grand piano strings, hammer impact, and room."""
+"""Modal-physical synthesis of struck grand piano strings, hammer impact, duplex scale, and room."""
 from dataclasses import dataclass
 from functools import lru_cache
 import math
@@ -29,8 +29,7 @@ MODE_BLOCK_FRAMES = 128
 def hammer_contact_seconds(register, strike, hardness):
     """Estimate grand-piano hammer-string contact time from a power-law felt spring."""
     # Realistic grand-piano felt contact times (~3.7 ms at A0, ~3.0 ms at C2,
-    # ~1.9 ms at C4, ~0.95 ms at C6, ~0.38 ms at C8), keeping bass felt round
-    # while preserving clear concert-grand upper partials.
+    # ~1.9 ms at C4, ~0.95 ms at C6, ~0.38 ms at C8).
     nominal = 0.00038 + 0.00332 * (1.0 - register) ** 1.40
     stiffness = 0.46 + 1.24 * hardness
     speed = 0.19 + 0.81 * strike
@@ -84,6 +83,7 @@ class HammerDrivenModes:
 class ModalBank:
     poles: np.ndarray
     kernel: np.ndarray
+    kernel_t: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -100,6 +100,7 @@ class StringModes(ModalBank):
     bands: np.ndarray
     primary_count: int
     ring_count: int
+    ring_branches: int
     longitudinal: LongitudinalModes | None
 
 
@@ -113,13 +114,14 @@ def _modal_bank(poles, sample_rate):
         powers[size:size + count] = powers[:count] * step
         step *= step
         size *= 2
-    return ModalBank(poles, powers.astype(np.complex64))
+    kernel = powers.astype(np.complex64)
+    return ModalBank(poles, kernel, np.ascontiguousarray(kernel.T))
 
 
 def _longitudinal_modes(pitch, frequency, loss, sample_rate):
     # Second-order string stretching generates a component at twice each
     # transverse mode, and a sum component for neighbouring modes. These
-    # phantom partials give bass piano strings their metallic copper-wound warmth.
+    # phantom partials give copper-wound bass piano strings their bronze authority.
     count = min(22, len(frequency))
     if pitch >= 55 or count < 2:
         return None
@@ -131,84 +133,113 @@ def _longitudinal_modes(pitch, frequency, loss, sample_rate):
     left, right, phantom_hz = left[keep], right[keep], phantom_hz[keep]
     if not len(left):
         return None
-    poles = -(loss[left] + loss[right] + 2.8) + 2j * np.pi * phantom_hz
+    poles = -(loss[left] + loss[right] + 3.0) + 2j * np.pi * phantom_hz
     bank = _modal_bank(np.concatenate((poles, poles - 1 / .008)), sample_rate)
     band = phantom_hz / frequency[0]
-    transfer = .40 + .60 / (1 + ((band - 14) / 7.5)**2)
-    # Calibrated so phantom partials sit ~-16 to -22 dB below transverse energy.
-    projection = np.interp(pitch, (21, 36, 54), (1.05, 1.65, 0.22)) * transfer
+    transfer = .38 + .62 / (1 + ((band - 13) / 7.5)**2)
+    # Smooth taper across wound-string break so phantom partials sit ~-20 to -26 dB below main tone.
+    projection = np.interp(pitch, (21, 34, 46, 54), (0.78, 1.15, 0.42, 0.08)) * transfer
     return LongitudinalModes(bank, left, right, projection)
 
 
 @lru_cache(maxsize=176)
 def string_modes(pitch, sample_rate, board_resonance):
-    """Resolve a stiff piano unison (mono/bi/trichord), polarizations, and bridge load."""
+    """Resolve a stiff piano unison (mono/bi/trichord), polarizations, duplex scale, and bridge load."""
     register = np.clip((pitch - 21) / 87, 0.0, 1.0)
     fundamental = 440.0 * 2 ** ((pitch - 69) / 12)
     stiffness = np.exp(np.interp(pitch, KEYS, np.log(INHARMONICITY)))
-    partial = np.arange(1, 145, dtype=np.float64)
+    partial = np.arange(1, 155, dtype=np.float64)
     frequency = fundamental * partial * np.sqrt((1 + stiffness * partial**2) / (1 + stiffness))
-    limit = min(13500.0, sample_rate * 0.44)
+    limit = min(14800.0, sample_rate * 0.45)
     keep = frequency < limit
     partial, frequency = partial[keep], frequency[keep]
 
     natural_loss = np.interp(pitch, KEYS, LATE_LOSS)
-    # Frequency-dependent internal friction + viscous air damping ensures upper
-    # harmonics bloom brightly at attack and melt into warm lower partials.
+    # Frequency-dependent internal steel friction + viscous air damping:
+    # upper partials sparkle at attack and melt smoothly into singing low partials.
     slow = (
         natural_loss
-        + (0.054 + 0.110 * register) * (partial - 1)
-        + 4.9 * (frequency / 2300.0) ** 1.65
+        + (0.042 + 0.085 * register) * (partial - 1)
+        + 3.6 * (frequency / 2600.0) ** 1.62
     )
-    treble_handover = np.interp(pitch, (72, 78, 84, 90, 96, 108), (0, 2, 8, 9, 7, 8))
-    prompt = slow + 6.0 + 4.8 * (frequency / 720.0) ** 0.88 + treble_handover
+    treble_handover = np.interp(pitch, (72, 78, 84, 90, 96, 108), (0.0, 1.4, 3.6, 5.2, 6.2, 7.2))
+    # Grand-piano vertical bridge-coupled prompt decay: clear two-stage onset bloom
+    # without collapsing abruptly after 150 ms like a low-tension plucked guitar string.
+    prompt = slow + 4.5 + 3.4 * (frequency / 800.0) ** 0.85 + treble_handover
     load = 1.0 - 0.55 * (board_resonance - 0.67)
 
-    # Coupled unison motion (Weinreich): the symmetric prompt branch carries the
-    # strong percussive onset and drains fast; the detuned/orthogonal branches
-    # carry the singing aftersound with organic bichord/trichord beating.
+    # True multi-string unison & Weinreich two-polarization coupling:
+    # - Prompt energy is shared across mistuned vertical unison components so even
+    #   the first 150 ms has true piano bichord/trichord ensemble width (never a single guitar wire).
+    # - Singing sustain branches carry >=48% of amplitude across 2 (bass) or 3 (mid/treble) strings.
     prompt_share = np.interp(pitch, KEYS, PROMPT_SHARE)
     aftersound = 1.0 - prompt_share
-    # (detune_cents, aftersound_weight, strike_point_offset)
     if pitch < 29:
-        side = ((-0.42, 0.56, -0.005), (0.52, 0.44, 0.006))
-    elif pitch < 43:
-        side = ((-0.76, 0.52, -0.007), (0.94, 0.48, 0.008))
+        # Heavy copper-wound bass monochord/bichord: tight, majestic beating
+        branches = [
+            (0.0, prompt_share * 0.65, True, 0.0),
+            (0.32, prompt_share * 0.35, True, 0.004),
+            (-0.36, aftersound * 0.54, False, -0.005),
+            (0.44, aftersound * 0.46, False, 0.006),
+        ]
+    elif pitch < 40:
+        # Wound bass bichord
+        branches = [
+            (0.0, prompt_share * 0.58, True, 0.0),
+            (-0.48, prompt_share * 0.42, True, -0.006),
+            (-0.62, aftersound * 0.52, False, -0.008),
+            (0.74, aftersound * 0.48, False, 0.009),
+        ]
     else:
-        side = (
-            (-0.88, 0.34, -0.008),
-            (0.18, 0.33, 0.002),
-            (1.06, 0.33, 0.009),
-        )
-    branches = [(0.0, prompt_share, True, 0.0)] + [
-        (cents, share * aftersound, False, sp_off)
-        for cents, share, sp_off in side
-    ]
+        # Steel trichord (E2 to C8): 2 coupled vertical prompt modes + 3 singing sustain strings
+        branches = [
+            (0.0, prompt_share * 0.55, True, 0.0),
+            (-0.54, prompt_share * 0.45, True, -0.006),
+            (-0.82, aftersound * 0.34, False, -0.009),
+            (0.14, aftersound * 0.33, False, 0.002),
+            (0.94, aftersound * 0.33, False, 0.010),
+        ]
 
-    # Hammer strikes near the agraffe (x_h ≈ 0.118 L); the soundboard bridge is
-    # at the opposite end (x = L), introducing the alternating (-1)^n modal sign.
-    # Hammer crown width as a fraction of string length grows gently toward treble.
-    base_strike_point = 0.118 - 0.024 * register
-    felt_width = 0.0085 + 0.014 * register ** 1.35
+    # Parabolic wool-felt hammer crown geometry & compliant bridge impedance transfer:
+    # As strings shorten toward treble (~5 cm at C8), felt contact width becomes a larger
+    # fraction of string length, naturally rounding off sharp guitar-pick comb zeroes.
+    base_strike_point = 0.118 - 0.022 * register
+    felt_width = 0.014 + 0.036 * register ** 1.50
     bridge_sign = np.where((partial.astype(np.int64) & 1) == 1, -1.0, 1.0)
-    shear = partial * (1 + stiffness * partial**2) / (1 + stiffness)
+
+    # Physical string-to-soundboard velocity impedance transfer: copper-wound bass strings
+    # retain richer upper harmonic ring (~1/n^0.22) while plain treble steel tapers (~1/n^0.50).
+    partial_slope = 0.22 + 0.28 * register
+    impedance_transfer = (
+        partial * np.sqrt((1 + stiffness * partial**2) / (1 + stiffness))
+        / ((partial ** partial_slope) * np.sqrt(1.0 + (frequency / 4800.0) ** 2))
+    )
+    # Smooth register loudness regulation compensating for partial density across 88 keys.
+    register_regulation = np.interp(
+        pitch,
+        (21, 33, 45, 57, 69, 81, 93, 108),
+        (0.66, 0.80, 1.08, 1.40, 1.78, 2.28, 2.95, 3.85),
+    )
 
     unison_rate = 0.88 + 0.12 * np.cos(0.91 * pitch + 0.67 * partial)
-    unison_rate *= min(1.0, 520.0 / fundamental)
+    unison_rate *= min(1.0, 480.0 / fundamental)
 
     angular_frequencies, losses, forces, bands = [], [], [], []
-    ring = (partial == 1) | (frequency < min(4200.0, limit))
-    for cents, share, is_prompt, sp_off in branches:
-        selected = np.ones_like(frequency, dtype=bool) if is_prompt else ring
-        modal_share = np.where(ring, share, 1.0) if is_prompt else share
+    ring = (partial == 1) | (frequency < min(8200.0, limit))
+    for index, (cents, share, is_prompt, sp_off) in enumerate(branches):
+        is_primary = (index == 0)
+        selected = np.ones_like(frequency, dtype=bool) if is_primary else ring
+        modal_share = np.where(ring, share, prompt_share) if is_primary else share
         sp = base_strike_point + sp_off
-        # Slight strike-zone averaging softens unnatural single-point guitar comb notches.
-        projection = (
-            bridge_sign
-            * np.sin(np.pi * partial * sp)
-            * np.sinc(partial * felt_width)
-        )
-        force = 2 * np.pi * fundamental * shear * projection
+        raw_sin = np.sin(np.pi * partial * sp)
+        spatial_sign = np.where(raw_sin >= 0.0, 1.0, -1.0)
+        # Distributed felt patch + compliant termination fills artificial nodal comb zeroes
+        # while parabolic felt profile rolls off high partials without rectangular sinc sidelobes.
+        spatial_mag = np.sqrt(raw_sin ** 2 + (0.24 * np.pi * partial * felt_width) ** 2)
+        crown_envelope = 1.0 / (1.0 + (partial * felt_width * 1.15) ** 2)
+        projection = bridge_sign * spatial_sign * spatial_mag * crown_envelope
+
+        force = 2 * np.pi * fundamental * register_regulation * impedance_transfer * projection
         detuned = frequency[selected] * 2 ** (cents * unison_rate[selected] / 1200)
         omega = 2 * np.pi * detuned
         angular_frequencies.append(omega)
@@ -216,12 +247,31 @@ def string_modes(pitch, sample_rate, board_resonance):
         forces.append((force * modal_share)[selected])
         bands.append(band_indices(partial[selected]))
 
+    ring_branches = len(branches) - 1
+
+    # Steinway duplex scaling (sympathetic aliquot overtones in treble, pitch >= 58):
+    # adds crystalline bell halo at 2*f0 and 3*f0 that no guitar string possesses.
+    if pitch >= 58:
+        duplex_ratios = np.array([2.0018, 3.0035], dtype=np.float64)
+        duplex_hz = fundamental * duplex_ratios
+        keep_dup = duplex_hz < limit
+        if np.any(keep_dup):
+            dup_hz = duplex_hz[keep_dup]
+            dup_omega = 2 * np.pi * dup_hz
+            dup_loss = (2.1 + 0.0016 * dup_hz) * load
+            dup_level = np.interp(pitch, (58, 72, 88, 108), (0.018, 0.036, 0.052, 0.060))
+            dup_force = 2 * np.pi * fundamental * register_regulation * dup_level * np.array([1.0, -0.65])[:len(dup_hz)]
+            angular_frequencies.append(dup_omega)
+            losses.append(dup_loss)
+            forces.append(dup_force)
+            bands.append(band_indices(np.array([2, 3])[:len(dup_hz)]))
+
     poles = -np.concatenate(losses) + 1j * np.concatenate(angular_frequencies)
     bank = _modal_bank(poles, sample_rate)
     longitudinal = _longitudinal_modes(pitch, frequency, slow * load, sample_rate)
     return StringModes(
-        bank.poles, bank.kernel, np.concatenate(forces), np.concatenate(bands),
-        len(frequency), int(np.count_nonzero(ring)), longitudinal,
+        bank.poles, bank.kernel, bank.kernel_t, np.concatenate(forces), np.concatenate(bands),
+        len(frequency), int(np.count_nonzero(ring)), ring_branches, longitudinal,
     )
 
 
@@ -234,13 +284,21 @@ class BridgeStrike:
 
 
 def _project_modes(output, modes, state, elapsed, sample_rate):
-    """Sum forward from an oscillator state, in cache-sized blocks."""
-    for offset in range(0, len(output), MODE_BLOCK_FRAMES):
-        size = min(MODE_BLOCK_FRAMES, len(output) - offset)
-        age = elapsed + offset / sample_rate
+    """Sum forward from an oscillator state using vectorized BLAS matrix blocks."""
+    total = len(output)
+    if total == 0:
+        return
+    n_full = total // MODE_BLOCK_FRAMES
+    if n_full > 0:
+        ages = elapsed + (np.arange(n_full, dtype=np.float64) * MODE_BLOCK_FRAMES) / sample_rate
+        positions = (state[None, :] * np.exp(ages[:, None] * modes.poles[None, :])).astype(np.complex64)
+        blocks = positions @ modes.kernel_t
+        output[:n_full * MODE_BLOCK_FRAMES] = blocks.imag.ravel()
+    rem = total - n_full * MODE_BLOCK_FRAMES
+    if rem > 0:
+        age = elapsed + (n_full * MODE_BLOCK_FRAMES) / sample_rate
         position = (state * np.exp(age * modes.poles)).astype(np.complex64)
-        force = np.einsum("fm,m->f", modes.kernel[:size], position)
-        output[offset:offset + size] = force.imag
+        output[n_full * MODE_BLOCK_FRAMES:] = (modes.kernel[:rem] @ position).imag
 
 
 def _pulse_coefficients(poles, projection, duration):
@@ -285,50 +343,41 @@ def _hammer_at_bridge(modes, drive, duration, core_share, sample_rate):
 
 
 def _hammer_thump(pitch, velocity, sample_rate, hardness):
-    """Synthesize deterministic percussive hammer-felt + woody soundboard knock."""
+    """Synthesize subtle, non-pitched mechanical keybed mass and wool-felt impact brush."""
     register = np.clip((pitch - 21) / 87, 0.0, 1.0)
     strike = velocity / 127.0
-    frames = max(64, round(0.042 * sample_rate))
+    frames = max(64, round(0.032 * sample_rate))
     t = np.arange(frames, dtype=np.float64) / sample_rate
     rng = np.random.default_rng(10007 * pitch + 313)
 
-    # 1. Broadband wooden keybed / bridge-to-soundboard impact thud (55-360 Hz).
-    #    Filtered impact noise + damped low spruce resonances give realistic
-    #    percussive hammer mass (never a tonal sine ping or guitar pluck).
+    # 1. Aperiodic low-frequency keybed/rim felt mass (42-155 Hz broadband impulse).
+    #    Zero pitched sine oscillators so it never sounds like tapping a hollow guitar box.
     thud_noise = rng.standard_normal(frames)
     thud_sos = butter(
-        2, [min(55.0, 0.15 * sample_rate), min(340.0 + 140.0 * register, 0.35 * sample_rate)],
+        2, [min(42.0, 0.12 * sample_rate), min(145.0 + 45.0 * register, 0.30 * sample_rate)],
         btype="bandpass", fs=sample_rate, output="sos",
     )
     thud_filtered = sosfilt(thud_sos, thud_noise)
     thud_filtered /= np.sqrt(np.mean(thud_filtered**2) + 1e-12)
-    thud_env = (1.0 - np.exp(-t / 0.0010)) * np.exp(-t / (0.011 + 0.007 * (1.0 - register)))
-    thud_amp = (0.20 + 0.24 * (1.0 - register)) * (strike ** 1.35)
-    f_shift = 1.0 + 0.15 * register
-    wood_body = (
-        0.55 * np.sin(2 * np.pi * (86.0 * f_shift) * t)
-        + 0.30 * np.sin(2 * np.pi * (162.0 * f_shift) * t + 0.8)
-        + 0.15 * np.sin(2 * np.pi * (255.0 * f_shift) * t + 1.6)
-    )
-    wood = (0.68 * thud_filtered + 0.32 * wood_body) * thud_env * thud_amp
+    thud_env = (1.0 - np.exp(-t / 0.0022)) * np.exp(-t / (0.009 + 0.005 * (1.0 - register)))
+    thud_amp = (0.048 + 0.055 * (1.0 - register)) * (strike ** 1.40)
+    wood = thud_filtered * thud_env * thud_amp
 
-    # 2. Felt-on-string / mechanical action knock (band-limited deterministic noise).
-    #    Sharp 4-8 ms felt impact shifting brighter with velocity, register, and hardness.
+    # 2. Compressed wool-felt hammer-crown brush (short 2.5-4.5 ms velvet transient).
     noise = rng.standard_normal(frames)
-    low_hz = min(750.0 + 950.0 * register + 420.0 * hardness, 0.30 * sample_rate)
-    high_hz = min(2300.0 + 2200.0 * register + 1650.0 * hardness, 0.42 * sample_rate)
+    low_hz = min(620.0 + 780.0 * register + 380.0 * hardness, 0.28 * sample_rate)
+    high_hz = min(1950.0 + 1850.0 * register + 1450.0 * hardness, 0.42 * sample_rate)
     if high_hz <= low_hz + 80.0:
         high_hz = min(low_hz + 150.0, 0.44 * sample_rate)
     sos = butter(2, [low_hz, high_hz], btype="bandpass", fs=sample_rate, output="sos")
     felt_noise = sosfilt(sos, noise)
     felt_noise /= np.sqrt(np.mean(felt_noise**2) + 1e-12)
 
-    knock_decay = 0.0036 + 0.0032 * (1.0 - register) * (1.0 - 0.35 * hardness)
-    knock_env = (1.0 - np.exp(-t / 0.0005)) * np.exp(-t / knock_decay)
-    knock_amp = (0.050 + 0.095 * hardness) * (0.72 + 0.50 * register) * (strike ** 1.65)
+    knock_decay = 0.0026 + 0.0020 * (1.0 - register) * (1.0 - 0.35 * hardness)
+    knock_env = (1.0 - np.exp(-t / 0.0006)) * np.exp(-t / knock_decay)
+    knock_amp = (0.018 + 0.044 * hardness) * (0.65 + 0.55 * register) * (strike ** 1.70)
     knock = felt_noise * knock_env * knock_amp
 
-    # Smooth window to exact zero at boundaries.
     fade = np.clip((frames - 1 - np.arange(frames)) / max(1, round(0.004 * sample_rate)), 0.0, 1.0)
     out = (wood + knock) * fade
     out[0] = 0.0
@@ -341,53 +390,30 @@ def hammer_strike(pitch, velocity, sample_rate, hardness, board_resonance):
     register = np.clip((pitch - 21) / 87, 0.0, 1.0)
     strike = velocity / 127.0
     duration = hammer_contact_seconds(register, strike, hardness)
-    # Inner compressed felt core carries the concert-grand upper-harmonic sheen
-    # while remaining soft enough in bass/piano dynamics to avoid a pluck spike.
+    # Inner compressed wool-felt core carries concert-grand upper-harmonic sheen on forte
+    # strikes and copper-wound bass definition while remaining plush at soft dynamics.
     core_share = float(np.clip(
-        (0.11 + 0.14 * register) * (0.45 + 0.55 * strike)
-        + 0.22 * (hardness - 0.35) * (0.4 + 0.6 * strike),
-        0.02, 0.38,
+        (0.22 - 0.04 * register) * (0.38 + 0.62 * strike)
+        + 0.26 * (hardness - 0.35) * (0.35 + 0.65 * strike),
+        0.03, 0.45,
     ))
-    drive = (.85 * strike**1.55) * modes.bridge_force
+    drive = (.88 * strike**1.52) * modes.bridge_force
     drive *= modal_voicing(pitch, velocity, modes.bands)
 
-    # Primary hammer-string contact pulse.
-    contact_1, sep_1 = _hammer_at_bridge(modes, drive, duration, core_share, sample_rate)
-
-    # Secondary felt re-compression lobe from the agraffe wave reflection during
-    # hammer contact (broadens and rounds the bass/low-mid attack physically).
-    fundamental = 440.0 * 2 ** ((pitch - 69) / 12)
-    strike_point = 0.118 - 0.024 * register
-    refl_delay = min(0.55 * duration, 2.0 * strike_point / fundamental)
-    refl_weight = 0.24 * (1.0 - 0.65 * register)
-    if refl_weight > 0.03 and refl_delay > 1.5 / sample_rate:
-        delay_frames = round(refl_delay * sample_rate)
-        refl_dur = 0.72 * duration
-        c2, sep_2 = _hammer_at_bridge(
-            modes, drive * refl_weight, refl_dur, core_share * 0.5, sample_rate
-        )
-        total_frames = max(len(contact_1), delay_frames + len(c2))
-        contact = np.zeros(total_frames, dtype=np.float32)
-        contact[:len(contact_1)] += contact_1
-        contact[delay_frames:delay_frames + len(c2)] += c2
-        end_t = total_frames / sample_rate
-        t1 = len(contact_1) / sample_rate
-        t2 = (delay_frames + len(c2)) / sample_rate
-        separation = (
-            sep_1 * np.exp((end_t - t1) * modes.poles)
-            + sep_2 * np.exp((end_t - t2) * modes.poles)
-        ) / (1.0 + refl_weight)
-        contact /= np.float32(1.0 + refl_weight)
-    else:
-        contact, separation = contact_1, sep_1
+    # Clean, comb-free analytical hammer-string contact integration.
+    contact, separation = _hammer_at_bridge(modes, drive, duration, core_share, sample_rate)
 
     longitudinal_state = None
     longitudinal = modes.longitudinal
     if longitudinal is not None:
         transverse = separation[:modes.primary_count].copy()
-        if modes.ring_count:
-            transverse[:modes.ring_count] += separation[modes.primary_count:].reshape(-1, modes.ring_count).sum(axis=0)
-        # The product of two displacement responses contains the phase sum.
+        if modes.ring_count and modes.ring_branches:
+            ring_end = modes.primary_count + modes.ring_branches * modes.ring_count
+            transverse[:modes.ring_count] += (
+                separation[modes.primary_count:ring_end]
+                .reshape(modes.ring_branches, modes.ring_count)
+                .sum(axis=0)
+            )
         strain = -.5j * longitudinal.projection * transverse[longitudinal.left] * transverse[longitudinal.right]
         longitudinal_state = np.concatenate((strain, -strain))
 
@@ -412,7 +438,7 @@ def render_bridge_force(pitch, velocity, first_sample, frames, held_samples, sam
         _project_modes(strain, modes.longitudinal.bank, strike.longitudinal_state, age, sample_rate)
         out[driven:] += strain
 
-    # Add deterministic percussive hammer/keybed impact transient (first ~36 ms).
+    # Add subtle non-pitched mechanical action/felt transient (~32 ms).
     thump_len = len(strike.thump)
     if first_sample < thump_len:
         thump_n = min(frames, thump_len - first_sample)

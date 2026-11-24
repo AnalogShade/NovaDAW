@@ -1,4 +1,4 @@
-"""Procedural pressure radiation from a shared, dispersive orthotropic piano soundboard."""
+"""Procedural pressure radiation from a shared, passive dispersive spruce piano soundboard."""
 
 from functools import lru_cache
 
@@ -6,36 +6,39 @@ import numpy as np
 from scipy.signal import butter, lfilter, sosfilt
 
 
-# Successive bridge locations from the long bass strings to the short treble.
+# Successive bridge locations from the long copper-wound bass strings to the short treble.
 BRIDGE_KEYS = (21, 47, 71, 91, 108)
 BRIDGE_POINTS = np.array([
-    (0.28, 0.78), (0.40, 0.63), (0.54, 0.46), (0.67, 0.36), (0.79, 0.28),
+    (0.26, 0.76), (0.39, 0.62), (0.53, 0.47), (0.66, 0.36), (0.79, 0.27),
 ])
-MICROPHONE_POINTS = np.array([(0.35, 0.55), (0.65, 0.46)])
+MICROPHONE_POINTS = np.array([(0.34, 0.56), (0.66, 0.44)])
 BRIDGE_CHANNELS = len(BRIDGE_KEYS)
 
-# Early cabinet/lid/rim reflection tap times (ms) and signed gains per stereo mic.
+# Open-lid and curved-rim acoustic reflection delays (ms) and gentle diffuse gains
+# calibrated to a ~2.1 m concert grand geometry (avoiding short 2 ms guitar-box comb notches).
 _BODY_TAPS_MS = (
-    (1.85, 3.95, 6.80, 10.60),
-    (2.35, 4.75, 7.95, 12.10),
+    (7.30, 12.70, 19.10, 27.30),
+    (8.60, 14.30, 21.40, 29.80),
 )
 _BODY_TAP_GAINS = (
-    (0.26, -0.21, 0.16, -0.11),
-    (0.24, -0.22, 0.15, -0.12),
+    (0.068, -0.052, 0.038, -0.026),
+    (0.065, -0.054, 0.036, -0.028),
 )
 
-# Staggered biquad allpass frequencies (Hz) and pole radii modeling bending-wave
-# phase dispersion across the ribbed spruce plate (slightly decorrelated L/R).
+# Staggered unit-magnitude biquad allpass sections modeling orthotropic bending-wave
+# phase dispersion across the ribbed Sitka spruce soundboard (decorrelated L/R).
 _ALLPASS_SPEC = (
     (
-        (96.0, 0.952), (148.0, 0.958), (218.0, 0.964), (315.0, 0.964),
-        (445.0, 0.962), (620.0, 0.958), (860.0, 0.954), (1210.0, 0.946),
-        (1720.0, 0.935), (2480.0, 0.920), (3550.0, 0.900),
+        (68.0, 0.984), (104.0, 0.985), (154.0, 0.985), (224.0, 0.984),
+        (322.0, 0.982), (456.0, 0.980), (638.0, 0.978), (890.0, 0.974),
+        (1235.0, 0.970), (1715.0, 0.964), (2380.0, 0.958), (3310.0, 0.950),
+        (4580.0, 0.942), (6250.0, 0.934), (8350.0, 0.926), (10800.0, 0.918),
     ),
     (
-        (110.0, 0.952), (168.0, 0.958), (246.0, 0.964), (352.0, 0.964),
-        (495.0, 0.962), (685.0, 0.958), (945.0, 0.954), (1330.0, 0.946),
-        (1890.0, 0.935), (2710.0, 0.920), (3820.0, 0.900),
+        (77.0, 0.984), (118.0, 0.985), (174.0, 0.985), (252.0, 0.984),
+        (360.0, 0.982), (508.0, 0.980), (710.0, 0.978), (988.0, 0.974),
+        (1368.0, 0.970), (1895.0, 0.964), (2625.0, 0.958), (3640.0, 0.950),
+        (5020.0, 0.942), (6780.0, 0.934), (8950.0, 0.926), (11400.0, 0.918),
     ),
 )
 
@@ -56,7 +59,6 @@ def _allpass_sos(specs, sample_rate):
         if freq_hz >= nyquist:
             continue
         theta = 2.0 * np.pi * freq_hz / sample_rate
-        # Keep group delay consistent across sample rates by scaling radius.
         r = radius ** (44100.0 / sample_rate)
         c = -2.0 * r * np.cos(theta)
         r2 = r * r
@@ -68,49 +70,69 @@ def _allpass_sos(specs, sample_rate):
 
 @lru_cache(maxsize=8)
 def _plate_design(sample_rate):
-    # Orthotropic spruce thin-plate modes (f11 ≈ 70 Hz, ribbed cross-stiffness)
-    # covering the sparse-to-medium modal region up to ~2.6 kHz.
-    m, n = np.meshgrid(np.arange(1, 12), np.arange(1, 10), indexing="ij")
-    long_axis, short_axis = 46.0 * m**2, 29.0 * n**2
-    frequency = np.sqrt(long_axis**2 + short_axis**2 + 1.35 * long_axis * short_axis)
-    keep = frequency < min(2600.0, 0.42 * sample_rate)
-    hz = frequency[keep]
-    shapes = np.column_stack((m[keep], n[keep]))
+    # Curved-bentside ribbed Sitka spruce plate modes (~68 Hz to ~2.2 kHz).
+    # Non-rectangular rim asymmetry prevents accidental modal pile-ups (wolf notes).
+    m, n = np.meshgrid(np.arange(1, 10), np.arange(1, 8), indexing="ij")
+    asym = 1.0 + 0.035 * np.sin(1.7 * m + 2.3 * n) + 0.024 * np.cos(2.9 * m - 1.3 * n)
+    long_axis = 44.0 * (m ** 1.90)
+    short_axis = 31.5 * (n ** 1.92)
+    raw_freq = asym * np.sqrt(long_axis**2 + short_axis**2 + 1.40 * long_axis * short_axis)
+    flat_f = raw_freq.ravel()
+    flat_m = m.ravel()
+    flat_n = n.ravel()
+    order = np.argsort(flat_f)
+    flat_f, flat_m, flat_n = flat_f[order], flat_m[order], flat_n[order]
+    keep = flat_f < min(2250.0, 0.42 * sample_rate)
+    hz_raw = flat_f[keep]
+    # Curved-bentside Wigner-Dyson level repulsion (Ege & Boutillon, JASA):
+    # prevents rectangular lattice degeneracies from piling up into single-key wolf notes.
+    weyl_grid = np.linspace(hz_raw[0], hz_raw[-1], len(hz_raw))
+    hz = 0.35 * hz_raw + 0.65 * weyl_grid
+    shapes = np.column_stack((flat_m[keep], flat_n[keep]))
 
-    def mode_shape(points):
-        along = np.sin(np.pi * points[:, :1] * shapes[:, 0])
-        across = np.sin(np.pi * points[:, 1:] * shapes[:, 1])
-        return along * across
+    # Distributed laminated-maple bridge & cross-rib spatial footprint:
+    # strictly positive passive energy coupling prevents nodal dead spots on any key.
+    offsets = ((-0.045, -0.038), (0.0, 0.0), (0.045, 0.038))
+    weights = (0.25, 0.50, 0.25)
 
-    bridge_modes = mode_shape(BRIDGE_POINTS).astype(np.float64)
-    # Far-field microphone radiation weights lower-order plate patterns more
-    # strongly than high-order short-wavelength ripples.
-    area_average = np.exp(-0.011 * np.sum(shapes**2, axis=1))
-    pressure_modes = (mode_shape(MICROPHONE_POINTS).T * area_average[:, None]).astype(np.float64)
+    def passive_coupling(points):
+        acc = np.zeros((len(points), len(shapes)), dtype=np.float64)
+        for (dx, dy), w in zip(offsets, weights):
+            px = np.clip(points[:, :1] + dx, 0.05, 0.95)
+            py = np.clip(points[:, 1:] + dy, 0.05, 0.95)
+            phi = np.sin(np.pi * px * shapes[:, 0]) * np.sin(np.pi * py * shapes[:, 1])
+            acc += w * (phi ** 2)
+        return np.sqrt(acc + 0.045)
+
+    bridge_modes = passive_coupling(BRIDGE_POINTS)
+    area_average = np.exp(-0.019 * np.sum(shapes**2, axis=1))
+    mic_coupling = passive_coupling(MICROPHONE_POINTS).T
+    pan = 0.5 + 0.28 * np.sin(1.3 * shapes[:, 0] - 0.9 * shapes[:, 1])
+    stereo_pan = np.column_stack((pan, 1.0 - pan)) * 1.42
+    pressure_modes = (mic_coupling * stereo_pan * area_average[:, None]).astype(np.float64)
 
     theta = 2.0 * np.pi * hz / sample_rate
-    # Spruce plate damping: lush woody bloom (T60 ≈ 150-240 ms in bass/mid)
-    # while dying below -40 dB within ~160 ms after damper release.
-    loss = 26.0 + 0.036 * hz
+    # Sitka spruce internal friction + radiation loss: overlapping woody plate modes
+    # above ~220 Hz with fast post-damper settling (< -50 dB within 180 ms).
+    loss = 28.0 + 0.110 * hz
     radius = np.exp(-loss / sample_rate)
-    # Scale modal resonators so the spruce plate modes carry ~50-65% of the
-    # radiated acoustic body energy (giving unmistakable grand piano woodiness).
-    radiation_eff = 1.0 - np.exp(-hz / 105.0)
-    leading = 9.5 * (1.0 - radius) * radiation_eff
-    numerator = np.column_stack((leading, -leading * radius * np.cos(theta))).astype(np.float64)
+    radiation_eff = (1.0 - np.exp(-hz / 82.0)) / np.sqrt(1.0 + (hz / 580.0) ** 2)
+    # Passive velocity bandpass numerator g * (1 - z^-2): Re{H(e^jw)} >= 0 everywhere,
+    # guaranteeing that modal resonances enrich woodiness without cancelling direct mobility.
+    gain = 1.05 * (1.0 - radius**2) * radiation_eff
+    numerator = np.column_stack((gain, np.zeros(len(hz)), -gain)).astype(np.float64)
     denominator = np.column_stack(
         (np.ones(len(hz)), -2.0 * radius * np.cos(theta), radius**2)
     ).astype(np.float64)
 
-    # Bridge-to-board acoustic radiation shaping: soft low-end plate cutoff
-    # (~52 Hz) and open, natural upper-register radiation (~7.8 kHz).
-    hp = butter(1, min(52.0, 0.2 * sample_rate), btype="highpass", fs=sample_rate, output="sos")
-    lp = butter(2, min(7800.0, 0.44 * sample_rate), btype="lowpass", fs=sample_rate, output="sos")
+    # Full-range concert-grand radiation bandwidth (~44 Hz chest to ~12.2 kHz treble air).
+    hp = butter(1, min(44.0, 0.2 * sample_rate), btype="highpass", fs=sample_rate, output="sos")
+    lp = butter(2, min(12200.0, 0.45 * sample_rate), btype="lowpass", fs=sample_rate, output="sos")
     radiation = np.vstack((hp, lp)).astype(np.float64)
 
-    # Gentle lowpass on early cabinet/lid reflections (~3.2 kHz).
+    # Warm acoustic absorption on open-lid / case rim reflections (~2.7 kHz).
     body_lp = butter(
-        1, min(3200.0, 0.40 * sample_rate), btype="lowpass", fs=sample_rate, output="sos"
+        1, min(2700.0, 0.40 * sample_rate), btype="lowpass", fs=sample_rate, output="sos"
     ).astype(np.float64)
 
     allpass_l = _allpass_sos(_ALLPASS_SPEC[0], sample_rate)
@@ -129,7 +151,7 @@ def _plate_design(sample_rate):
 
 
 class PianoSoundboard:
-    """Bridge force in, stereo sound pressure out, with one state per render."""
+    """Bridge force in, stereo sound pressure out, with one continuous state per render."""
 
     def __init__(self, sample_rate):
         self.sample_rate = sample_rate
@@ -152,7 +174,7 @@ class PianoSoundboard:
         self.body_lp_state = np.zeros((len(self.body_lp), 2, 2), dtype=np.float64)
         self.body_history = np.zeros((self.max_delay, 2), dtype=np.float64)
         self.diffuse_pressure = np.array(
-            [[0.79, 0.32], [0.78, 0.49], [0.72, 0.67], [0.52, 0.78], [0.36, 0.79]],
+            [[0.80, 0.34], [0.76, 0.50], [0.67, 0.67], [0.50, 0.76], [0.34, 0.80]],
             dtype=np.float64,
         )
 
@@ -165,7 +187,7 @@ class PianoSoundboard:
         self.body_history.fill(0.0)
 
     def _early_body_reflections(self, stereo):
-        """Block-invariant multi-tap cabinet/lid early reflections."""
+        """Block-invariant multi-tap open-lid and case-rim early reflections."""
         frames = len(stereo)
         if frames == 0:
             return np.zeros((0, 2), dtype=np.float64)
@@ -192,21 +214,10 @@ class PianoSoundboard:
             self.radiation, force64, axis=0, zi=self.radiation_state
         )
 
-        # 1. Broadband plate path routed through L/R bending-wave allpass
-        #    dispersion to eliminate raw piezo-like periodic spikes.
-        raw_stereo = np.einsum("fb,bc->fc", radiation, self.diffuse_pressure)
-        disp_l, self.allpass_state_l = sosfilt(
-            self.allpass_l, raw_stereo[:, 0], zi=self.allpass_state_l
-        )
-        disp_r, self.allpass_state_r = sosfilt(
-            self.allpass_r, raw_stereo[:, 1], zi=self.allpass_state_r
-        )
-        dispersed = np.column_stack((disp_l, disp_r))
-
-        # 2. Early acoustic rim/lid reflections (block-invariant delay buffer).
-        early = self._early_body_reflections(dispersed)
-
-        # 3. Orthotropic spruce plate modal resonances (dominant body coloration).
+        # 1. Skudrzyk characteristic plate mobility + passive spruce modal resonances.
+        #    Summing passive velocity modes before bending-wave dispersion prevents
+        #    out-of-phase comb notches that otherwise mute individual keys.
+        direct_stereo = np.einsum("fb,bc->fc", radiation, self.diffuse_pressure)
         modal_force = np.einsum("fb,bm->mf", radiation, self.bridge_modes)
         for index, drive in enumerate(modal_force):
             response, self.modal_state[index] = lfilter(
@@ -215,12 +226,19 @@ class PianoSoundboard:
             modal_force[index] = response
         modal_stereo = np.einsum("mf,mc->fc", modal_force, self.mode_pressure)
 
-        # Blend dispersed broadband radiation, early body reflections, and
-        # resonant spruce plate modes (modulated by soundboard_resonance).
         res = float(resonance)
-        stereo = (
-            0.46 * dispersed
-            + (0.38 + 0.36 * res) * early
-            + (0.38 + 0.68 * res) * modal_stereo
+        plate_stereo = 0.52 * direct_stereo + (0.32 + 0.58 * res) * modal_stereo
+
+        # 2. Propagate unified plate velocity through L/R dispersive spruce bending waves.
+        disp_l, self.allpass_state_l = sosfilt(
+            self.allpass_l, plate_stereo[:, 0], zi=self.allpass_state_l
         )
+        disp_r, self.allpass_state_r = sosfilt(
+            self.allpass_r, plate_stereo[:, 1], zi=self.allpass_state_r
+        )
+        dispersed = np.column_stack((disp_l, disp_r))
+
+        # 3. Subtle open-lid and case-rim reflections for 3D acoustic body depth.
+        early = self._early_body_reflections(dispersed)
+        stereo = dispersed + (0.34 + 0.44 * res) * early
         return stereo.astype(np.float32)

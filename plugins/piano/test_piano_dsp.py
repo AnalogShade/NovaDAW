@@ -85,7 +85,7 @@ def test_soundboard_disperses_impulse_and_bass_has_piano_envelope():
 @pytest.mark.parametrize(("pitch", "threshold", "energy_range"), [
     (36, 500, (.11, .36)),
     (60, 1000, (.023, .11)),
-    (84, 2000, (.00025, .009)),
+    (84, 2000, (.015, .075)),
 ])
 def test_pressure_voicing_is_register_specific(pitch, threshold, energy_range):
     piano = NovaPianoPlugin()
@@ -97,6 +97,29 @@ def test_pressure_voicing_is_register_specific(pitch, threshold, energy_range):
     power = np.sum(np.abs(np.fft.rfft(segment * np.hanning(len(segment))[:, None], axis=0))**2, axis=1)
     fraction = power[band & (bins >= threshold)].sum() / power[band].sum()
     assert energy_range[0] < fraction < energy_range[1]
+
+
+def test_keyboard_has_even_response_without_guitar_wolf_notes_or_dead_keys():
+    """Ensure passive soundboard & trichord voicing eliminate wolf peaks and muted guitar plucks."""
+    rate = 44100
+    board = PianoSoundboard(rate)
+    impulse = np.zeros((rate // 2, BRIDGE_CHANNELS), dtype=np.float32)
+    impulse[0, 2] = 1.0
+    mag_db = 20.0 * np.log10(np.abs(np.fft.rfft(board.process(impulse, 0.67)[:, 0])) + 1e-12)
+    freqs = np.fft.rfftfreq(len(impulse), 1.0 / rate)
+    mid_band = (freqs >= 65.0) & (freqs <= 4000.0)
+    # Passive spruce mobility avoids deep >30 dB comb notches and sharp wolf spikes.
+    assert float(mag_db[mid_band].max() - mag_db[mid_band].min()) < 14.0
+
+    piano = NovaPianoPlugin()
+    piano.set_state({"reverb_mix": 0.0})
+    rms_values = []
+    for pitch in range(40, 81):
+        wave = piano.render_note(pitch, 0.35, rate, 90).mean(axis=1)
+        seg = wave[round(0.02 * rate):round(0.20 * rate)]
+        rms_values.append(float(np.sqrt(np.mean(seg ** 2))))
+    steps_db = np.abs(20.0 * np.log10(np.array(rms_values[1:]) / np.array(rms_values[:-1])))
+    assert float(np.max(steps_db)) < 3.5
 
 
 def test_host_live_cache_and_export_keep_independent_modal_state(monkeypatch, tmp_path):
