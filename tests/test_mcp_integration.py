@@ -11,8 +11,9 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+import numpy as np
 from PySide6.QtWidgets import QApplication
-from core.project import Project, Track, MidiClip, MidiNote
+from core.project import Project, Track, MidiClip, MidiNote, AudioClip
 from core.mcp.midi_converters import note_name_to_pitch, pitch_to_note_name
 from core.action_registry import action_registry
 import core.actions
@@ -242,6 +243,160 @@ class TestMcpIntegration(unittest.TestCase):
         self.assertIn("novadaw_get_midi_notes", registered_tools)
         self.assertIn("novadaw_control_transport", registered_tools)
         self.assertIn("novadaw_create_track", registered_tools)
+        self.assertIn("novadaw_configure_vocal_glide", registered_tools)
+        self.assertIn("novadaw_crystallize_vocal_glide", registered_tools)
+        self.assertIn("novadaw_configure_guitar", registered_tools)
+        self.assertIn("novadaw_configure_guitar_amp", registered_tools)
+
+    def test_07_vocal_glide_mcp_tools(self):
+        """Vérifie la configuration et la cristallisation de Nova Vocal Glide via MCP."""
+        app = MockApp()
+        avail = action_registry.execute("novadaw_get_available_plugins", app, {})
+        type_ids = {p["type_id"] for p in avail["plugins"]}
+        self.assertIn("novadaw.vocal_glide", type_ids)
+
+        # Créer une piste audio avec un signal faible puis fort
+        created = action_registry.execute("novadaw_create_track", app, {
+            "name": "Chant MCP",
+            "track_type": "audio"
+        })
+        track_id = created["track_id"]
+        track = app.project.get_track(track_id)
+
+        sr = 44100
+        t1 = np.linspace(0.0, 0.8, int(sr * 0.8), endpoint=False, dtype=np.float32)
+        q = (0.05 * np.sin(2.0 * np.pi * 260.0 * t1)).astype(np.float32)
+        l = (0.65 * np.sin(2.0 * np.pi * 260.0 * t1)).astype(np.float32)
+        stereo = np.column_stack((np.concatenate((q, l)), np.concatenate((q, l))))
+        track.clips.append(AudioClip(name="Take 1", start_beat=0.0, length_beats=3.2, audio_data=stereo, sample_rate=sr))
+
+        # Configurer Vocal Glide (auto-ajout + preset + surcharge paramètre)
+        cfg = action_registry.execute("novadaw_configure_vocal_glide", app, {
+            "track_id_or_name": track_id,
+            "preset": "Rap / Spoken Word Punchy",
+            "target_db": -16.5,
+            "aggressiveness": 90.0,
+        })
+        self.assertEqual(cfg["status"], "success")
+        self.assertEqual(cfg["preset_name"], "Rap / Spoken Word Punchy")
+        self.assertAlmostEqual(cfg["state"]["target_db"], -16.5)
+        self.assertAlmostEqual(cfg["state"]["aggressiveness"], 90.0)
+        self.assertAlmostEqual(cfg["state"]["speed"], 78.0)
+
+        # Cristalliser en automatisation Volume
+        cryst = action_registry.execute("novadaw_crystallize_vocal_glide", app, {
+            "track_id_or_name": track_id,
+            "detail_mode": "musical",
+            "auto_bypass": True,
+        })
+        self.assertEqual(cryst["status"], "success")
+        self.assertGreaterEqual(cryst["point_count"], 4)
+        self.assertFalse(cryst["plugin_enabled"])
+        lane = track.get_automation_lane("volume")
+        self.assertIsNotNone(lane)
+        self.assertGreaterEqual(len(lane.points), 4)
+
+    def test_08_guitar_and_amp_mcp_tools(self):
+        """Vérifie Nova Guitar et Nova Guitar Amp via leurs outils MCP dédiés."""
+        app = MockApp()
+        avail = action_registry.execute("novadaw_get_available_plugins", app, {})
+        type_ids = {p["type_id"] for p in avail["plugins"]}
+        self.assertIn("novadaw.guitar", type_ids)
+        self.assertIn("novadaw.guitar_amp", type_ids)
+
+        created = action_registry.execute("novadaw_create_track", app, {
+            "name": "Guitare Lead",
+            "track_type": "midi"
+        })
+        track_id = created["track_id"]
+        track = app.project.get_track(track_id)
+
+        # Ajouter d'abord l'ampli, puis l'instrument guitare : l'instrument doit être placé en position 0
+        amp_res = action_registry.execute("novadaw_configure_guitar_amp", app, {
+            "track_id_or_name": track_id,
+            "preset": "Classic Rock Overdrive",
+            "treble_db": 4.0,
+        })
+        self.assertEqual(amp_res["status"], "success")
+        self.assertEqual(amp_res["preset_name"], "Classic Rock Overdrive")
+        self.assertAlmostEqual(amp_res["state"]["distortion"], 0.65)
+        self.assertAlmostEqual(amp_res["state"]["treble_db"], 4.0)
+
+        gtr_res = action_registry.execute("novadaw_configure_guitar", app, {
+            "track_id_or_name": track_id,
+            "preset": "Électrique Tele Twang (Chevalet)",
+            "palm_mute": 0.45,
+        })
+        self.assertEqual(gtr_res["status"], "success")
+        self.assertEqual(gtr_res["preset_name"], "Électrique Tele Twang (Chevalet)")
+        self.assertEqual(gtr_res["state"]["guitar_mode"], "electric_clean")
+        self.assertAlmostEqual(gtr_res["state"]["palm_mute"], 0.45)
+        self.assertEqual(track.plugin_path, "novadaw.guitar")
+        self.assertEqual(getattr(track.plugins[0], "plugin_type_id", None), "novadaw.guitar")
+        self.assertEqual(getattr(track.plugins[1], "plugin_type_id", None), "novadaw.guitar_amp")
+
+        # Mode invalide -> erreur structurée
+        bad_mode = action_registry.execute("novadaw_configure_guitar", app, {
+            "track_id_or_name": track_id,
+            "guitar_mode": "invalid_mode",
+        })
+        self.assertEqual(bad_mode["status"], "error")
+
+    def test_09_generic_configure_plugin_presets_and_order(self):
+        """Vérifie que les outils génériques (add_plugin_to_track / configure_plugin) gèrent presets et ordre."""
+        app = MockApp()
+        created = action_registry.execute("novadaw_create_track", app, {
+            "name": "Guitare Générique",
+            "track_type": "midi"
+        })
+        track_id = created["track_id"]
+
+        amp_add = action_registry.execute("novadaw_add_plugin_to_track", app, {
+            "track_id": track_id,
+            "plugin_type_id": "novadaw.guitar_amp",
+        })
+        self.assertTrue(amp_add["success"])
+
+        gtr_add = action_registry.execute("novadaw_add_plugin_to_track", app, {
+            "track_id": track_id,
+            "plugin_type_id": "novadaw.guitar",
+        })
+        self.assertTrue(gtr_add["success"])
+        self.assertEqual(gtr_add["stack_position"], 0)
+
+        # Application d'un preset via l'outil générique novadaw_configure_plugin
+        amp_cfg = action_registry.execute("novadaw_configure_plugin", app, {
+            "track_id": track_id,
+            "plugin_instance_id": amp_add["plugin_instance_id"],
+            "parameters": {"preset": "High Gain Metal", "volume": 0.85},
+        })
+        self.assertTrue(amp_cfg["success"])
+        self.assertAlmostEqual(amp_cfg["state"]["distortion"], 0.92)
+        self.assertAlmostEqual(amp_cfg["state"]["volume"], 0.85)
+
+        gtr_cfg = action_registry.execute("novadaw_configure_plugin", app, {
+            "track_id": track_id,
+            "plugin_instance_id": gtr_add["plugin_instance_id"],
+            "parameters": {"preset": "Acoustique Nylon Classique", "reverb_mix": 0.25},
+        })
+        self.assertTrue(gtr_cfg["success"])
+        self.assertEqual(gtr_cfg["state"]["guitar_mode"], "acoustic_nylon")
+        self.assertAlmostEqual(gtr_cfg["state"]["reverb_mix"], 0.25)
+
+        # Ajout et preset Vocal Glide via les outils génériques
+        vg_add = action_registry.execute("novadaw_add_plugin_to_track", app, {
+            "track_id": track_id,
+            "plugin_type_id": "novadaw.vocal_glide",
+        })
+        self.assertTrue(vg_add["success"])
+        vg_cfg = action_registry.execute("novadaw_configure_plugin", app, {
+            "track_id": track_id,
+            "plugin_instance_id": vg_add["plugin_instance_id"],
+            "parameters": {"preset": "Voix Douce / Ballade", "enabled": False},
+        })
+        self.assertTrue(vg_cfg["success"])
+        self.assertAlmostEqual(vg_cfg["state"]["target_db"], -20.0)
+        self.assertAlmostEqual(vg_cfg["state"]["max_boost_db"], 12.0)
 
 
 if __name__ == "__main__":

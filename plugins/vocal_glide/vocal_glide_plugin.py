@@ -138,6 +138,7 @@ class VocalGlidePlugin(BasePlugin):
         )
         self.supports_automation_write = True
         self.automatable_outputs = ["volume"]
+        self.preset_name: str = "Voix Lead (Équilibré)"
 
         # Paramètres utilisateur
         self.target_db: float = self._clamp(float(target_db), -42.0, -3.0)
@@ -184,6 +185,26 @@ class VocalGlidePlugin(BasePlugin):
 
     def get_factory_presets(self) -> Dict[str, Dict[str, Any]]:
         return self.FACTORY_PRESETS
+
+    def apply_preset(self, preset_name: str) -> bool:
+        """Applique un preset d'usine ou utilisateur par son nom."""
+        target = None
+        for k, v in self.FACTORY_PRESETS.items():
+            if k.lower() == preset_name.lower():
+                target = v
+                self.preset_name = k
+                break
+        if target is None:
+            try:
+                from core.preset_manager import global_preset_manager
+                if global_preset_manager.load_preset(self, preset_name):
+                    self.preset_name = preset_name
+                    return True
+            except Exception:
+                pass
+            return False
+        self.set_state(target)
+        return True
 
     def reset(self) -> None:
         """Réinitialise les enveloppes, filtres et historiques internes."""
@@ -583,6 +604,8 @@ class VocalGlidePlugin(BasePlugin):
         }
 
     def set_state(self, state: Dict[str, Any]) -> None:
+        if "enabled" in state:
+            self.enabled = bool(state["enabled"])
         if "target_db" in state:
             self.target_db = self._clamp(float(state["target_db"]), -42.0, -3.0)
         if "activity_threshold_db" in state:

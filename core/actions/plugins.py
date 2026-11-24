@@ -62,6 +62,20 @@ def _get_or_create_plugin(
     return track, plugin
 
 
+def _apply_named_preset(plugin, preset_name: str) -> Optional[Dict[str, Any]]:
+    """Applique un preset sur un plugin et retourne une erreur structurée s'il est inconnu."""
+    if not hasattr(plugin, "apply_preset"):
+        return None
+    if plugin.apply_preset(preset_name):
+        return None
+    available = list(plugin.get_factory_presets().keys()) if hasattr(plugin, "get_factory_presets") else []
+    return {
+        "status": "error",
+        "message": f"Preset '{preset_name}' introuvable pour {plugin.name}. Presets disponibles : {available}",
+        "available_presets": available,
+    }
+
+
 @action_registry.register(
     name="novadaw_get_available_plugins",
     description="Retourne la liste des plugins audio et instruments disponibles dans NovaDAW, dont Nova Piano.",
@@ -96,16 +110,18 @@ def add_plugin_to_track(app, track_id: str, plugin_type_id: str) -> Dict[str, An
     if hasattr(plugin, "set_project"):
         plugin.set_project(app.project)
 
-    track.add_plugin(plugin)
-
-    if getattr(plugin, "is_instrument", False) or getattr(plugin, "category", "") == "instrument":
+    is_inst = getattr(plugin, "is_instrument", False) or getattr(plugin, "category", "") == "instrument"
+    if is_inst:
+        track.add_plugin(plugin, index=0)
         if track.track_type == "midi":
             track.plugin_path = plugin_type_id
             track.plugin_name = plugin.name
             if hasattr(app.project, "add_rack_plugin"):
                 app.project.add_rack_plugin(plugin_type_id, plugin.name, "instrument")
+    else:
+        track.add_plugin(plugin)
 
-    app.refresh_project_ui()
+    _notify_plugin_change(app, track)
 
     return {
         "success": True,
@@ -113,7 +129,7 @@ def add_plugin_to_track(app, track_id: str, plugin_type_id: str) -> Dict[str, An
         "track_name": track.name,
         "plugin_instance_id": plugin.instance_id,
         "plugin_name": plugin.name,
-        "stack_position": len(track.plugins) - 1
+        "stack_position": track.plugins.index(plugin)
     }
 
 
@@ -129,7 +145,7 @@ def remove_plugin_from_track(app, track_id: str, plugin_instance_id: str) -> Dic
 
     removed = track.remove_plugin(plugin_instance_id)
     if removed:
-        app.refresh_project_ui()
+        _notify_plugin_change(app, track)
         return {"success": True, "message": f"Plugin '{plugin_instance_id}' retiré de la piste '{track.name}'"}
     else:
         return {"success": False, "error": f"Plugin '{plugin_instance_id}' non trouvé sur la piste '{track.name}'"}
@@ -150,7 +166,7 @@ def set_plugin_bypass(app, track_id: str, plugin_instance_id: str, enabled: bool
         return {"success": False, "error": f"Plugin '{plugin_instance_id}' non trouvé sur la piste '{track.name}'"}
 
     plugin.enabled = enabled
-    app.refresh_project_ui()
+    _notify_plugin_change(app, track)
     return {
         "success": True,
         "track_id": track.id,
@@ -174,10 +190,30 @@ def configure_plugin(app, track_id: str, plugin_instance_id: str, parameters: Di
     if not plugin:
         return {"success": False, "error": f"Plugin '{plugin_instance_id}' non trouvé sur la piste '{track.name}'"}
 
-    for key, value in parameters.items():
-        plugin.set_parameter(key, value)
+    remaining = dict(parameters)
+    preset_val = remaining.pop("preset", None)
+    if preset_val is None and "preset_name" in remaining and hasattr(plugin, "apply_preset"):
+        preset_val = remaining.pop("preset_name")
 
-    app.refresh_project_ui()
+    if preset_val is not None:
+        if hasattr(plugin, "apply_preset"):
+            if not plugin.apply_preset(str(preset_val)):
+                available = list(plugin.get_factory_presets().keys()) if hasattr(plugin, "get_factory_presets") else []
+                return {
+                    "success": False,
+                    "error": f"Preset '{preset_val}' introuvable pour '{plugin.name}'.",
+                    "available_presets": available,
+                }
+        else:
+            remaining["preset_name"] = preset_val
+
+    for key, value in remaining.items():
+        if key == "enabled":
+            plugin.enabled = bool(value)
+        else:
+            plugin.set_parameter(key, value)
+
+    _notify_plugin_change(app, track)
     return {
         "success": True,
         "track_id": track.id,
@@ -689,6 +725,155 @@ def configure_drum_machine(
 
 
 @action_registry.register(
+    name="novadaw_configure_vocal_glide",
+    description="Configure Nova Vocal Glide sur une piste (nivellement vocal automatique : preset, target_db -42..-3, activity_threshold_db -72..-12, aggressiveness 0..100, speed 0..100, max_boost_db 0..15, max_cut_db 0..15, idle_behavior 'return_zero'|'hold', sidechain_vocal_filter, output_trim_db -12..12, write_automation_live, crystallize_auto_bypass, crystallize_detail 'precise'|'musical'|'smooth', enabled). Ajoute le plugin si absent.",
+    tags=["plugins", "vocal", "dynamics"]
+)
+def configure_vocal_glide(
+    app,
+    track_id_or_name: str,
+    plugin_instance_id: Optional[str] = None,
+    preset: Optional[str] = None,
+    target_db: Optional[float] = None,
+    activity_threshold_db: Optional[float] = None,
+    aggressiveness: Optional[float] = None,
+    speed: Optional[float] = None,
+    max_boost_db: Optional[float] = None,
+    max_cut_db: Optional[float] = None,
+    idle_behavior: Optional[str] = None,
+    sidechain_vocal_filter: Optional[bool] = None,
+    output_trim_db: Optional[float] = None,
+    write_automation_live: Optional[bool] = None,
+    crystallize_auto_bypass: Optional[bool] = None,
+    crystallize_detail: Optional[str] = None,
+    enabled: Optional[bool] = None
+) -> Dict[str, Any]:
+    track, glide_plugin = _get_or_create_plugin(
+        app, track_id_or_name, "novadaw.vocal_glide", plugin_instance_id=plugin_instance_id
+    )
+
+    if preset:
+        err = _apply_named_preset(glide_plugin, preset)
+        if err:
+            return err
+
+    updates: Dict[str, Any] = {}
+    for key, val in (
+        ("target_db", target_db),
+        ("activity_threshold_db", activity_threshold_db),
+        ("aggressiveness", aggressiveness),
+        ("speed", speed),
+        ("max_boost_db", max_boost_db),
+        ("max_cut_db", max_cut_db),
+        ("idle_behavior", idle_behavior.strip().lower() if idle_behavior is not None else None),
+        ("sidechain_vocal_filter", sidechain_vocal_filter),
+        ("output_trim_db", output_trim_db),
+        ("write_automation_live", write_automation_live),
+        ("crystallize_auto_bypass", crystallize_auto_bypass),
+        ("crystallize_detail", crystallize_detail.strip().lower() if crystallize_detail is not None else None),
+        ("enabled", enabled),
+    ):
+        if val is not None:
+            updates[key] = val
+
+    if updates:
+        glide_plugin.set_state(updates)
+
+    _notify_plugin_change(app, track)
+
+    return {
+        "status": "success",
+        "track_id": track.id,
+        "track_name": track.name,
+        "plugin_instance_id": glide_plugin.instance_id,
+        "enabled": glide_plugin.enabled,
+        "preset_name": getattr(glide_plugin, "preset_name", None),
+        "available_presets": list(glide_plugin.get_factory_presets().keys()),
+        "state": glide_plugin.get_state()
+    }
+
+
+@action_registry.register(
+    name="novadaw_crystallize_vocal_glide",
+    description="Analyse les clips audio d'une piste via Nova Vocal Glide et génère la piste d'automatisation Volume correspondante (scope: 'track' ou 'loop', detail_mode: 'precise'|'musical'|'smooth', auto_bypass optionnel).",
+    tags=["plugins", "vocal", "automation"]
+)
+def crystallize_vocal_glide(
+    app,
+    track_id_or_name: str,
+    plugin_instance_id: Optional[str] = None,
+    scope: str = "track",
+    detail_mode: Optional[str] = None,
+    auto_bypass: Optional[bool] = None,
+    start_beat: Optional[float] = None,
+    end_beat: Optional[float] = None
+) -> Dict[str, Any]:
+    track, glide_plugin = _get_or_create_plugin(
+        app, track_id_or_name, "novadaw.vocal_glide", plugin_instance_id=plugin_instance_id
+    )
+
+    project = getattr(app, "project", None)
+    bpm = float(getattr(project, "bpm", 120.0)) if project else 120.0
+    sr = int(getattr(getattr(app, "audio_engine", None), "sample_rate", 44100) or 44100)
+
+    win_start = float(start_beat) if start_beat is not None else None
+    win_end = float(end_beat) if end_beat is not None else None
+    if win_start is None and win_end is None and str(scope).strip().lower() == "loop":
+        if project and getattr(project, "loop_enabled", False) and project.loop_end_beat > project.loop_start_beat:
+            win_start = float(project.loop_start_beat)
+            win_end = float(project.loop_end_beat)
+
+    mode = detail_mode.strip().lower() if detail_mode is not None else None
+    pts, stats = glide_plugin.analyze_track_to_automation_points(
+        track=track,
+        bpm=bpm,
+        sample_rate=sr,
+        start_beat=win_start,
+        end_beat=win_end,
+        detail_mode=mode,
+    )
+
+    if not pts:
+        return {
+            "status": "error",
+            "message": f"Aucun clip audio exploitable trouvé sur la piste '{track.name}' dans la plage sélectionnée."
+        }
+
+    lane = track.add_automation_lane("volume", seed_initial_point=False)
+    lane.enabled = True
+    lane.visible = True
+    lane.mode = "read"
+    track.automation_expanded = True
+
+    if win_start is not None and win_end is not None:
+        lane.points = [p for p in lane.points if p.beat < win_start or p.beat > win_end]
+    else:
+        lane.points.clear()
+
+    for beat, val in pts:
+        lane.add_point(beat, val, curve_type="linear", merge_tol=1e-3)
+
+    should_bypass = glide_plugin.crystallize_auto_bypass if auto_bypass is None else bool(auto_bypass)
+    if should_bypass:
+        glide_plugin.enabled = False
+
+    _notify_plugin_change(app, track)
+
+    return {
+        "status": "success",
+        "track_id": track.id,
+        "track_name": track.name,
+        "plugin_instance_id": glide_plugin.instance_id,
+        "plugin_enabled": glide_plugin.enabled,
+        "point_count": stats["point_count"],
+        "min_gain_db": round(float(stats["min_gain_db"]), 2),
+        "max_gain_db": round(float(stats["max_gain_db"]), 2),
+        "was_clamped": bool(stats.get("was_clamped", False)),
+        "analyzed_beats": round(float(stats.get("analyzed_beats", 0.0)), 3)
+    }
+
+
+@action_registry.register(
     name="novadaw_configure_piano",
     description=(
         "Assigne et règle Nova Piano sur une piste MIDI. "
@@ -743,3 +928,142 @@ def configure_piano(
         "state": piano.get_state(),
         "rooms": {key: data[0] for key, data in ROOMS.items()},
     }
+
+
+@action_registry.register(
+    name="novadaw_configure_guitar",
+    description="Configure l'instrument virtuel Nova Guitar sur une piste MIDI (presets acoustiques/électriques/basse, guitar_mode 'acoustic_steel'|'acoustic_nylon'|'electric_clean'|'electric_bass', string_tension 0..1, pluck_position 0.04..0.5, brightness 0.05..0.98, sustain_sec 0.4..12, release_sec 0.04..2, pick_attack 0..1, palm_mute 0..1, body_resonance 0..1.5, pickup_position 0.06..0.45, stereo_width 0..1, reverb_mix 0..0.65, reverb_room 0.1..0.95, dual_polarization, master_volume 0..2, enabled). Ajoute l'instrument si absent.",
+    tags=["plugins", "guitar", "instrument"]
+)
+def configure_guitar(
+    app,
+    track_id_or_name: str,
+    plugin_instance_id: Optional[str] = None,
+    preset: Optional[str] = None,
+    guitar_mode: Optional[str] = None,
+    string_tension: Optional[float] = None,
+    pluck_position: Optional[float] = None,
+    brightness: Optional[float] = None,
+    sustain_sec: Optional[float] = None,
+    release_sec: Optional[float] = None,
+    pick_attack: Optional[float] = None,
+    palm_mute: Optional[float] = None,
+    body_resonance: Optional[float] = None,
+    pickup_position: Optional[float] = None,
+    stereo_width: Optional[float] = None,
+    reverb_mix: Optional[float] = None,
+    reverb_room: Optional[float] = None,
+    dual_polarization: Optional[bool] = None,
+    master_volume: Optional[float] = None,
+    enabled: Optional[bool] = None
+) -> Dict[str, Any]:
+    track, guitar_plugin = _get_or_create_plugin(
+        app, track_id_or_name, "novadaw.guitar", plugin_instance_id=plugin_instance_id, insert_at_front=True
+    )
+
+    if preset:
+        err = _apply_named_preset(guitar_plugin, preset)
+        if err:
+            return err
+
+    valid_modes = {"acoustic_steel", "acoustic_nylon", "electric_clean", "electric_bass"}
+    clean_mode = guitar_mode.strip().lower() if guitar_mode is not None else None
+    if clean_mode is not None and clean_mode not in valid_modes:
+        return {
+            "status": "error",
+            "message": f"Mode guitare invalide '{guitar_mode}'. Modes supportés : {sorted(valid_modes)}"
+        }
+
+    updates: Dict[str, Any] = {}
+    for key, val in (
+        ("guitar_mode", clean_mode),
+        ("string_tension", string_tension),
+        ("pluck_position", pluck_position),
+        ("brightness", brightness),
+        ("sustain_sec", sustain_sec),
+        ("release_sec", release_sec),
+        ("pick_attack", pick_attack),
+        ("palm_mute", palm_mute),
+        ("body_resonance", body_resonance),
+        ("pickup_position", pickup_position),
+        ("stereo_width", stereo_width),
+        ("reverb_mix", reverb_mix),
+        ("reverb_room", reverb_room),
+        ("dual_polarization", dual_polarization),
+        ("master_volume", master_volume),
+        ("enabled", enabled),
+    ):
+        if val is not None:
+            updates[key] = val
+
+    if updates:
+        guitar_plugin.set_state(updates)
+
+    _notify_plugin_change(app, track)
+
+    return {
+        "status": "success",
+        "track_id": track.id,
+        "track_name": track.name,
+        "plugin_instance_id": guitar_plugin.instance_id,
+        "preset_name": guitar_plugin.preset_name,
+        "available_presets": list(guitar_plugin.get_factory_presets().keys()),
+        "state": guitar_plugin.get_state()
+    }
+
+
+@action_registry.register(
+    name="novadaw_configure_guitar_amp",
+    description="Configure l'amplificateur de guitare Nova Guitar Amp sur une piste (presets: 'Clean Studio (Neutre)', 'Warm Clean (Tube)', 'Blues Crunch', 'Classic Rock Overdrive', 'High Gain Metal', volume 0..2, distortion 0..1, low_db -12..12, mid_db -12..12, treble_db -12..12, cab_enabled, enabled). Ajoute l'ampli si absent.",
+    tags=["plugins", "guitar", "amp", "effect"]
+)
+def configure_guitar_amp(
+    app,
+    track_id_or_name: str,
+    plugin_instance_id: Optional[str] = None,
+    preset: Optional[str] = None,
+    volume: Optional[float] = None,
+    distortion: Optional[float] = None,
+    low_db: Optional[float] = None,
+    mid_db: Optional[float] = None,
+    treble_db: Optional[float] = None,
+    cab_enabled: Optional[bool] = None,
+    enabled: Optional[bool] = None
+) -> Dict[str, Any]:
+    track, amp_plugin = _get_or_create_plugin(
+        app, track_id_or_name, "novadaw.guitar_amp", plugin_instance_id=plugin_instance_id
+    )
+
+    if preset:
+        err = _apply_named_preset(amp_plugin, preset)
+        if err:
+            return err
+
+    updates: Dict[str, Any] = {}
+    for key, val in (
+        ("volume", volume),
+        ("distortion", distortion),
+        ("low_db", low_db),
+        ("mid_db", mid_db),
+        ("treble_db", treble_db),
+        ("cab_enabled", cab_enabled),
+        ("enabled", enabled),
+    ):
+        if val is not None:
+            updates[key] = val
+
+    if updates:
+        amp_plugin.set_state(updates)
+
+    _notify_plugin_change(app, track)
+
+    return {
+        "status": "success",
+        "track_id": track.id,
+        "track_name": track.name,
+        "plugin_instance_id": amp_plugin.instance_id,
+        "preset_name": amp_plugin.preset_name,
+        "available_presets": list(amp_plugin.get_factory_presets().keys()),
+        "state": amp_plugin.get_state()
+    }
+
