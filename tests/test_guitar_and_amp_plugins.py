@@ -512,6 +512,8 @@ def test_audio_engine_offline_chain_guitar_plus_amp():
 
 
 def test_gui_editors_instantiate_and_sync():
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
 
@@ -532,7 +534,33 @@ def test_gui_editors_instantiate_and_sync():
     amp.enabled = False
     a_ed._sync_all()
     assert a_ed.btn_bypass.isChecked() is True
-    assert a_ed._sliders["distortion"][0].value() == 64
+    dial = a_ed._dials["distortion"][0]
+    assert dial.value() == 64
+    assert amp.distortion == 0.64
+
+    a_ed.show()
+    app.processEvents()
+    center = dial.rect().center()
+    QTest.mousePress(dial, Qt.LeftButton, pos=center)
+    QTest.mouseMove(dial, center - QPoint(0, 16))
+    QTest.mouseRelease(dial, Qt.LeftButton, pos=center - QPoint(0, 16))
+    assert amp.distortion == 0.74
+    QTest.keyClick(dial, Qt.Key_Right)
+    assert amp.distortion == 0.75
+
+    QTest.mouseClick(a_ed.btn_bypass, Qt.LeftButton)
+    assert amp.enabled is True
+    QTest.mouseClick(a_ed.btn_bypass, Qt.LeftButton)
+    assert amp.enabled is False
+    QTest.mouseClick(a_ed.chk_cab, Qt.LeftButton)
+    assert amp.cab_enabled is False
+
+    assert amp.apply_preset("High Gain Metal")
+    a_ed._sync_all()
+    assert dial.value() == 92
+    assert a_ed._dials["mid_db"][0].value() == -30
+    assert a_ed.chk_cab.isChecked()
+    assert a_ed.btn_bypass.isChecked()
     a_ed.close()
 
 
