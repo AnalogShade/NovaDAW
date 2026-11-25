@@ -1596,6 +1596,11 @@ class NovaSynthGUI(QWidget):
         """
 
     def _sync_all(self):
+        if self.plugin.layers and self.selected_layer not in self.plugin.layers:
+            self.selected_layer = self.plugin.layers[0]
+        elif not self.plugin.layers:
+            self.selected_layer = None
+
         # 1. Mettre à jour la liste des couches sonores
         while self.layer_vbox.count():
             item = self.layer_vbox.takeAt(0)
@@ -1694,7 +1699,29 @@ class NovaSynthGUI(QWidget):
 
             self.adsr_view.set_adsr(l.attack, l.decay, l.sustain, l.release)
 
-        # 3. Synchroniser la sélection du combo des presets
+        # 3. Synchroniser les effets Master et le volume Master
+        if hasattr(self, "chk_delay"):
+            self.chk_delay.blockSignals(True)
+            self.chk_delay.setChecked(self.plugin.delay.enabled)
+            self.chk_delay.blockSignals(False)
+        if hasattr(self, "slider_del_mix"):
+            self.slider_del_mix.blockSignals(True)
+            self.slider_del_mix.setValue(int(round(self.plugin.delay.mix * 100)))
+            self.slider_del_mix.blockSignals(False)
+        if hasattr(self, "chk_reverb"):
+            self.chk_reverb.blockSignals(True)
+            self.chk_reverb.setChecked(self.plugin.reverb.enabled)
+            self.chk_reverb.blockSignals(False)
+        if hasattr(self, "slider_rev_mix"):
+            self.slider_rev_mix.blockSignals(True)
+            self.slider_rev_mix.setValue(int(round(self.plugin.reverb.mix * 100)))
+            self.slider_rev_mix.blockSignals(False)
+        if hasattr(self, "slider_master"):
+            self.slider_master.blockSignals(True)
+            self.slider_master.setValue(int(round(self.plugin.master_volume * 100)))
+            self.slider_master.blockSignals(False)
+
+        # 4. Synchroniser la sélection du combo des presets
         self.combo_presets.blockSignals(True)
         cur_name = self.plugin.preset_name
         for i in range(self.combo_presets.count()):

@@ -7,6 +7,7 @@ Affiche :
 - VU-mètres stéréo de crête animés en temps réel
 - Accès rapide aux plugins chargés sur chaque piste
 """
+import os
 from typing import Optional, Dict
 import numpy as np
 

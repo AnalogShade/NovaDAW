@@ -828,6 +828,35 @@ def is_native_plugin_editor_open(plugin) -> bool:
     return bool(dlg and dlg.isVisible())
 
 
+def sync_open_native_editor(plugin=None) -> None:
+    """Synchronise les fenêtres d'éditeurs natifs ouvertes après une modification MCP/externe."""
+    targets = []
+    if plugin is not None:
+        inst_id = getattr(plugin, "instance_id", None)
+        if inst_id and inst_id in _open_native_editors:
+            targets.append(_open_native_editors[inst_id])
+    else:
+        targets.extend(_open_native_editors.values())
+
+    for dlg in targets:
+        try:
+            if dlg and dlg.isVisible():
+                dlg._populate_presets(select_name=getattr(dlg.plugin, "preset_name", None))
+                dlg._sync_editor_gui()
+        except Exception:
+            pass
+
+
+def close_all_native_editors() -> None:
+    """Ferme proprement toutes les fenêtres d'éditeurs de plugins natifs ouvertes."""
+    for dlg in list(_open_native_editors.values()):
+        try:
+            dlg.close()
+        except Exception:
+            pass
+    _open_native_editors.clear()
+
+
 def open_native_plugin_editor(plugin, parent=None, track=None):
     """Ouvre ou bascule l'interface d'un plugin natif NovaDAW (Égaliseur, Compresseur, Mixeur, NovaSynth)"""
     if not plugin:

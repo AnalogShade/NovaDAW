@@ -1066,16 +1066,20 @@ class NovaSynthPlugin(BasePlugin):
 
             self.master_volume = float(target.get("master_volume", 1.0))
             self.glide_time = float(target.get("glide_time", 0.0))
+            self.saturation_drive = float(target.get("saturation_drive", 0.0))
 
             del_data = target.get("delay", {})
             self.delay.enabled = bool(del_data.get("enabled", False))
             self.delay.time_sec = float(del_data.get("time_sec", 0.35))
             self.delay.feedback = float(del_data.get("feedback", 0.40))
+            self.delay.ping_pong = bool(del_data.get("ping_pong", True))
             self.delay.mix = float(del_data.get("mix", 0.25))
 
             rev_data = target.get("reverb", {})
             self.reverb.enabled = bool(rev_data.get("enabled", True))
             self.reverb.room_size = float(rev_data.get("room_size", 0.50))
+            self.reverb.damping = float(rev_data.get("damping", 0.35))
+            self.reverb.width = float(rev_data.get("width", 1.0))
             self.reverb.mix = float(rev_data.get("mix", 0.20))
 
             layer_defs = target.get("layers", [])
@@ -1495,6 +1499,8 @@ class NovaSynthPlugin(BasePlugin):
 
     def set_state(self, state: Dict[str, Any]) -> None:
         with self._dsp_lock:
+            if "enabled" in state:
+                self.enabled = bool(state["enabled"])
             self.preset_name = state.get("preset_name", self.preset_name)
             self.master_volume = float(state.get("master_volume", self.master_volume))
             self.glide_time = float(state.get("glide_time", self.glide_time))

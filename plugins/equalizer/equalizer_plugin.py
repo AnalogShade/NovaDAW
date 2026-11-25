@@ -292,8 +292,100 @@ class EqualizerPlugin(BasePlugin):
             instance_id=instance_id
         )
         self.master_gain_db: float = 0.0
+        self.preset_name: str = "Flat"
         self.bands: List[EqualizerBand] = []
         self.set_band_count(band_count)
+
+    FACTORY_PRESETS: Dict[str, Dict[str, Any]] = {
+        "Flat": {"preset_key": "flat"},
+        "Bass Boost": {"preset_key": "bass_boost"},
+        "Bass Cut (HPF 120Hz)": {"preset_key": "bass_cut"},
+        "Vocal Clarity": {"preset_key": "vocal_clarity"},
+        "Warm Master": {"preset_key": "warm_master"},
+        "Bright Air": {"preset_key": "bright_air"},
+    }
+
+    def get_factory_presets(self) -> Dict[str, Dict[str, Any]]:
+        return dict(self.FACTORY_PRESETS)
+
+    def apply_preset(self, preset_name: str) -> bool:
+        """Applique un preset d'égalisation d'usine, un alias MCP ou un preset utilisateur."""
+        if not preset_name:
+            return False
+        p_name = preset_name.strip().lower()
+        canonical_map = {
+            "flat": "Flat",
+            "reset": "Flat",
+            "bass boost": "Bass Boost",
+            "bass_boost": "Bass Boost",
+            "bass": "Bass Boost",
+            "bass cut (hpf 120hz)": "Bass Cut (HPF 120Hz)",
+            "bass_cut": "Bass Cut (HPF 120Hz)",
+            "low_cut": "Bass Cut (HPF 120Hz)",
+            "high_pass": "Bass Cut (HPF 120Hz)",
+            "hpf": "Bass Cut (HPF 120Hz)",
+            "vocal clarity": "Vocal Clarity",
+            "vocal_clarity": "Vocal Clarity",
+            "vocal": "Vocal Clarity",
+            "warm master": "Warm Master",
+            "warm_master": "Warm Master",
+            "warmth": "Warm Master",
+            "bright air": "Bright Air",
+            "bright_air": "Bright Air",
+            "air": "Bright Air",
+        }
+
+        if p_name in canonical_map:
+            canon = canonical_map[p_name]
+            # Remettre d'abord à plat (et rétablir low_shelf sur bande 0 si HPF actif)
+            self.apply_bass_cut(enabled=False)
+            for b in self.bands:
+                b.gain_db = 0.0
+                b.enabled = True
+                b.invalidate_cache()
+            self.master_gain_db = 0.0
+
+            if canon == "Bass Boost":
+                if len(self.bands) > 0:
+                    self.bands[0].gain_db = 5.0
+                    self.bands[0].invalidate_cache()
+                if len(self.bands) > 1:
+                    self.bands[1].gain_db = 2.5
+                    self.bands[1].invalidate_cache()
+            elif canon == "Bass Cut (HPF 120Hz)":
+                self.apply_bass_cut(cutoff_freq=120.0, enabled=True)
+            elif canon == "Vocal Clarity":
+                if len(self.bands) > 2:
+                    self.bands[1].gain_db = -2.0
+                    self.bands[1].invalidate_cache()
+                if self.bands:
+                    mid_idx = min(len(self.bands) - 2, max(2, len(self.bands) // 2)) if len(self.bands) > 3 else len(self.bands) // 2
+                    self.bands[mid_idx].gain_db = 3.5
+                    self.bands[mid_idx].invalidate_cache()
+                    self.bands[-1].gain_db = 2.0
+                    self.bands[-1].invalidate_cache()
+            elif canon == "Warm Master":
+                if self.bands:
+                    self.bands[0].gain_db = 1.5
+                    self.bands[0].invalidate_cache()
+                    self.bands[-1].gain_db = 1.2
+                    self.bands[-1].invalidate_cache()
+            elif canon == "Bright Air":
+                if self.bands:
+                    self.bands[-1].gain_db = 4.0
+                    self.bands[-1].invalidate_cache()
+
+            self.preset_name = canon
+            self.reset()
+            return True
+
+        try:
+            from core.preset_manager import global_preset_manager
+            if global_preset_manager.load_preset(self, preset_name):
+                return True
+        except Exception:
+            pass
+        return False
 
     def set_band_count(self, count: int):
         """
@@ -457,12 +549,18 @@ class EqualizerPlugin(BasePlugin):
         }
 
     def set_state(self, state: Dict[str, Any]) -> None:
-        self.master_gain_db = float(state.get("master_gain_db", 0.0))
+        if "enabled" in state:
+            self.enabled = bool(state["enabled"])
+        if "preset_name" in state:
+            self.preset_name = str(state["preset_name"])
+        if "master_gain_db" in state:
+            self.master_gain_db = float(state["master_gain_db"])
         saved_bands = state.get("bands", [])
-        if saved_bands:
+        target_count = state.get("band_count")
+        if target_count is not None and (not saved_bands or int(target_count) != len(saved_bands)):
+            self.set_band_count(int(target_count))
+        elif saved_bands:
             self.bands = [EqualizerBand.from_dict(d) for d in saved_bands]
-        elif "band_count" in state:
-            self.set_band_count(int(state["band_count"]))
         self.reset()
 
     def create_editor(self, parent=None):

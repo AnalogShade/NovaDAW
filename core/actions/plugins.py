@@ -6,16 +6,28 @@ from core.action_registry import action_registry
 from plugins.registry import plugin_registry, ensure_plugins_loaded
 
 
-def _notify_plugin_change(app, track=None) -> None:
-    """Invalide le cache audio de la piste, marque le projet modifié et rafraîchit l'UI."""
+def _notify_plugin_change(app, track=None, plugin=None) -> None:
+    """Invalide le cache audio de la piste, marque le projet modifié et rafraîchit l'UI + éditeurs ouverts."""
     if track is not None:
         engine = getattr(app, "audio_engine", None)
-        if engine is not None and hasattr(engine, "invalidate_track_cache"):
-            engine.invalidate_track_cache(track.id, trigger_async=True)
+        if engine is not None:
+            if getattr(track, "track_type", "") == "master":
+                if hasattr(engine, "invalidate_all_track_caches"):
+                    engine.invalidate_all_track_caches(trigger_async=True)
+            elif hasattr(engine, "invalidate_track_cache"):
+                engine.invalidate_track_cache(track.id, trigger_async=True)
+                for t in getattr(getattr(app, "project", None), "tracks", []):
+                    if getattr(t, "synth_route_track_id", None) == track.id:
+                        engine.invalidate_track_cache(t.id, trigger_async=True)
     if hasattr(app, "set_dirty"):
         app.set_dirty(True)
     if hasattr(app, "refresh_project_ui"):
         app.refresh_project_ui()
+    try:
+        from ui.plugin_dialogs import sync_open_native_editor
+        sync_open_native_editor(plugin)
+    except Exception:
+        pass
 
 
 def _get_or_create_plugin(
@@ -121,7 +133,7 @@ def add_plugin_to_track(app, track_id: str, plugin_type_id: str) -> Dict[str, An
     else:
         track.add_plugin(plugin)
 
-    _notify_plugin_change(app, track)
+    _notify_plugin_change(app, track, plugin)
 
     return {
         "success": True,
@@ -166,7 +178,7 @@ def set_plugin_bypass(app, track_id: str, plugin_instance_id: str, enabled: bool
         return {"success": False, "error": f"Plugin '{plugin_instance_id}' non trouvé sur la piste '{track.name}'"}
 
     plugin.enabled = enabled
-    _notify_plugin_change(app, track)
+    _notify_plugin_change(app, track, plugin)
     return {
         "success": True,
         "track_id": track.id,
@@ -213,7 +225,7 @@ def configure_plugin(app, track_id: str, plugin_instance_id: str, parameters: Di
         else:
             plugin.set_parameter(key, value)
 
-    _notify_plugin_change(app, track)
+    _notify_plugin_change(app, track, plugin)
     return {
         "success": True,
         "track_id": track.id,
@@ -255,7 +267,7 @@ def get_track_plugins(app, track_id_or_name: str) -> Dict[str, Any]:
 
 @action_registry.register(
     name="novadaw_configure_equalizer",
-    description="Configure l'égaliseur paramétrique d'une piste ou du Master (fréquence, gain dB, Q, type de filtre, gain master ou presets: 'bass_boost', 'vocal_clarity', 'warm_master', 'bright_air', 'flat'). Ajoute l'EQ automatiquement si absent.",
+    description="Configure l'égaliseur paramétrique d'une piste ou du Master (band_count: 3/10/12/24, fréquence, gain dB, Q, type de filtre, band_enabled, coupe-bas HPF bass_cut_enabled/bass_cut_freq, gain master ou presets: 'bass_boost', 'bass_cut', 'vocal_clarity', 'warm_master', 'bright_air', 'flat'). Ajoute l'EQ automatiquement si absent.",
     tags=["plugins", "eq"]
 )
 def configure_equalizer(
@@ -268,63 +280,30 @@ def configure_equalizer(
     q: Optional[float] = None,
     filter_type: Optional[str] = None,
     master_gain_db: Optional[float] = None,
-    preset: Optional[str] = None
+    preset: Optional[str] = None,
+    band_count: Optional[int] = None,
+    band_enabled: Optional[bool] = None,
+    bass_cut_enabled: Optional[bool] = None,
+    bass_cut_freq: Optional[float] = None,
+    enabled: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    ensure_plugins_loaded()
-    track = app.project.get_track(track_id_or_name)
-    if not track:
-        raise ValueError(f"Piste '{track_id_or_name}' introuvable.")
+    track, eq_plugin = _get_or_create_plugin(
+        app, track_id_or_name, "novadaw.equalizer", plugin_instance_id=plugin_instance_id
+    )
 
-    # Trouver l'instance EQ existante ou en ajouter une
-    eq_plugin = None
-    if plugin_instance_id:
-        eq_plugin = track.get_plugin(plugin_instance_id)
+    if band_count is not None:
+        eq_plugin.set_band_count(int(band_count))
 
-    if not eq_plugin:
-        for p in track.plugins:
-            if getattr(p, "plugin_type_id", None) == "novadaw.equalizer":
-                eq_plugin = p
-                break
-
-    if not eq_plugin:
-        eq_plugin = plugin_registry.create_plugin("novadaw.equalizer")
-        track.add_plugin(eq_plugin)
-
-    # Application de preset
     if preset:
-        p_name = preset.lower().strip()
-        if p_name in ("bass_boost", "bass"):
-            if len(eq_plugin.bands) > 0:
-                eq_plugin.bands[0].gain_db = 5.0
-                eq_plugin.bands[0].invalidate_cache()
-            if len(eq_plugin.bands) > 1:
-                eq_plugin.bands[1].gain_db = 2.5
-                eq_plugin.bands[1].invalidate_cache()
-        elif p_name in ("bass_cut", "low_cut", "high_pass", "hpf"):
-            eq_plugin.apply_bass_cut(cutoff_freq=120.0, enabled=True)
-        elif p_name in ("vocal_clarity", "vocal"):
-            if len(eq_plugin.bands) > 2:
-                eq_plugin.bands[1].gain_db = -2.0  # Nettoyage bas-médiums
-                eq_plugin.bands[1].invalidate_cache()
-            mid_idx = min(len(eq_plugin.bands) - 2, max(2, len(eq_plugin.bands) // 2))
-            eq_plugin.bands[mid_idx].gain_db = 3.5  # Présence voix
-            eq_plugin.bands[mid_idx].invalidate_cache()
-            eq_plugin.bands[-1].gain_db = 2.0      # Air
-            eq_plugin.bands[-1].invalidate_cache()
-        elif p_name in ("warm_master", "warmth"):
-            if len(eq_plugin.bands) > 0:
-                eq_plugin.bands[0].gain_db = 1.5
-                eq_plugin.bands[0].invalidate_cache()
-            eq_plugin.bands[-1].gain_db = 1.2
-            eq_plugin.bands[-1].invalidate_cache()
-        elif p_name in ("bright_air", "air"):
-            eq_plugin.bands[-1].gain_db = 4.0
-            eq_plugin.bands[-1].invalidate_cache()
-        elif p_name in ("flat", "reset"):
-            for b in eq_plugin.bands:
-                b.gain_db = 0.0
-                b.invalidate_cache()
-            eq_plugin.master_gain_db = 0.0
+        err = _apply_named_preset(eq_plugin, preset)
+        if err:
+            return err
+
+    if bass_cut_enabled is not None:
+        eq_plugin.apply_bass_cut(
+            cutoff_freq=float(bass_cut_freq) if bass_cut_freq is not None else 120.0,
+            enabled=bool(bass_cut_enabled),
+        )
 
     # Ajustement de bande individuelle
     if band_index is not None and 0 <= band_index < len(eq_plugin.bands):
@@ -337,19 +316,24 @@ def configure_equalizer(
             target_band.q = max(0.1, min(10.0, float(q)))
         if filter_type is not None:
             target_band.filter_type = str(filter_type)
+        if band_enabled is not None:
+            target_band.enabled = bool(band_enabled)
         target_band.invalidate_cache()
 
     if master_gain_db is not None:
         eq_plugin.master_gain_db = max(-24.0, min(24.0, float(master_gain_db)))
 
-    if hasattr(app, "refresh_project_ui"):
-        app.refresh_project_ui()
+    if enabled is not None:
+        eq_plugin.enabled = bool(enabled)
+
+    _notify_plugin_change(app, track, eq_plugin)
 
     return {
         "status": "success",
         "track_id": track.id,
         "track_name": track.name,
         "plugin_instance_id": eq_plugin.instance_id,
+        "enabled": eq_plugin.enabled,
         "master_gain_db": eq_plugin.master_gain_db,
         "preset_applied": preset,
         "bands_count": len(eq_plugin.bands),
@@ -359,7 +343,7 @@ def configure_equalizer(
 
 @action_registry.register(
     name="novadaw_configure_compressor",
-    description="Configure le compresseur dynamique d'une piste ou du Master (threshold_db, ratio, attack_ms, release_ms, makeup_gain_db, mix, knee_db ou presets: 'punchy_drums', 'vocal_leveler', 'master_glue', 'parallel_crush', 'gentle'). Ajoute le compresseur si absent.",
+    description="Configure le compresseur dynamique d'une piste ou du Master (threshold_db, ratio, attack_ms, release_ms, makeup_gain_db, auto_makeup, mix, knee_db, detection_mode 'peak'|'rms', sidechain_hpf_hz ou presets d'usine/utilisateur). Ajoute le compresseur si absent.",
     tags=["plugins", "compressor"]
 )
 def configure_compressor(
@@ -373,69 +357,20 @@ def configure_compressor(
     makeup_gain_db: Optional[float] = None,
     mix: Optional[float] = None,
     knee_db: Optional[float] = None,
-    preset: Optional[str] = None
+    preset: Optional[str] = None,
+    detection_mode: Optional[str] = None,
+    sidechain_hpf_hz: Optional[float] = None,
+    auto_makeup: Optional[bool] = None,
+    enabled: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    ensure_plugins_loaded()
-    track = app.project.get_track(track_id_or_name)
-    if not track:
-        raise ValueError(f"Piste '{track_id_or_name}' introuvable.")
-
-    comp_plugin = None
-    if plugin_instance_id:
-        comp_plugin = track.get_plugin(plugin_instance_id)
-
-    if not comp_plugin:
-        for p in track.plugins:
-            if getattr(p, "plugin_type_id", None) == "novadaw.compressor":
-                comp_plugin = p
-                break
-
-    if not comp_plugin:
-        comp_plugin = plugin_registry.create_plugin("novadaw.compressor")
-        track.add_plugin(comp_plugin)
+    track, comp_plugin = _get_or_create_plugin(
+        app, track_id_or_name, "novadaw.compressor", plugin_instance_id=plugin_instance_id
+    )
 
     if preset:
-        p_name = preset.lower().strip()
-        if p_name in ("punchy_drums", "drums"):
-            comp_plugin.threshold_db = -16.0
-            comp_plugin.ratio = 4.0
-            comp_plugin.attack_ms = 30.0
-            comp_plugin.release_ms = 90.0
-            comp_plugin.makeup_gain_db = 3.0
-            comp_plugin.mix = 1.0
-            comp_plugin.knee_db = 3.0
-        elif p_name in ("vocal_leveler", "vocal"):
-            comp_plugin.threshold_db = -20.0
-            comp_plugin.ratio = 3.2
-            comp_plugin.attack_ms = 12.0
-            comp_plugin.release_ms = 140.0
-            comp_plugin.makeup_gain_db = 4.0
-            comp_plugin.mix = 1.0
-            comp_plugin.knee_db = 6.0
-        elif p_name in ("master_glue", "master"):
-            comp_plugin.threshold_db = -12.0
-            comp_plugin.ratio = 2.0
-            comp_plugin.attack_ms = 30.0
-            comp_plugin.release_ms = 100.0
-            comp_plugin.makeup_gain_db = 1.5
-            comp_plugin.mix = 1.0
-            comp_plugin.knee_db = 4.0
-        elif p_name in ("parallel_crush", "crush"):
-            comp_plugin.threshold_db = -26.0
-            comp_plugin.ratio = 8.0
-            comp_plugin.attack_ms = 5.0
-            comp_plugin.release_ms = 50.0
-            comp_plugin.makeup_gain_db = 6.0
-            comp_plugin.mix = 0.45
-            comp_plugin.knee_db = 2.0
-        elif p_name in ("gentle", "soft"):
-            comp_plugin.threshold_db = -10.0
-            comp_plugin.ratio = 1.8
-            comp_plugin.attack_ms = 25.0
-            comp_plugin.release_ms = 200.0
-            comp_plugin.makeup_gain_db = 1.0
-            comp_plugin.mix = 1.0
-            comp_plugin.knee_db = 5.0
+        err = _apply_named_preset(comp_plugin, preset)
+        if err:
+            return err
 
     if threshold_db is not None:
         comp_plugin.threshold_db = max(-60.0, min(0.0, float(threshold_db)))
@@ -451,16 +386,27 @@ def configure_compressor(
         comp_plugin.mix = max(0.0, min(1.0, float(mix)))
     if knee_db is not None:
         comp_plugin.knee_db = max(0.0, min(12.0, float(knee_db)))
+    if detection_mode is not None:
+        dm = detection_mode.strip().lower()
+        if dm not in ("peak", "rms"):
+            return {"status": "error", "message": f"detection_mode invalide '{detection_mode}' (attendus: 'peak', 'rms')."}
+        comp_plugin.detection_mode = dm
+    if sidechain_hpf_hz is not None:
+        comp_plugin.sidechain_hpf_hz = max(0.0, min(500.0, float(sidechain_hpf_hz)))
+    if auto_makeup is not None:
+        comp_plugin.auto_makeup = bool(auto_makeup)
+    if enabled is not None:
+        comp_plugin.enabled = bool(enabled)
 
-    if hasattr(app, "refresh_project_ui"):
-        app.refresh_project_ui()
+    _notify_plugin_change(app, track, comp_plugin)
 
     return {
         "status": "success",
         "track_id": track.id,
         "track_name": track.name,
         "plugin_instance_id": comp_plugin.instance_id,
-        "preset_applied": preset,
+        "preset_applied": getattr(comp_plugin, "preset_name", preset),
+        "available_presets": list(comp_plugin.get_factory_presets().keys()),
         "state": comp_plugin.get_state()
     }
 
@@ -504,8 +450,18 @@ def configure_mixer(
     if master_pan is not None:
         master_t.pan = max(-1.0, min(1.0, float(master_pan)))
 
+    if hasattr(app, "set_dirty"):
+        app.set_dirty(True)
+
     if hasattr(app, "mixer_widget") and app.mixer_widget:
         app.mixer_widget.refresh_tracks()
+        if hasattr(app.mixer_widget, "sync_controls_from_tracks"):
+            app.mixer_widget.sync_controls_from_tracks()
+    try:
+        from ui.plugin_dialogs import sync_open_native_editor
+        sync_open_native_editor(mixer_p)
+    except Exception:
+        pass
 
     return {
         "status": "success",
@@ -577,6 +533,8 @@ def get_hardware_devices_action(app) -> Dict[str, Any]:
         "audio_host_apis": [h["name"] for h in host_apis],
         "output_devices_count": len(devices["outputs"]),
         "input_devices_count": len(devices["inputs"]),
+        "output_devices": devices["outputs"],
+        "input_devices": devices["inputs"],
         "current_audio_settings": current_audio,
         "graphics_settings": hardware_manager.settings.get("graphics", {})
     }
@@ -584,7 +542,7 @@ def get_hardware_devices_action(app) -> Dict[str, Any]:
 
 @action_registry.register(
     name="novadaw_set_audio_device",
-    description="Configure le périphérique de sortie audio, la fréquence d'échantillonnage ou la taille du buffer en direct et redémarre le moteur audio.",
+    description="Configure le périphérique de sortie et/ou d'entrée audio, la fréquence d'échantillonnage ou la taille du buffer en direct et redémarre le moteur audio.",
     tags=["hardware", "audio"]
 )
 def set_audio_device_action(
@@ -594,10 +552,14 @@ def set_audio_device_action(
     buffer_size: Optional[int] = None,
     wasapi_exclusive: Optional[bool] = None,
     streaming_mode: Optional[bool] = None,
+    input_device_index: Optional[int] = None,
 ) -> Dict[str, Any]:
     from core.hardware_manager import hardware_manager
 
     if hasattr(app, "audio_engine"):
+        if input_device_index is not None:
+            app.audio_engine.input_device = int(input_device_index)
+            hardware_manager.settings["audio"]["input_device_index"] = int(input_device_index)
         app.audio_engine.configure_device(
             output_device=output_device_index,
             sample_rate=sample_rate,
@@ -653,7 +615,7 @@ def set_audio_device_action(
 
 @action_registry.register(
     name="novadaw_configure_drum_machine",
-    description="Configure l'instrument virtuel Nova Drums VSTi d'une piste (presets: 'Studio Acoustic', 'Punchy Rock', 'Trap / Modern', 'Big Hall Ambience', 'Tight & Dry', master_volume, réverbération: room_size, damping, wet_mix, et réglages par pad: volume, pan, tune, reverb_send).",
+    description="Configure l'instrument virtuel Nova Drums VSTi d'une piste (presets: 'Studio Acoustic', 'Punchy Rock', 'Trap / Modern', 'Big Hall Ambience', 'Tight & Dry' ou presets utilisateur, master_volume, réverbération: room_size, damping, width, wet_mix, et réglages par pad: volume, pan, tune, decay, reverb_send, muted, soloed, pad_sample).",
     tags=["plugins", "drums", "instrument"]
 )
 def configure_drum_machine(
@@ -670,35 +632,25 @@ def configure_drum_machine(
     pad_pan: Optional[float] = None,
     pad_tune: Optional[float] = None,
     pad_reverb_send: Optional[float] = None,
-    pad_sample: Optional[str] = None
+    pad_sample: Optional[str] = None,
+    reverb_width: Optional[float] = None,
+    pad_decay: Optional[float] = None,
+    pad_muted: Optional[bool] = None,
+    pad_soloed: Optional[bool] = None,
+    enabled: Optional[bool] = None,
+    plugin_instance_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    ensure_plugins_loaded()
-    track = app.project.get_track(track_id_or_name)
-    if not track:
-        raise ValueError(f"Piste '{track_id_or_name}' introuvable.")
-
-    drum_plugin = None
-    for p in track.plugins:
-        if getattr(p, "plugin_type_id", None) == "novadaw.drum_machine":
-            drum_plugin = p
-            break
-
-    if not drum_plugin:
-        drum_plugin = plugin_registry.create_plugin("novadaw.drum_machine")
-        if drum_plugin:
-            track.plugins.insert(0, drum_plugin)
-
-    if not drum_plugin:
-        return {"status": "error", "message": "Impossible d'instancier Nova Drums VSTi."}
-
-    if track.track_type == "midi":
-        track.plugin_path = "novadaw.drum_machine"
-        track.plugin_name = "Nova Drums VSTi"
-        if hasattr(app.project, "add_rack_plugin"):
-            app.project.add_rack_plugin("novadaw.drum_machine", "Nova Drums VSTi", "instrument")
+    track, drum_plugin = _get_or_create_plugin(
+        app, track_id_or_name, "novadaw.drum_machine", plugin_instance_id=plugin_instance_id, insert_at_front=True
+    )
 
     if preset:
-        drum_plugin.apply_preset(preset)
+        err = _apply_named_preset(drum_plugin, preset)
+        if err:
+            return err
+
+    if enabled is not None:
+        drum_plugin.enabled = bool(enabled)
 
     if master_volume is not None:
         drum_plugin.master_volume = max(0.0, min(2.0, float(master_volume)))
@@ -711,6 +663,9 @@ def configure_drum_machine(
 
     if reverb_damping is not None:
         drum_plugin.reverb.damping = max(0.0, min(1.0, float(reverb_damping)))
+
+    if reverb_width is not None:
+        drum_plugin.reverb.width = max(0.0, min(1.0, float(reverb_width)))
 
     if reverb_wet_mix is not None:
         drum_plugin.reverb.wet_mix = max(0.0, min(1.0, float(reverb_wet_mix)))
@@ -731,19 +686,30 @@ def configure_drum_machine(
                 target_pad.pan = max(-1.0, min(1.0, float(pad_pan)))
             if pad_tune is not None:
                 target_pad.tune = max(-12.0, min(12.0, float(pad_tune)))
+            if pad_decay is not None:
+                target_pad.decay = max(0.1, min(2.0, float(pad_decay)))
             if pad_reverb_send is not None:
                 target_pad.reverb_send = max(0.0, min(1.0, float(pad_reverb_send)))
+            if pad_muted is not None:
+                target_pad.muted = bool(pad_muted)
+            if pad_soloed is not None:
+                target_pad.soloed = bool(pad_soloed)
             drum_plugin.invalidate_cache(target_pad.pad_id)
             drum_plugin.warm_up_cache([target_pad.pad_id], async_bg=True)
+    elif any(v is not None for v in (reverb_enabled, reverb_room_size, reverb_damping, reverb_width, reverb_wet_mix)):
+        drum_plugin.invalidate_cache()
+        drum_plugin.warm_up_cache(async_bg=True)
 
-    if hasattr(app, "refresh_project_ui"):
-        app.refresh_project_ui()
+    _notify_plugin_change(app, track, drum_plugin)
 
     return {
         "status": "success",
         "track_id": track.id,
         "track_name": track.name,
         "plugin_instance_id": drum_plugin.instance_id,
+        "enabled": drum_plugin.enabled,
+        "preset_name": drum_plugin.preset_name,
+        "available_presets": list(drum_plugin.get_factory_presets().keys()),
         "state": drum_plugin.get_state()
     }
 
@@ -803,7 +769,19 @@ def configure_vocal_glide(
     if updates:
         glide_plugin.set_state(updates)
 
-    _notify_plugin_change(app, track)
+    if write_automation_live is not None and getattr(track, "track_type", "") != "master":
+        if bool(write_automation_live):
+            lane = track.add_automation_lane("volume")
+            lane.enabled = True
+            lane.visible = True
+            lane.mode = "write"
+            track.automation_expanded = True
+        else:
+            lane = track.get_automation_lane("volume")
+            if lane is not None and lane.mode == "write":
+                lane.mode = "read"
+
+    _notify_plugin_change(app, track, glide_plugin)
 
     return {
         "status": "success",
@@ -881,7 +859,7 @@ def crystallize_vocal_glide(
     if should_bypass:
         glide_plugin.enabled = False
 
-    _notify_plugin_change(app, track)
+    _notify_plugin_change(app, track, glide_plugin)
 
     return {
         "status": "success",
@@ -900,10 +878,10 @@ def crystallize_vocal_glide(
 @action_registry.register(
     name="novadaw_configure_piano",
     description=(
-        "Assigne et règle Nova Piano sur une piste MIDI. "
-        "Espaces de réverbération (reverb_room) : small_room, large_room, concert_hall, cathedral. "
-        "Dosage reverb_mix, dureté du marteau hammer_hardness et résonance de la table "
-        "soundboard_resonance de 0 à 1, master_volume de 0 à 2, et activation enabled."
+        "Assigne et règle Nova Piano sur une piste MIDI (preset optionnel, "
+        "espaces de réverbération reverb_room : small_room, large_room, concert_hall, cathedral ; "
+        "dosage reverb_mix, dureté du marteau hammer_hardness et résonance de la table "
+        "soundboard_resonance de 0 à 1, master_volume de 0 à 2, et activation enabled)."
     ),
     tags=["plugins", "piano", "instrument"],
 )
@@ -916,6 +894,8 @@ def configure_piano(
     enabled: Optional[bool] = None,
     hammer_hardness: Optional[float] = None,
     soundboard_resonance: Optional[float] = None,
+    preset: Optional[str] = None,
+    plugin_instance_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     from math import isfinite
     from plugins.piano.piano_dsp import ROOMS
@@ -939,16 +919,24 @@ def configure_piano(
         if value is not None and (not isfinite(value) or not 0 <= value <= limit):
             return {"status": "error", "message": f"{name} doit être compris entre 0 et {limit}."}
 
-    track, piano = _get_or_create_plugin(app, track.id, "novadaw.piano", insert_at_front=True)
+    track, piano = _get_or_create_plugin(
+        app, track.id, "novadaw.piano", plugin_instance_id=plugin_instance_id, insert_at_front=True
+    )
+    if preset:
+        err = _apply_named_preset(piano, preset)
+        if err:
+            return err
     parameters.update(reverb_room=room, enabled=enabled)
     updates = {key: value for key, value in parameters.items() if value is not None}
-    piano.set_state(updates)
-    _notify_plugin_change(app, track)
+    if updates:
+        piano.set_state(updates)
+    _notify_plugin_change(app, track, piano)
     return {
         "status": "success",
         "track_id": track.id,
         "track_name": track.name,
         "plugin_instance_id": piano.instance_id,
+        "available_presets": list(piano.get_factory_presets().keys()),
         "state": piano.get_state(),
         "rooms": {key: data[0] for key, data in ROOMS.items()},
     }
@@ -1023,7 +1011,7 @@ def configure_guitar(
     if updates:
         guitar_plugin.set_state(updates)
 
-    _notify_plugin_change(app, track)
+    _notify_plugin_change(app, track, guitar_plugin)
 
     return {
         "status": "success",
@@ -1079,7 +1067,7 @@ def configure_guitar_amp(
     if updates:
         amp_plugin.set_state(updates)
 
-    _notify_plugin_change(app, track)
+    _notify_plugin_change(app, track, amp_plugin)
 
     return {
         "status": "success",
@@ -1089,5 +1077,313 @@ def configure_guitar_amp(
         "preset_name": amp_plugin.preset_name,
         "available_presets": list(amp_plugin.get_factory_presets().keys()),
         "state": amp_plugin.get_state()
+    }
+
+
+@action_registry.register(
+    name="novadaw_reorder_track_plugin",
+    description="Réordonne un plugin natif dans la pile d'une piste ou du Master (new_index >= 0 ; sur le Master, novadaw.mixer reste toujours en position 0).",
+    tags=["plugins", "track"]
+)
+def reorder_track_plugin(
+    app,
+    track_id_or_name: str,
+    plugin_instance_id: str,
+    new_index: int,
+) -> Dict[str, Any]:
+    track = app.project.get_track(track_id_or_name)
+    if not track:
+        return {"status": "error", "message": f"Piste '{track_id_or_name}' introuvable."}
+
+    plugin = track.get_plugin(plugin_instance_id)
+    if not plugin:
+        return {"status": "error", "message": f"Plugin '{plugin_instance_id}' introuvable sur '{track.name}'."}
+
+    cur_idx = track.plugins.index(plugin)
+    if getattr(track, "track_type", "") == "master":
+        if getattr(plugin, "plugin_type_id", "") == "novadaw.mixer":
+            return {"status": "error", "message": "Le plugin Master Mixer doit rester en position 0."}
+        target_idx = max(1, min(len(track.plugins) - 1, int(new_index)))
+    else:
+        target_idx = max(0, min(len(track.plugins) - 1, int(new_index)))
+
+    track.move_plugin(cur_idx, target_idx)
+    _notify_plugin_change(app, track, plugin)
+
+    return {
+        "status": "success",
+        "track_id": track.id,
+        "plugin_instance_id": plugin.instance_id,
+        "old_index": cur_idx,
+        "new_index": track.plugins.index(plugin),
+        "stack": [
+            {"slot_index": i, "instance_id": p.instance_id, "type_id": p.plugin_type_id, "name": p.name}
+            for i, p in enumerate(track.plugins)
+        ],
+    }
+
+
+@action_registry.register(
+    name="novadaw_list_plugin_presets",
+    description="Liste l'ensemble des presets d'usine (Factory) et utilisateur (User) disponibles pour un type de plugin Nova (ex: 'novadaw.synth', 'novadaw.drum_machine', 'novadaw.piano', 'novadaw.guitar', 'novadaw.guitar_amp', 'novadaw.vocal_glide', 'novadaw.equalizer', 'novadaw.compressor').",
+    tags=["plugins", "preset"]
+)
+def list_plugin_presets(
+    app,
+    plugin_type_id: str,
+    track_id_or_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    from core.preset_manager import global_preset_manager
+    ensure_plugins_loaded()
+
+    inst = None
+    if track_id_or_name:
+        track = app.project.get_track(track_id_or_name)
+        if track:
+            for p in track.plugins:
+                if getattr(p, "plugin_type_id", None) == plugin_type_id:
+                    inst = p
+                    break
+    if inst is None:
+        inst = plugin_registry.create_plugin(plugin_type_id)
+        if inst is None:
+            return {"status": "error", "message": f"Type de plugin inconnu : '{plugin_type_id}'."}
+
+    presets = global_preset_manager.list_presets(plugin_type_id, inst)
+    return {
+        "status": "success",
+        "plugin_type_id": plugin_type_id,
+        "count": len(presets),
+        "presets": [dict(p) for p in presets],
+    }
+
+
+@action_registry.register(
+    name="novadaw_save_plugin_preset",
+    description="Sauvegarde les réglages actuels d'un plugin d'une piste en tant que preset utilisateur persistant (.json), sans jamais écraser les presets d'usine protégés.",
+    tags=["plugins", "preset"]
+)
+def save_plugin_preset(
+    app,
+    track_id_or_name: str,
+    preset_name: str,
+    plugin_instance_id: Optional[str] = None,
+    plugin_type_id: Optional[str] = None,
+    description: str = "",
+) -> Dict[str, Any]:
+    from core.preset_manager import global_preset_manager
+    track = app.project.get_track(track_id_or_name)
+    if not track:
+        return {"status": "error", "message": f"Piste '{track_id_or_name}' introuvable."}
+
+    plugin = None
+    if plugin_instance_id:
+        plugin = track.get_plugin(plugin_instance_id)
+    elif plugin_type_id:
+        for p in track.plugins:
+            if getattr(p, "plugin_type_id", None) == plugin_type_id:
+                plugin = p
+                break
+    elif track.plugins:
+        non_mixer = [p for p in track.plugins if getattr(p, "plugin_type_id", "") != "novadaw.mixer"]
+        plugin = non_mixer[0] if non_mixer else track.plugins[0]
+
+    if not plugin:
+        return {"status": "error", "message": f"Aucun plugin correspondant trouvé sur la piste '{track.name}'."}
+
+    clean_name = preset_name.strip()
+    if not clean_name:
+        return {"status": "error", "message": "Le nom du preset ne peut pas être vide."}
+
+    try:
+        saved_path = global_preset_manager.save_preset(
+            plugin, clean_name, author="MCP AI", description=description
+        )
+    except ValueError as ve:
+        return {"status": "error", "message": str(ve)}
+
+    try:
+        from ui.plugin_dialogs import sync_open_native_editor
+        sync_open_native_editor(plugin)
+    except Exception:
+        pass
+
+    return {
+        "status": "success",
+        "track_id": track.id,
+        "plugin_instance_id": plugin.instance_id,
+        "plugin_type_id": plugin.plugin_type_id,
+        "preset_name": clean_name,
+        "file_path": saved_path,
+    }
+
+
+@action_registry.register(
+    name="novadaw_delete_plugin_preset",
+    description="Supprime un preset utilisateur sur disque (refuse systématiquement la suppression des presets d'usine NovaDAW).",
+    tags=["plugins", "preset"]
+)
+def delete_plugin_preset(app, plugin_type_id: str, preset_name: str) -> Dict[str, Any]:
+    from core.preset_manager import global_preset_manager
+    ensure_plugins_loaded()
+    if global_preset_manager.is_factory_preset(plugin_type_id, preset_name):
+        return {"status": "error", "message": f"Le preset d'usine '{preset_name}' est protégé et ne peut pas être supprimé."}
+    deleted = global_preset_manager.delete_preset(plugin_type_id, preset_name)
+    if not deleted:
+        return {"status": "error", "message": f"Preset utilisateur '{preset_name}' introuvable pour '{plugin_type_id}'."}
+    return {"status": "success", "plugin_type_id": plugin_type_id, "deleted_preset": preset_name}
+
+
+@action_registry.register(
+    name="novadaw_list_external_vst_plugins",
+    description="Liste les plugins externes VST3 / VST2 découverts sur le système par le scanner de NovaDAW.",
+    tags=["plugins", "vst"]
+)
+def list_external_vst_plugins(
+    app,
+    compatible_only: bool = False,
+    plugin_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    from core.plugin_manager import global_plugin_manager
+    type_filter = plugin_type.strip().lower() if plugin_type else None
+    items = []
+    for p in getattr(global_plugin_manager, "plugins", []):
+        is_comp = bool(getattr(p, "is_compatible", True))
+        if compatible_only and not is_comp:
+            continue
+        p_type = str(getattr(p, "plugin_type", ""))
+        if type_filter and type_filter not in p_type.lower():
+            continue
+        items.append({
+            "name": getattr(p, "name", ""),
+            "file_path": getattr(p, "file_path", ""),
+            "format": getattr(p, "format", ""),
+            "plugin_type": p_type,
+            "vendor": getattr(p, "vendor", ""),
+            "is_compatible": is_comp,
+            "status": getattr(p, "status", ""),
+        })
+    return {"status": "success", "count": len(items), "external_plugins": items}
+
+
+@action_registry.register(
+    name="novadaw_get_plugin_rack",
+    description="Retourne le catalogue complet du Rack de plugins du projet actif (instruments et effets internes ou VST montés dans le projet).",
+    tags=["plugins", "rack"]
+)
+def get_plugin_rack(app) -> Dict[str, Any]:
+    if hasattr(app.project, "sync_rack_plugins"):
+        app.project.sync_rack_plugins()
+    rack = list(getattr(app.project, "plugin_rack", []))
+    return {"status": "success", "count": len(rack), "plugin_rack": rack}
+
+
+@action_registry.register(
+    name="novadaw_assign_vst_plugin",
+    description="Assigne un plugin externe (.vst3 / .dll) comme instrument d'une piste MIDI (role='instrument') ou comme effet d'insert d'une piste / du Master (role='effect').",
+    tags=["plugins", "vst", "track"]
+)
+def assign_vst_plugin(
+    app,
+    track_id_or_name: str,
+    plugin_path: str,
+    role: str = "auto",
+) -> Dict[str, Any]:
+    import os
+    from core.plugin_manager import global_plugin_manager
+
+    track = app.project.get_track(track_id_or_name)
+    if not track:
+        return {"status": "error", "message": f"Piste '{track_id_or_name}' introuvable."}
+
+    clean_path = os.path.abspath(os.path.expanduser(plugin_path.strip()))
+    if not os.path.exists(clean_path):
+        return {"status": "error", "message": f"Fichier ou bundle VST introuvable : '{plugin_path}'."}
+
+    p_name = os.path.splitext(os.path.basename(clean_path))[0]
+    detected_role = role.strip().lower()
+    if detected_role not in ("auto", "instrument", "effect"):
+        return {"status": "error", "message": "role doit être 'auto', 'instrument' ou 'effect'."}
+
+    for info in getattr(global_plugin_manager, "plugins", []):
+        if os.path.normcase(getattr(info, "file_path", "")) == os.path.normcase(clean_path):
+            p_name = getattr(info, "name", p_name) or p_name
+            if detected_role == "auto":
+                detected_role = "instrument" if "inst" in str(getattr(info, "plugin_type", "")).lower() else "effect"
+            break
+
+    if detected_role == "auto":
+        detected_role = "instrument" if track.track_type == "midi" else "effect"
+
+    if detected_role == "instrument":
+        if track.track_type != "midi":
+            return {"status": "error", "message": "Un instrument VST ne peut être assigné qu'à une piste MIDI."}
+        track.plugin_path = clean_path
+        track.plugin_name = p_name
+        if hasattr(app.project, "add_rack_plugin"):
+            app.project.add_rack_plugin(clean_path, p_name, "instrument")
+    else:
+        if clean_path not in track.insert_effects:
+            track.insert_effects.append(clean_path)
+        if hasattr(app.project, "add_rack_plugin"):
+            app.project.add_rack_plugin(clean_path, p_name, "effect")
+
+    _notify_plugin_change(app, track)
+    return {
+        "status": "success",
+        "track_id": track.id,
+        "track_name": track.name,
+        "role": detected_role,
+        "plugin_name": p_name,
+        "plugin_path": clean_path,
+        "insert_effects": list(track.insert_effects),
+    }
+
+
+@action_registry.register(
+    name="novadaw_remove_vst_plugin",
+    description="Désassigne l'instrument VST externe ou retire un effet d'insert VST externe d'une piste ou du Master.",
+    tags=["plugins", "vst", "track"]
+)
+def remove_vst_plugin(
+    app,
+    track_id_or_name: str,
+    plugin_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    import os
+    track = app.project.get_track(track_id_or_name)
+    if not track:
+        return {"status": "error", "message": f"Piste '{track_id_or_name}' introuvable."}
+
+    removed_instrument = False
+    removed_effects = []
+
+    if plugin_path:
+        norm_target = os.path.normcase(os.path.abspath(os.path.expanduser(plugin_path.strip())))
+        if track.plugin_path and os.path.normcase(os.path.abspath(track.plugin_path)) == norm_target:
+            track.plugin_path = None
+            track.plugin_name = None
+            removed_instrument = True
+        kept = []
+        for fx in track.insert_effects:
+            if os.path.normcase(os.path.abspath(fx)) == norm_target:
+                removed_effects.append(fx)
+            else:
+                kept.append(fx)
+        track.insert_effects = kept
+    else:
+        if track.plugin_path and not str(track.plugin_path).startswith("novadaw."):
+            track.plugin_path = None
+            track.plugin_name = None
+            removed_instrument = True
+        removed_effects = list(track.insert_effects)
+        track.insert_effects.clear()
+
+    _notify_plugin_change(app, track)
+    return {
+        "status": "success",
+        "track_id": track.id,
+        "removed_instrument": removed_instrument,
+        "removed_effects": removed_effects,
     }
 

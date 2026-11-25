@@ -135,7 +135,8 @@ def add_midi_notes(
         raw_pitch = n_data.get("pitch", 60)
         pitch = note_name_to_pitch(raw_pitch)
         start_beat = float(n_data.get("start_beat", 0.0))
-        duration = float(n_data.get("duration", 1.0))
+        raw_duration = n_data.get("duration", n_data.get("duration_beats", 1.0))
+        duration = float(raw_duration)
         velocity = max(1, min(127, int(n_data.get("velocity", 100))))
 
         if not math.isfinite(start_beat) or not math.isfinite(duration):
@@ -217,9 +218,10 @@ def remove_midi_notes(
     clip_id_or_name: Optional[str] = None,
     pitch: Optional[Union[str, int]] = None,
     start_beat_min: Optional[float] = None,
-    start_beat_max: Optional[float] = None
+    start_beat_max: Optional[float] = None,
+    track_id_or_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    track, clip = _resolve_clip(app, clip_id_or_name)
+    track, clip = _resolve_clip(app, clip_id_or_name, track_id_or_name)
     if not clip:
         raise ValueError("Aucun clip MIDI trouvé.")
 
@@ -301,8 +303,13 @@ def create_midi_clip(
     description="Transpose toutes les notes d'un clip d'un intervalle en demi-tons (ex: +2 pour monter d'un ton, -12 pour descendre d'une octave).",
     tags=["midi"]
 )
-def transpose_clip(app, semitones: int, clip_id_or_name: Optional[str] = None) -> Dict[str, Any]:
-    track, clip = _resolve_clip(app, clip_id_or_name)
+def transpose_clip(
+    app,
+    semitones: int,
+    clip_id_or_name: Optional[str] = None,
+    track_id_or_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    track, clip = _resolve_clip(app, clip_id_or_name, track_id_or_name)
     if not clip:
         raise ValueError("Aucun clip MIDI trouvé.")
 
@@ -320,8 +327,13 @@ def transpose_clip(app, semitones: int, clip_id_or_name: Optional[str] = None) -
     description="Recale les temps de départ des notes sur la grille temporelle la plus proche (ex: 0.25 pour 1/16, 0.5 pour 1/8, 1.0 pour une noire).",
     tags=["midi"]
 )
-def quantize_notes(app, grid_division: float = 0.25, clip_id_or_name: Optional[str] = None) -> Dict[str, Any]:
-    track, clip = _resolve_clip(app, clip_id_or_name)
+def quantize_notes(
+    app,
+    grid_division: float = 0.25,
+    clip_id_or_name: Optional[str] = None,
+    track_id_or_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    track, clip = _resolve_clip(app, clip_id_or_name, track_id_or_name)
     if not clip:
         raise ValueError("Aucun clip MIDI trouvé.")
 

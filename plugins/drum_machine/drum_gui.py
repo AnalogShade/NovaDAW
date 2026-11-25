@@ -663,6 +663,32 @@ class DrumMachineWidget(QWidget):
         main_layout.addWidget(lbl_kit_credit)
 
     def _sync_all_controls(self):
+        if hasattr(self, "slider_master"):
+            self.slider_master.blockSignals(True)
+            self.slider_master.setValue(int(round(self.plugin.master_volume * 100)))
+            self.slider_master.blockSignals(False)
+        if hasattr(self, "lbl_master_val"):
+            self.lbl_master_val.setText(f"{int(round(self.plugin.master_volume * 100))}%")
+        if hasattr(self, "chk_reverb"):
+            self.chk_reverb.blockSignals(True)
+            self.chk_reverb.setChecked(self.plugin.reverb.enabled)
+            self.chk_reverb.blockSignals(False)
+        for attr, val in (
+            ("slider_room", self.plugin.reverb.room_size),
+            ("slider_damp", self.plugin.reverb.damping),
+            ("slider_width", self.plugin.reverb.width),
+            ("slider_wet", self.plugin.reverb.wet_mix),
+        ):
+            s = getattr(self, attr, None)
+            if s is not None:
+                s.blockSignals(True)
+                s.setValue(int(round(val * 100)))
+                s.blockSignals(False)
+        pad_btns = getattr(self, "pad_buttons", {})
+        for btn in (pad_btns.values() if isinstance(pad_btns, dict) else pad_btns):
+            if hasattr(btn, "update"):
+                btn.update()
+
         if not self.selected_pad:
             return
         p = self.selected_pad

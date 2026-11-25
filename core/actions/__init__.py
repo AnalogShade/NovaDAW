@@ -6,5 +6,6 @@ import core.actions.midi
 import core.actions.project
 import core.actions.plugins
 import core.actions.synth
+import core.actions.automation
 
-__all__ = ["transport", "midi", "project", "plugins", "synth"]
+__all__ = ["transport", "midi", "project", "plugins", "synth", "automation"]

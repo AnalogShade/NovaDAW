@@ -19,6 +19,8 @@ def set_loop_region(app, start_beat: float, end_beat: float, enabled: bool = Tru
     app.project.loop_enabled = enabled
 
     # Mise à jour visuelle sur l'interface Qt
+    if hasattr(app, "set_dirty"):
+        app.set_dirty(True)
     if hasattr(app, "ruler"):
         app.ruler.set_loop(enabled, start, end)
     if hasattr(app, "transport_bar"):
@@ -124,4 +126,8 @@ def set_bpm(app, bpm: float) -> Dict[str, Any]:
     app.project.bpm = val
     if hasattr(app, "transport_bar"):
         app.transport_bar.spin_bpm.setValue(val)
+    if hasattr(app, "audio_engine") and hasattr(app.audio_engine, "invalidate_all_track_caches"):
+        app.audio_engine.invalidate_all_track_caches(trigger_async=True)
+    if hasattr(app, "set_dirty"):
+        app.set_dirty(True)
     return {"status": "success", "bpm": val}

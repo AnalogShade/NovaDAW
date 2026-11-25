@@ -1078,6 +1078,8 @@ class VocalGlideWidget(QWidget):
         sign = "+" if self.plugin.output_trim_db > 0 else ""
         self.lbl_trim_val.setText(f"{sign}{self.plugin.output_trim_db:.1f} dB")
 
+        for w in (self.btn_sc_vocal, self.btn_write_live, self.btn_bypass, self.chk_auto_bypass):
+            w.blockSignals(True)
         self.btn_sc_vocal.setChecked(self.plugin.sidechain_vocal_filter)
         self.btn_idle.setText(
             "Pause: Retour 0 dB" if self.plugin.idle_behavior == "return_zero" else "Pause: Maintenir"
@@ -1086,6 +1088,15 @@ class VocalGlideWidget(QWidget):
         self.btn_bypass.setChecked(not self.plugin.enabled)
         self.btn_bypass.setText("Bypass Actif" if not self.plugin.enabled else "Bypass")
         self.chk_auto_bypass.setChecked(self.plugin.crystallize_auto_bypass)
+        for w in (self.btn_sc_vocal, self.btn_write_live, self.btn_bypass, self.chk_auto_bypass):
+            w.blockSignals(False)
+
+        if hasattr(self, "combo_detail"):
+            self.combo_detail.blockSignals(True)
+            idx_d = self.combo_detail.findData(self.plugin.crystallize_detail)
+            if idx_d >= 0:
+                self.combo_detail.setCurrentIndex(idx_d)
+            self.combo_detail.blockSignals(False)
 
         for s in sliders:
             s.blockSignals(False)

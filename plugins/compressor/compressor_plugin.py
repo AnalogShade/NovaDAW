@@ -111,6 +111,7 @@ class CompressorPlugin(BasePlugin):
         self.mix: float = float(mix)  # 0.0 (dry) à 1.0 (wet)
         self.detection_mode: str = str(detection_mode).lower()  # "peak" ou "rms"
         self.sidechain_hpf_hz: float = float(sidechain_hpf_hz)
+        self.preset_name: str = "Défaut (Transparent)"
 
         # État interne continu pour filtrage temps réel sans artefacts entre buffers
         self._env_peak: float = 0.0
@@ -128,6 +129,42 @@ class CompressorPlugin(BasePlugin):
 
     def get_factory_presets(self) -> Dict[str, Dict[str, Any]]:
         return self.FACTORY_PRESETS
+
+    def apply_preset(self, preset_name: str) -> bool:
+        """Applique un preset d'usine, un alias MCP ou un preset utilisateur."""
+        if not preset_name:
+            return False
+        clean = preset_name.strip().lower()
+        for k, v in self.FACTORY_PRESETS.items():
+            if k.lower() == clean:
+                self.set_state(v)
+                self.preset_name = k
+                return True
+
+        alias_presets = {
+            "punchy_drums": {"threshold_db": -16.0, "ratio": 4.0, "attack_ms": 30.0, "release_ms": 90.0, "makeup_gain_db": 3.0, "mix": 1.0, "knee_db": 3.0, "auto_makeup": False, "detection_mode": "peak", "sidechain_hpf_hz": 0.0},
+            "drums": {"threshold_db": -16.0, "ratio": 4.0, "attack_ms": 30.0, "release_ms": 90.0, "makeup_gain_db": 3.0, "mix": 1.0, "knee_db": 3.0, "auto_makeup": False, "detection_mode": "peak", "sidechain_hpf_hz": 0.0},
+            "vocal_leveler": {"threshold_db": -20.0, "ratio": 3.2, "attack_ms": 12.0, "release_ms": 140.0, "makeup_gain_db": 4.0, "mix": 1.0, "knee_db": 6.0, "auto_makeup": False, "detection_mode": "rms", "sidechain_hpf_hz": 80.0},
+            "vocal": {"threshold_db": -20.0, "ratio": 3.2, "attack_ms": 12.0, "release_ms": 140.0, "makeup_gain_db": 4.0, "mix": 1.0, "knee_db": 6.0, "auto_makeup": False, "detection_mode": "rms", "sidechain_hpf_hz": 80.0},
+            "master_glue": {"threshold_db": -12.0, "ratio": 2.0, "attack_ms": 30.0, "release_ms": 100.0, "makeup_gain_db": 1.5, "mix": 1.0, "knee_db": 4.0, "auto_makeup": False, "detection_mode": "rms", "sidechain_hpf_hz": 80.0},
+            "master": {"threshold_db": -12.0, "ratio": 2.0, "attack_ms": 30.0, "release_ms": 100.0, "makeup_gain_db": 1.5, "mix": 1.0, "knee_db": 4.0, "auto_makeup": False, "detection_mode": "rms", "sidechain_hpf_hz": 80.0},
+            "parallel_crush": {"threshold_db": -26.0, "ratio": 8.0, "attack_ms": 5.0, "release_ms": 50.0, "makeup_gain_db": 6.0, "mix": 0.45, "knee_db": 2.0, "auto_makeup": False, "detection_mode": "peak", "sidechain_hpf_hz": 0.0},
+            "crush": {"threshold_db": -26.0, "ratio": 8.0, "attack_ms": 5.0, "release_ms": 50.0, "makeup_gain_db": 6.0, "mix": 0.45, "knee_db": 2.0, "auto_makeup": False, "detection_mode": "peak", "sidechain_hpf_hz": 0.0},
+            "gentle": {"threshold_db": -10.0, "ratio": 1.8, "attack_ms": 25.0, "release_ms": 200.0, "makeup_gain_db": 1.0, "mix": 1.0, "knee_db": 5.0, "auto_makeup": False, "detection_mode": "rms", "sidechain_hpf_hz": 0.0},
+            "soft": {"threshold_db": -10.0, "ratio": 1.8, "attack_ms": 25.0, "release_ms": 200.0, "makeup_gain_db": 1.0, "mix": 1.0, "knee_db": 5.0, "auto_makeup": False, "detection_mode": "rms", "sidechain_hpf_hz": 0.0},
+        }
+        if clean in alias_presets:
+            self.set_state(alias_presets[clean])
+            self.preset_name = preset_name.strip()
+            return True
+
+        try:
+            from core.preset_manager import global_preset_manager
+            if global_preset_manager.load_preset(self, preset_name):
+                return True
+        except Exception:
+            pass
+        return False
 
     def reset(self) -> None:
         """Réinitialise l'état dynamique interne et les indicateurs."""
@@ -342,16 +379,30 @@ class CompressorPlugin(BasePlugin):
         }
 
     def set_state(self, state: Dict[str, Any]) -> None:
-        self.threshold_db = float(state.get("threshold_db", -18.0))
-        self.ratio = float(state.get("ratio", 4.0))
-        self.attack_ms = float(state.get("attack_ms", 15.0))
-        self.release_ms = float(state.get("release_ms", 120.0))
-        self.knee_db = float(state.get("knee_db", 4.0))
-        self.makeup_gain_db = float(state.get("makeup_gain_db", 0.0))
-        self.auto_makeup = bool(state.get("auto_makeup", False))
-        self.mix = float(state.get("mix", 1.0))
-        self.detection_mode = str(state.get("detection_mode", "peak")).lower()
-        self.sidechain_hpf_hz = float(state.get("sidechain_hpf_hz", 0.0))
+        if "preset_name" in state:
+            self.preset_name = str(state["preset_name"])
+        if "threshold_db" in state:
+            self.threshold_db = float(state["threshold_db"])
+        if "ratio" in state:
+            self.ratio = float(state["ratio"])
+        if "attack_ms" in state:
+            self.attack_ms = float(state["attack_ms"])
+        if "release_ms" in state:
+            self.release_ms = float(state["release_ms"])
+        if "knee_db" in state:
+            self.knee_db = float(state["knee_db"])
+        if "makeup_gain_db" in state:
+            self.makeup_gain_db = float(state["makeup_gain_db"])
+        if "auto_makeup" in state:
+            self.auto_makeup = bool(state["auto_makeup"])
+        if "mix" in state:
+            self.mix = float(state["mix"])
+        if "detection_mode" in state:
+            mode = str(state["detection_mode"]).lower()
+            if mode in ("peak", "rms"):
+                self.detection_mode = mode
+        if "sidechain_hpf_hz" in state:
+            self.sidechain_hpf_hz = float(state["sidechain_hpf_hz"])
         if "enabled" in state:
             self.enabled = bool(state["enabled"])
         self.reset()

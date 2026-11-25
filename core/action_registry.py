@@ -96,7 +96,13 @@ class ActionRegistry:
         if not action:
             raise KeyError(f"Action inconnue dans NovaDAW : '{action_name}'")
         
-        # Filtre les paramètres attendus par la fonction
+        # Filtre les paramètres attendus par la fonction (avec alias de compatibilité MCP)
+        aliases = {
+            "track_id": "track_id_or_name",
+            "track_id_or_name": "track_id",
+            "clip_id": "clip_id_or_name",
+            "clip_id_or_name": "clip_id",
+        }
         sig = inspect.signature(action.func)
         filtered_params = {}
         for p_name in sig.parameters:
@@ -104,6 +110,8 @@ class ActionRegistry:
                 continue
             if p_name in params:
                 filtered_params[p_name] = params[p_name]
+            elif p_name in aliases and aliases[p_name] in params:
+                filtered_params[p_name] = params[aliases[p_name]]
 
         return action.func(app, **filtered_params)
 

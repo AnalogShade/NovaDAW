@@ -46,7 +46,18 @@ class NovaIpcClient:
         Lève une exception explicite si NovaDAW n'est pas démarré ou si l'action échoue.
         """
         if timeout is None:
-            timeout = 300.0 if action == "novadaw_export_wav" else 5.0
+            if action == "novadaw_export_wav":
+                timeout = 300.0
+            elif action in (
+                "novadaw_import_audio_file",
+                "novadaw_crystallize_vocal_glide",
+                "novadaw_open_project",
+                "novadaw_load_demo_project",
+                "novadaw_assign_vst_plugin",
+            ):
+                timeout = 60.0
+            else:
+                timeout = 15.0
         host, port = self.get_server_coords()
         req_id = str(uuid.uuid4())[:8]
         payload = {

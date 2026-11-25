@@ -2446,31 +2446,41 @@ class AudioEngine:
         if inst is None:
             return None
         ptype = getattr(inst, "plugin_type_id", None)
+        route_sig = (getattr(track, "synth_output_bus", None), getattr(track, "synth_route_track_id", None))
         if ptype == "novadaw.synth":
             d = getattr(inst, "delay", None)
             r = getattr(inst, "reverb", None)
             return (
+                route_sig,
                 getattr(inst, "enabled", True),
                 round(getattr(inst, "master_volume", 1.0), 4),
                 getattr(inst, "preset_name", ""),
-                (d.enabled, round(d.time_sec, 4), round(d.feedback, 4), round(d.mix, 4)) if d else None,
-                (r.enabled, round(r.room_size, 4), round(r.damping, 4), round(r.mix, 4)) if r else None,
+                (d.enabled, round(d.time_sec, 4), round(d.feedback, 4), bool(getattr(d, "ping_pong", True)), round(d.mix, 4)) if d else None,
+                (r.enabled, round(r.room_size, 4), round(r.damping, 4), round(getattr(r, "width", 1.0), 4), round(r.mix, 4)) if r else None,
                 tuple(
                     (
                         l.enabled, l.muted, l.soloed, l.waveform,
                         round(l.volume, 4), round(l.pan, 4), l.octave, l.semitone, round(l.fine_tune, 2),
+                        round(getattr(l, "pulse_width", 0.5), 3),
+                        round(getattr(l, "fm_ratio", 2.0), 3), round(getattr(l, "fm_depth", 1.0), 3),
+                        round(getattr(l, "unison_detune", 0.25), 3), round(getattr(l, "unison_spread", 0.8), 3),
                         l.filter_type, round(l.cutoff, 1), round(l.resonance, 3), round(l.drive, 3),
+                        round(getattr(l, "filter_env_amount", 0.0), 3),
+                        round(getattr(l, "filter_attack", 0.015), 4), round(getattr(l, "filter_decay", 0.3), 4),
+                        round(getattr(l, "filter_sustain", 0.2), 4), round(getattr(l, "filter_release", 0.4), 4),
                         round(l.attack, 4), round(l.decay, 4), round(l.sustain, 4), round(l.release, 4),
-                        l.lfo_enabled, round(l.lfo_rate, 3), round(l.lfo_depth, 3), l.lfo_target,
+                        l.lfo_enabled, getattr(l, "lfo_waveform", "sine"),
+                        round(l.lfo_rate, 3), round(l.lfo_depth, 3), l.lfo_target,
                         l.output_bus
                     )
                     for l in getattr(inst, "layers", [])
                 ),
             )
         if ptype == "novadaw.piano":
-            return tuple(inst.get_state().items())
+            return (route_sig, tuple(inst.get_state().items()))
         if ptype == "novadaw.guitar":
             return (
+                route_sig,
                 getattr(inst, "enabled", True),
                 getattr(inst, "preset_name", ""),
                 getattr(inst, "guitar_mode", "acoustic_steel"),
@@ -2492,10 +2502,11 @@ class AudioEngine:
         if ptype == "novadaw.drum_machine":
             r = getattr(inst, "reverb", None)
             return (
+                route_sig,
                 getattr(inst, "enabled", True),
                 round(getattr(inst, "master_volume", 1.0), 4),
                 getattr(inst, "preset_name", ""),
-                (r.enabled, round(r.room_size, 4), round(r.damping, 4), round(r.wet_mix, 4)) if r else None,
+                (r.enabled, round(r.room_size, 4), round(r.damping, 4), round(getattr(r, "width", 1.0), 4), round(r.wet_mix, 4)) if r else None,
                 tuple(
                     (
                         p.muted, p.soloed, round(p.volume, 4), round(p.pan, 4),
@@ -2562,7 +2573,15 @@ class AudioEngine:
 
     def _compute_track_hash(self, track: Track, bpm: float, sample_rate: int) -> str:
         """Calcule une empreinte rapide des notes, clips et état d'instrument pour valider le cache ASIO-Guard."""
-        parts = [track.id, str(getattr(track, "midi_channel", 1)), str(track.plugin_path or ""), f"{bpm:.2f}", str(sample_rate)]
+        parts = [
+            track.id,
+            str(getattr(track, "midi_channel", 1)),
+            str(track.plugin_path or ""),
+            str(getattr(track, "synth_output_bus", None)),
+            str(getattr(track, "synth_route_track_id", None)),
+            f"{bpm:.2f}",
+            str(sample_rate),
+        ]
 
         # 1. État de l'instrument (direct ou routé vers une autre piste)
         target_track = None
@@ -2571,6 +2590,7 @@ class AudioEngine:
         native_inst = self.get_native_instrument(target_track) if target_track else self.get_native_instrument(track)
         if native_inst and hasattr(native_inst, "get_state"):
             try:
+                parts.append(f"EN:{getattr(native_inst, 'enabled', True)}")
                 parts.append(str(native_inst.get_state()))
             except Exception:
                 pass
@@ -2582,7 +2602,12 @@ class AudioEngine:
                 for n in c.notes:
                     parts.append(f"{n.pitch}:{n.start_beat:.3f}:{n.duration:.3f}:{n.velocity}")
             elif isinstance(c, AudioClip):
-                parts.append(f"A:{c.id}:{c.start_beat:.3f}:{c.length_beats:.3f}:{getattr(c, 'file_path', '')}")
+                gain_v = float(getattr(c, "gain", 1.0))
+                off_v = float(getattr(c, "source_offset_beats", 0.0))
+                data_len = len(c.audio_data) if getattr(c, "audio_data", None) is not None else 0
+                parts.append(
+                    f"A:{c.id}:{c.start_beat:.3f}:{c.length_beats:.3f}:{off_v:.3f}:{gain_v:.4f}:{data_len}:{getattr(c, 'file_path', '')}"
+                )
 
         import hashlib
         return hashlib.md5("".join(parts).encode("utf-8")).hexdigest()
@@ -2624,25 +2649,30 @@ class AudioEngine:
             native_inst = self.get_native_instrument(target_track) if target_track else self.get_native_instrument(track)
 
             if native_inst and hasattr(native_inst, "render_slice"):
+                if not getattr(native_inst, "enabled", True):
+                    all_midi_notes = []
+                else:
+                    all_midi_notes = None
                 is_drum = (getattr(native_inst, "plugin_type_id", None) == "novadaw.drum_machine" or
                            getattr(track, "plugin_path", None) == "novadaw.drum_machine")
                 release_tail_beats = self._compute_native_release_tail_beats(native_inst, is_drum, beats_per_sec, 2.0)
                 bus_idx = getattr(track, "synth_output_bus", None)
 
                 # Pré-collecter toutes les notes MIDI de la piste une seule fois
-                all_midi_notes = []
-                for clip in track.clips:
-                    if not isinstance(clip, MidiClip):
-                        continue
-                    cs = clip.start_beat
-                    for note in clip.notes:
-                        all_midi_notes.append(MidiNote(
-                            pitch=note.pitch,
-                            start_beat=cs + note.start_beat,
-                            duration=note.duration,
-                            velocity=note.velocity
-                        ))
-                all_midi_notes.sort(key=lambda n: n.start_beat)
+                if all_midi_notes is None:
+                    all_midi_notes = []
+                    for clip in track.clips:
+                        if not isinstance(clip, MidiClip):
+                            continue
+                        cs = clip.start_beat
+                        for note in clip.notes:
+                            all_midi_notes.append(MidiNote(
+                                pitch=note.pitch,
+                                start_beat=cs + note.start_beat,
+                                duration=note.duration,
+                                velocity=note.velocity
+                            ))
+                    all_midi_notes.sort(key=lambda n: n.start_beat)
 
                 # Préserver les états de lecture temps réel pendant le pré-rendu.
                 iso_delay = None
@@ -2779,14 +2809,19 @@ class AudioEngine:
             clip_frames = int(dur_sec * sample_rate)
             dest_start = int((cs_b / beats_per_sec) * sample_rate)
             if dest_start < total_frames:
+                src_off_b = max(0.0, float(getattr(clip, "source_offset_beats", 0.0)))
+                src_offset_frames = int((src_off_b / beats_per_sec) * sample_rate)
                 src_samples = clip.audio_data
-                to_copy = min(len(src_samples), clip_frames, total_frames - dest_start)
+                if src_offset_frames >= len(src_samples):
+                    continue
+                avail_src = src_samples[src_offset_frames:]
+                to_copy = min(len(avail_src), clip_frames, total_frames - dest_start)
                 if to_copy > 0:
-                    if src_samples.ndim == 1:
-                        buf[dest_start:dest_start + to_copy, 0] += src_samples[:to_copy] * clip.gain
-                        buf[dest_start:dest_start + to_copy, 1] += src_samples[:to_copy] * clip.gain
+                    if avail_src.ndim == 1:
+                        buf[dest_start:dest_start + to_copy, 0] += avail_src[:to_copy] * clip.gain
+                        buf[dest_start:dest_start + to_copy, 1] += avail_src[:to_copy] * clip.gain
                     else:
-                        buf[dest_start:dest_start + to_copy] += src_samples[:to_copy, :2] * clip.gain
+                        buf[dest_start:dest_start + to_copy] += avail_src[:to_copy, :2] * clip.gain
 
         # Les inserts de piste (Égaliseur, Compresseur, VST) sont traités en temps réel
         # sur le buffer générateur pré-calculé, garantissant une réactivité immédiate sans re-rendu offline.
@@ -3023,48 +3058,51 @@ class AudioEngine:
             rendered_by_native = False
 
             if native_inst and hasattr(native_inst, "render_slice"):
-                clip_notes = []
-                # Marge de queue de release ADSR adaptée (0 pour batterie one-shot, 1.5 pour synthé)
-                is_drum = (getattr(native_inst, "plugin_type_id", None) == "novadaw.drum_machine" or
-                           getattr(track, "plugin_path", None) == "novadaw.drum_machine")
-                release_tail_beats = self._compute_native_release_tail_beats(native_inst, is_drum, beats_per_sec, 1.5)
-                for clip in track.clips:
-                    if not isinstance(clip, MidiClip):
-                        continue
-                    clip_start = clip.start_beat
-                    clip_end = clip_start + clip.length_beats
-                    if (clip_end + release_tail_beats) < start_b or clip_start > end_b:
-                        continue
-                    for note in clip.notes:
-                        abs_note_start = clip_start + note.start_beat
-                        if abs_note_start < end_b and (abs_note_start + note.duration + release_tail_beats) > start_b:
-                            clip_notes.append(MidiNote(
-                                pitch=note.pitch,
-                                start_beat=abs_note_start,
-                                duration=note.duration,
-                                velocity=note.velocity
-                            ))
-                try:
-                    bus_idx = getattr(track, "synth_output_bus", None)
-                    if bus_idx is not None:
-                        try:
-                            native_out = native_inst.render_slice(
-                                clip_notes, start_b, end_b, beats_per_sec, frames, self.sample_rate, bus_index=bus_idx
-                            )
-                        except TypeError:
+                if not getattr(native_inst, "enabled", True):
+                    rendered_by_native = True
+                else:
+                    clip_notes = []
+                    # Marge de queue de release ADSR adaptée (0 pour batterie one-shot, 1.5 pour synthé)
+                    is_drum = (getattr(native_inst, "plugin_type_id", None) == "novadaw.drum_machine" or
+                               getattr(track, "plugin_path", None) == "novadaw.drum_machine")
+                    release_tail_beats = self._compute_native_release_tail_beats(native_inst, is_drum, beats_per_sec, 1.5)
+                    for clip in track.clips:
+                        if not isinstance(clip, MidiClip):
+                            continue
+                        clip_start = clip.start_beat
+                        clip_end = clip_start + clip.length_beats
+                        if (clip_end + release_tail_beats) < start_b or clip_start > end_b:
+                            continue
+                        for note in clip.notes:
+                            abs_note_start = clip_start + note.start_beat
+                            if abs_note_start < end_b and (abs_note_start + note.duration + release_tail_beats) > start_b:
+                                clip_notes.append(MidiNote(
+                                    pitch=note.pitch,
+                                    start_beat=abs_note_start,
+                                    duration=note.duration,
+                                    velocity=note.velocity
+                                ))
+                    try:
+                        bus_idx = getattr(track, "synth_output_bus", None)
+                        if bus_idx is not None:
+                            try:
+                                native_out = native_inst.render_slice(
+                                    clip_notes, start_b, end_b, beats_per_sec, frames, self.sample_rate, bus_index=bus_idx
+                                )
+                            except TypeError:
+                                native_out = native_inst.render_slice(
+                                    clip_notes, start_b, end_b, beats_per_sec, frames, self.sample_rate
+                                )
+                        else:
                             native_out = native_inst.render_slice(
                                 clip_notes, start_b, end_b, beats_per_sec, frames, self.sample_rate
                             )
-                    else:
-                        native_out = native_inst.render_slice(
-                            clip_notes, start_b, end_b, beats_per_sec, frames, self.sample_rate
-                        )
-                    if native_out is not None and len(native_out) > 0:
-                        n = min(frames, len(native_out))
-                        track_buf[:n] += native_out[:n]
-                        rendered_by_native = True
-                except Exception as e:
-                    rendered_by_native = False
+                        if native_out is not None and len(native_out) > 0:
+                            n = min(frames, len(native_out))
+                            track_buf[:n] += native_out[:n]
+                            rendered_by_native = True
+                    except Exception as e:
+                        rendered_by_native = False
 
             # 2. Vérifier si la piste est routée vers un VST3 Instrument externe
             vst_plugin = None if rendered_by_native else self.get_track_plugin(track)

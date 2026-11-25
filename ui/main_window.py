@@ -978,6 +978,8 @@ class MainWindow(QMainWindow):
                         p.set_project(self.project)
                     break
             self.mixer_widget.refresh_tracks()
+            if hasattr(self.mixer_widget, "sync_controls_from_tracks"):
+                self.mixer_widget.sync_controls_from_tracks()
             self.mixer_widget._update_master_fx_badges()
             if hasattr(self, "selected_track_id"):
                 self.mixer_widget.set_selected_track(self.selected_track_id)
@@ -1042,20 +1044,24 @@ class MainWindow(QMainWindow):
             else:
                 self.selected_track_id = self.project.tracks[0].id
                 self._on_track_selected(self.selected_track_id)
+            if hasattr(self, "timeline_grid") and getattr(self.timeline_grid, "selected_clip", None) is not None:
+                cur_sel_clip = self.timeline_grid.selected_clip
+                if not any(cur_sel_clip in t.clips for t in self.project.tracks):
+                    self.timeline_grid.selected_clip = None
         else:
             self.selected_track_id = None
             if hasattr(self, "inspector"):
                 self.inspector.set_track(None)
             if hasattr(self, "piano_roll"):
                 self.piano_roll.clear()
-        if hasattr(self, "audio_engine") and hasattr(self.audio_engine, "sync_project_monitoring"):
-            self.audio_engine.sync_project_monitoring()
             if hasattr(self, "audio_editor"):
                 self.audio_editor.clear()
             if hasattr(self, "timeline_grid"):
                 self.timeline_grid.selected_clip = None
                 self.timeline_grid.time_selection = None
                 self.timeline_grid.set_selected_track_id(None)
+        if hasattr(self, "audio_engine") and hasattr(self.audio_engine, "sync_project_monitoring"):
+            self.audio_engine.sync_project_monitoring()
 
         self.transport_bar.spin_bpm.setValue(self.project.bpm)
         self.transport_bar.btn_loop.setChecked(self.project.loop_enabled)
@@ -2659,9 +2665,11 @@ class MainWindow(QMainWindow):
 
     # --- Actions Fichier ---
 
-    def new_project(self) -> bool:
-        if not self.maybe_save_changes(reason="new"):
+    def new_project(self, prompt_save: bool = True) -> bool:
+        if prompt_save and not self.maybe_save_changes(reason="new"):
             return False
+        from ui.plugin_dialogs import close_all_native_editors
+        close_all_native_editors()
         global_plugin_manager.close_all_editors()
         self.audio_engine.stop()
         self.project = Project.create_empty()
@@ -2675,9 +2683,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Nouveau projet vide créé.", 3000)
         return True
 
-    def load_demo_project(self) -> bool:
-        if not self.maybe_save_changes(reason="demo"):
+    def load_demo_project(self, prompt_save: bool = True) -> bool:
+        if prompt_save and not self.maybe_save_changes(reason="demo"):
             return False
+        from ui.plugin_dialogs import close_all_native_editors
+        close_all_native_editors()
         global_plugin_manager.close_all_editors()
         self.audio_engine.stop()
         self.project = Project.create_demo()
@@ -2769,6 +2779,8 @@ class MainWindow(QMainWindow):
             return False
 
         try:
+            from ui.plugin_dialogs import close_all_native_editors
+            close_all_native_editors()
             global_plugin_manager.close_all_editors()
             self.audio_engine.stop()
             if hasattr(self, "cache_progress_bar"):

@@ -398,6 +398,258 @@ class TestMcpIntegration(unittest.TestCase):
         self.assertAlmostEqual(vg_cfg["state"]["target_db"], -20.0)
         self.assertAlmostEqual(vg_cfg["state"]["max_boost_db"], 12.0)
 
+    def test_10_duration_beats_and_param_aliases(self):
+        """Vérifie la compatibilité de duration_beats et des alias track_id/clip_id."""
+        app = MockApp()
+        created = action_registry.execute("novadaw_create_track", app, {
+            "name": "Alias Track",
+            "track_type": "midi",
+        })
+        tid = created["track_id"]
+
+        clip_res = action_registry.execute("novadaw_create_midi_clip", app, {
+            "track_id": tid,
+            "name": "Alias Clip",
+            "start_beat": 0.0,
+            "length_beats": 4.0,
+        })
+        cid = clip_res["clip_id"]
+
+        add_res = action_registry.execute("novadaw_add_midi_notes", app, {
+            "clip_id": cid,
+            "notes": [
+                {"pitch": "C4", "start_beat": 0.0, "duration_beats": 0.25, "velocity": 110},
+                {"pitch": "G4", "start_beat": 0.5, "duration": 0.75, "velocity": 95},
+            ],
+        })
+        self.assertEqual(add_res["added_count"], 2)
+        notes_out = action_registry.execute("novadaw_get_midi_notes", app, {"clip_id": cid})["notes"]
+        self.assertAlmostEqual(notes_out[0]["duration"], 0.25)
+        self.assertAlmostEqual(notes_out[1]["duration"], 0.75)
+
+    def test_11_all_nova_plugins_presets_and_extended_mcp_params(self):
+        """Vérifie les paramètres étendus et presets unifiés sur Drums, EQ, Comp, Piano, Synth et Vocal Glide."""
+        app = MockApp()
+        midi_trk = action_registry.execute("novadaw_create_track", app, {"name": "Full MIDI", "track_type": "midi"})["track_id"]
+        audio_trk = action_registry.execute("novadaw_create_track", app, {"name": "Full Audio", "track_type": "audio"})["track_id"]
+
+        # 1. Nova Drums via configure_drum_machine + configure_plugin(preset=...)
+        drm = action_registry.execute("novadaw_configure_drum_machine", app, {
+            "track_id_or_name": midi_trk,
+            "preset": "Punchy Rock",
+            "reverb_width": 0.75,
+            "pad_id": "snare",
+            "pad_decay": 1.4,
+            "pad_muted": True,
+        })
+        self.assertEqual(drm["status"], "success")
+        self.assertEqual(drm["preset_name"], "Punchy Rock")
+        self.assertAlmostEqual(drm["state"]["reverb"]["width"], 0.75)
+        snare_state = [p for p in drm["state"]["pads"] if p["pad_id"] == "snare"][0]
+        self.assertAlmostEqual(snare_state["decay"], 1.4)
+        self.assertTrue(snare_state["muted"])
+
+        drm_gen = action_registry.execute("novadaw_configure_plugin", app, {
+            "track_id": midi_trk,
+            "plugin_instance_id": drm["plugin_instance_id"],
+            "parameters": {"preset": "Tight & Dry"},
+        })
+        self.assertTrue(drm_gen["success"])
+        self.assertEqual(drm_gen["state"]["preset_name"], "Tight & Dry")
+
+        # 2. NovaEQ (band_count + preset + bass_cut)
+        eq_res = action_registry.execute("novadaw_configure_equalizer", app, {
+            "track_id_or_name": audio_trk,
+            "band_count": 24,
+            "preset": "Vocal Clarity",
+            "band_index": 0,
+            "band_enabled": False,
+        })
+        self.assertEqual(eq_res["status"], "success")
+        self.assertEqual(eq_res["bands_count"], 24)
+        self.assertFalse(eq_res["bands"][0]["enabled"])
+
+        eq_gen = action_registry.execute("novadaw_configure_plugin", app, {
+            "track_id": audio_trk,
+            "plugin_instance_id": eq_res["plugin_instance_id"],
+            "parameters": {"band_count": 3},
+        })
+        self.assertTrue(eq_gen["success"])
+        self.assertEqual(eq_gen["state"]["band_count"], 3)
+
+        # 3. NovaCompressor (FACTORY_PRESETS français + RMS + SC HPF + Auto-Makeup)
+        comp_res = action_registry.execute("novadaw_configure_compressor", app, {
+            "track_id_or_name": audio_trk,
+            "preset": "Voix Douce (Opto)",
+            "detection_mode": "rms",
+            "sidechain_hpf_hz": 90.0,
+            "auto_makeup": True,
+        })
+        self.assertEqual(comp_res["status"], "success")
+        self.assertEqual(comp_res["state"]["detection_mode"], "rms")
+        self.assertAlmostEqual(comp_res["state"]["sidechain_hpf_hz"], 90.0)
+        self.assertTrue(comp_res["state"]["auto_makeup"])
+
+        # 4. Nova Piano avec preset direct
+        pno_trk = action_registry.execute("novadaw_create_track", app, {"name": "Piano MCP", "track_type": "midi"})["track_id"]
+        pno_res = action_registry.execute("novadaw_configure_piano", app, {
+            "track_id_or_name": pno_trk,
+            "preset": "Piano à queue",
+            "reverb_room": "cathedral",
+            "hammer_hardness": 0.7,
+        })
+        self.assertEqual(pno_res["status"], "success")
+        self.assertEqual(pno_res["state"]["reverb_room"], "cathedral")
+
+        # 5. NovaSynth paramètres avancés (FM, Unison, Filter ADSR, duplication de couche, 34 presets listés)
+        syn_trk = action_registry.execute("novadaw_create_track", app, {"name": "Synth MCP", "track_type": "midi"})["track_id"]
+        syn_state = action_registry.execute("novadaw_get_synth_state", app, {"track_id_or_name": syn_trk})
+        self.assertGreaterEqual(len(syn_state["available_presets"]), 34)
+
+        syn_cfg = action_registry.execute("novadaw_configure_synth", app, {
+            "track_id_or_name": syn_trk,
+            "waveform": "fm",
+            "fm_ratio": 3.5,
+            "fm_depth": 2.4,
+            "filter_attack": 0.12,
+            "lfo_enabled": True,
+            "lfo_waveform": "triangle",
+            "delay_ping_pong": False,
+        })
+        self.assertEqual(syn_cfg["status"], "success")
+        l0 = syn_cfg["state"]["layers"][0]
+        self.assertAlmostEqual(l0["fm_ratio"], 3.5)
+        self.assertAlmostEqual(l0["filter_attack"], 0.12)
+        self.assertEqual(l0["lfo_waveform"], "triangle")
+        self.assertFalse(syn_cfg["state"]["delay"]["ping_pong"])
+
+        dup_layer = action_registry.execute("novadaw_duplicate_synth_layer", app, {
+            "track_id_or_name": syn_trk,
+            "layer_index_or_id": 0,
+        })
+        self.assertEqual(dup_layer["status"], "success")
+        self.assertEqual(dup_layer["total_layers"], len(syn_cfg["state"]["layers"]) + 1)
+
+        # 6. Vocal Glide write_automation_live crée et active la lane Volume en mode 'write'
+        vg_live = action_registry.execute("novadaw_configure_vocal_glide", app, {
+            "track_id_or_name": audio_trk,
+            "write_automation_live": True,
+        })
+        self.assertEqual(vg_live["status"], "success")
+        lane = app.project.get_track(audio_trk).get_automation_lane("volume")
+        self.assertIsNotNone(lane)
+        self.assertEqual(lane.mode, "write")
+
+    def test_12_daw_tracks_clips_automation_presets_and_project_io_mcp(self):
+        """Vérifie les nouveaux outils MCP couvrant pistes, clips, automatisation, presets et ouverture .ndaw."""
+        import tempfile
+        app = MockApp()
+
+        # Outil 'draw' accepté
+        tool_res = action_registry.execute("novadaw_set_editing_tool", app, {"tool_name": "draw"})
+        self.assertEqual(tool_res["active_tool"], "draw")
+
+        # Création + contrôles étendus + routage multi-out + duplication + réordonnancement + suppression de piste
+        t1 = action_registry.execute("novadaw_create_track", app, {"name": "Synth Host", "track_type": "midi"})["track_id"]
+        t2 = action_registry.execute("novadaw_create_track", app, {"name": "Synth Aux", "track_type": "midi"})["track_id"]
+        ctrl = action_registry.execute("novadaw_set_track_controls", app, {
+            "track_id_or_name": t2,
+            "armed": True,
+            "synth_output_bus": 2,
+            "synth_route_track_id": t1,
+            "name": "Synth Out 3",
+        })
+        self.assertEqual(ctrl["track_name"], "Synth Out 3")
+        self.assertEqual(ctrl["synth_output_bus"], 2)
+        self.assertEqual(ctrl["synth_route_track_id"], t1)
+        self.assertTrue(ctrl["armed"])
+
+        dup_t = action_registry.execute("novadaw_duplicate_track", app, {"track_id_or_name": t1, "new_name": "Synth Copy"})
+        self.assertEqual(dup_t["new_track_name"], "Synth Copy")
+        reord = action_registry.execute("novadaw_reorder_track", app, {"track_id_or_name": dup_t["new_track_id"], "new_index": 0})
+        self.assertEqual(reord["new_index"], 0)
+
+        # Clips CRUD (list, update, duplicate, delete)
+        c_new = action_registry.execute("novadaw_create_midi_clip", app, {
+            "track_id_or_name": t1,
+            "name": "Hook",
+            "start_beat": 4.0,
+            "length_beats": 4.0,
+        })["clip_id"]
+        upd_c = action_registry.execute("novadaw_update_clip", app, {
+            "clip_id_or_name": c_new,
+            "name": "Hook Edited",
+            "start_beat": 8.0,
+            "length_beats": 8.0,
+        })
+        self.assertEqual(upd_c["clip_name"], "Hook Edited")
+        self.assertAlmostEqual(upd_c["start_beat"], 8.0)
+        dup_c = action_registry.execute("novadaw_duplicate_clip", app, {"clip_id_or_name": c_new})
+        self.assertAlmostEqual(dup_c["start_beat"], 16.0)
+        listed = action_registry.execute("novadaw_list_clips", app, {"track_id_or_name": t1})
+        self.assertGreaterEqual(listed["count"], 2)
+        action_registry.execute("novadaw_delete_clip", app, {"clip_id_or_name": dup_c["new_clip_id"]})
+
+        # Automatisation CRUD
+        auto_set = action_registry.execute("novadaw_set_automation_lane", app, {
+            "track_id_or_name": t1,
+            "param_name": "pan",
+            "clear_existing": True,
+            "points": [
+                {"beat": 0.0, "value": -0.5, "curve_type": "curve", "curve_tension": 0.3},
+                {"beat": 4.0, "value": 0.5, "curve_type": "linear"},
+            ],
+        })
+        self.assertEqual(auto_set["points_count"], 2)
+        auto_get = action_registry.execute("novadaw_get_track_automation", app, {"track_id_or_name": t1, "param_name": "pan"})
+        self.assertEqual(len(auto_get["lanes"]), 1)
+        auto_clr = action_registry.execute("novadaw_clear_automation_lane", app, {
+            "track_id_or_name": t1,
+            "param_name": "pan",
+            "remove_lane": True,
+        })
+        self.assertTrue(auto_clr["removed_lane"])
+
+        # Pile de plugins : reorder + preset save/list/delete isolés
+        eq_a = action_registry.execute("novadaw_add_plugin_to_track", app, {"track_id": t1, "plugin_type_id": "novadaw.equalizer"})
+        cp_b = action_registry.execute("novadaw_add_plugin_to_track", app, {"track_id": t1, "plugin_type_id": "novadaw.compressor"})
+        mv_res = action_registry.execute("novadaw_reorder_track_plugin", app, {
+            "track_id_or_name": t1,
+            "plugin_instance_id": cp_b["plugin_instance_id"],
+            "new_index": 0,
+        })
+        self.assertEqual(mv_res["new_index"], 0)
+
+        temp_preset_name = "__mcp_unit_test_temp_preset__"
+        try:
+            sv_p = action_registry.execute("novadaw_save_plugin_preset", app, {
+                "track_id_or_name": t1,
+                "plugin_instance_id": cp_b["plugin_instance_id"],
+                "preset_name": temp_preset_name,
+            })
+            self.assertEqual(sv_p["status"], "success")
+            ls_p = action_registry.execute("novadaw_list_plugin_presets", app, {"plugin_type_id": "novadaw.compressor"})
+            self.assertTrue(any(p["name"] == temp_preset_name for p in ls_p["presets"]))
+        finally:
+            action_registry.execute("novadaw_delete_plugin_preset", app, {
+                "plugin_type_id": "novadaw.compressor",
+                "preset_name": temp_preset_name,
+            })
+
+        # Sauvegarde + réouverture .ndaw via MCP dans un dossier temporaire
+        action_registry.execute("novadaw_set_project_info", app, {"name": "Projet MCP Test", "time_sig_num": 3, "time_sig_den": 4})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ndaw_path = os.path.join(tmpdir, "mcp_roundtrip.ndaw")
+            action_registry.execute("novadaw_save_project", app, {"file_path": ndaw_path})
+            action_registry.execute("novadaw_new_project", app, {})
+            self.assertEqual(len(app.project.tracks), 0)
+            opened = action_registry.execute("novadaw_open_project", app, {"file_path": ndaw_path})
+            self.assertEqual(opened["project_name"], "Projet MCP Test")
+            self.assertEqual(app.project.time_sig_num, 3)
+
+        del_res = action_registry.execute("novadaw_delete_track", app, {"track_id_or_name": dup_t["new_track_id"]})
+        self.assertEqual(del_res["status"], "success")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -666,21 +666,53 @@ class DrumMachinePlugin(BasePlugin):
             self._active_voices.clear()
         self.reverb.reset()
 
-    def apply_preset(self, preset_name: str):
-        """Applique un preset de configuration acoustique prédéfini"""
-        self.preset_name = preset_name
-        name = preset_name.lower()
+    FACTORY_PRESETS: Dict[str, Dict[str, Any]] = {
+        "Studio Acoustic": {"master_volume": 1.0, "reverb": {"enabled": True, "room_size": 0.45, "damping": 0.50, "width": 1.0, "wet_mix": 0.25}},
+        "Punchy Rock": {"master_volume": 1.15, "reverb": {"enabled": True, "room_size": 0.55, "damping": 0.35, "width": 1.0, "wet_mix": 0.30}},
+        "Trap / Modern": {"master_volume": 1.10, "reverb": {"enabled": True, "room_size": 0.30, "damping": 0.20, "width": 1.0, "wet_mix": 0.15}},
+        "Big Hall Ambience": {"master_volume": 0.95, "reverb": {"enabled": True, "room_size": 0.85, "damping": 0.30, "width": 1.0, "wet_mix": 0.55}},
+        "Tight & Dry": {"master_volume": 1.05, "reverb": {"enabled": True, "room_size": 0.10, "damping": 0.50, "width": 1.0, "wet_mix": 0.02}},
+    }
 
-        if "acoustic" in name or "studio" in name:
+    def get_factory_presets(self) -> Dict[str, Dict[str, Any]]:
+        return dict(self.FACTORY_PRESETS)
+
+    def _reset_pad_defaults(self) -> None:
+        defaults = {
+            "kick": (1.0, 0.0, 0.0, 1.0, 0.08),
+            "snare": (0.95, 0.0, 0.0, 1.0, 0.35),
+            "hihat_c": (0.85, -0.25, 0.0, 1.0, 0.15),
+            "hihat_o": (0.85, -0.30, 0.0, 1.0, 0.25),
+            "tom_l": (0.90, -0.40, 0.0, 1.0, 0.28),
+            "tom_m": (0.90, 0.20, 0.0, 1.0, 0.28),
+            "tom_h": (0.90, 0.45, 0.0, 1.0, 0.28),
+            "crash": (0.80, -0.35, 0.0, 1.0, 0.40),
+            "ride": (0.80, 0.35, 0.0, 1.0, 0.30),
+        }
+        for p in self.pads:
+            if p.pad_id in defaults:
+                p.volume, p.pan, p.tune, p.decay, p.reverb_send = defaults[p.pad_id]
+
+    def apply_preset(self, preset_name: str) -> bool:
+        """Applique un preset d'usine ou personnalisé via PresetManager."""
+        if not preset_name:
+            return False
+        name = preset_name.strip().lower()
+        matched_canonical = None
+
+        if name in ("studio acoustic", "acoustic", "studio"):
+            matched_canonical = "Studio Acoustic"
+            self._reset_pad_defaults()
             self.master_volume = 1.0
+            self.reverb.enabled = True
             self.reverb.room_size = 0.45
             self.reverb.damping = 0.50
             self.reverb.wet_mix = 0.25
-            for p in self.pads:
-                p.tune = 0.0
-                p.decay = 1.0
-        elif "rock" in name or "punch" in name:
+        elif name in ("punchy rock", "rock", "punch"):
+            matched_canonical = "Punchy Rock"
+            self._reset_pad_defaults()
             self.master_volume = 1.15
+            self.reverb.enabled = True
             self.reverb.room_size = 0.55
             self.reverb.damping = 0.35
             self.reverb.wet_mix = 0.30
@@ -692,8 +724,11 @@ class DrumMachinePlugin(BasePlugin):
                     p.tune = 0.5
                     p.volume = 1.15
                     p.reverb_send = 0.45
-        elif "trap" in name or "modern" in name:
+        elif name in ("trap / modern", "trap", "modern"):
+            matched_canonical = "Trap / Modern"
+            self._reset_pad_defaults()
             self.master_volume = 1.10
+            self.reverb.enabled = True
             self.reverb.room_size = 0.30
             self.reverb.damping = 0.20
             self.reverb.wet_mix = 0.15
@@ -703,23 +738,41 @@ class DrumMachinePlugin(BasePlugin):
                 elif "kick" in p.pad_id:
                     p.tune = -2.0
                     p.decay = 1.3
-        elif "hall" in name or "ambient" in name:
+        elif name in ("big hall ambience", "hall", "ambient"):
+            matched_canonical = "Big Hall Ambience"
+            self._reset_pad_defaults()
             self.master_volume = 0.95
+            self.reverb.enabled = True
             self.reverb.room_size = 0.85
             self.reverb.damping = 0.30
             self.reverb.wet_mix = 0.55
             for p in self.pads:
                 p.reverb_send = 0.50
-        elif "dry" in name or "tight" in name:
+        elif name in ("tight & dry", "dry", "tight"):
+            matched_canonical = "Tight & Dry"
+            self._reset_pad_defaults()
             self.master_volume = 1.05
+            self.reverb.enabled = True
             self.reverb.room_size = 0.10
+            self.reverb.damping = 0.50
             self.reverb.wet_mix = 0.02
             for p in self.pads:
                 p.decay = 0.80
                 p.reverb_send = 0.02
 
-        self.invalidate_cache()
-        self.warm_up_cache(async_bg=False)
+        if matched_canonical is not None:
+            self.preset_name = matched_canonical
+            self.invalidate_cache()
+            self.warm_up_cache(async_bg=False)
+            return True
+
+        try:
+            from core.preset_manager import global_preset_manager
+            if global_preset_manager.load_preset(self, preset_name):
+                return True
+        except Exception:
+            pass
+        return False
 
     def get_state(self) -> Dict[str, Any]:
         return {
@@ -737,17 +790,19 @@ class DrumMachinePlugin(BasePlugin):
         }
 
     def set_state(self, state: Dict[str, Any]) -> None:
+        if "enabled" in state:
+            self.enabled = bool(state["enabled"])
         self.preset_name = state.get("preset_name", self.preset_name)
-        self.master_volume = float(state.get("master_volume", 1.0))
-        
+        self.master_volume = float(state.get("master_volume", self.master_volume))
+
         rev_data = state.get("reverb", {})
         if rev_data:
-            self.reverb.enabled = bool(rev_data.get("enabled", True))
-            self.reverb.room_size = float(rev_data.get("room_size", 0.45))
-            self.reverb.damping = float(rev_data.get("damping", 0.50))
-            self.reverb.width = float(rev_data.get("width", 1.0))
-            self.reverb.wet_mix = float(rev_data.get("wet_mix", 0.25))
-            self.reverb.dry_mix = float(rev_data.get("dry_mix", 1.0))
+            self.reverb.enabled = bool(rev_data.get("enabled", self.reverb.enabled))
+            self.reverb.room_size = float(rev_data.get("room_size", self.reverb.room_size))
+            self.reverb.damping = float(rev_data.get("damping", self.reverb.damping))
+            self.reverb.width = float(rev_data.get("width", self.reverb.width))
+            self.reverb.wet_mix = float(rev_data.get("wet_mix", self.reverb.wet_mix))
+            self.reverb.dry_mix = float(rev_data.get("dry_mix", self.reverb.dry_mix))
 
         pads_data = state.get("pads", [])
         pads_map = {d.get("pad_id"): d for d in pads_data if "pad_id" in d}
