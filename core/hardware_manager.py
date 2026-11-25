@@ -31,6 +31,8 @@ SETTINGS_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "s
 class HardwareManager:
     """Gestionnaire centralisé du matériel (Audio et GPU) de NovaDAW"""
 
+    STREAMING_HOST_LATENCY_SEC: float = 0.040
+
     def __init__(self):
         self.settings: Dict[str, Any] = self._load_settings()
 
@@ -47,6 +49,7 @@ class HardwareManager:
                 "record_offset_samples": 0,
                 "asio_guard_enabled": True,
                 "wasapi_exclusive": True,
+                "streaming_mode": False,
                 "release_driver_background": False,
             },
             "graphics": {
@@ -106,7 +109,8 @@ class HardwareManager:
                 "powershell", "-NoProfile", "-Command",
                 "Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion, Status, VideoProcessor, AdapterRAM | ConvertTo-Json"
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5, creationflags=creationflags)
             if res.returncode == 0 and res.stdout.strip():
                 data = json.loads(res.stdout)
                 if isinstance(data, dict):
@@ -269,6 +273,57 @@ class HardwareManager:
         except Exception:
             return False
 
+    def get_streaming_block_size(self, sample_rate: int, base_buffer_size: int = 256) -> int:
+        """
+        Calcule une taille de bloc alignée exactement sur le quantum 10 ms du mixeur Windows WASAPI
+        (441 éch. à 44.1 kHz, 480 éch. à 48 kHz) pour éliminer les rafales de double-callbacks Python
+        et toute micro-coupure lors du streaming / capture vidéo (NVIDIA App, OBS).
+        """
+        sr = max(8000, int(sample_rate))
+        quantum_10ms = max(64, int(round(sr * 0.010)))
+        if int(base_buffer_size) >= quantum_10ms * 2:
+            mult = max(2, int(round(int(base_buffer_size) / float(quantum_10ms))))
+            return quantum_10ms * mult
+        return quantum_10ms
+
+    def resolve_wasapi_output_device(self, device_index: Optional[int]) -> Optional[int]:
+        """
+        Résout le périphérique de sortie correspondant sur l'API Windows WASAPI (FP32 32-bit natif)
+        afin de garantir un flux numérique partagé optimal pour l'enregistrement d'écran / streaming.
+        """
+        if not HAS_SOUNDDEVICE:
+            return device_index
+        try:
+            if device_index is not None and device_index >= 0 and self.is_wasapi_device(device_index):
+                return device_index
+
+            host_apis = sd.query_hostapis()
+            devices = sd.query_devices()
+            wasapi_idx = None
+            for idx, api in enumerate(host_apis):
+                if "wasapi" in api.get("name", "").lower():
+                    wasapi_idx = idx
+                    break
+            if wasapi_idx is None:
+                return device_index
+
+            # Si un périphérique sur une autre API (ex: MME/DirectSound) est sélectionné, retrouver son équivalent WASAPI
+            if device_index is not None and 0 <= device_index < len(devices):
+                src_name = devices[device_index].get("name", "").strip().lower()
+                if src_name:
+                    for idx, d in enumerate(devices):
+                        if d.get("hostapi") == wasapi_idx and d.get("max_output_channels", 0) > 0:
+                            cand_name = d.get("name", "").strip().lower()
+                            if cand_name == src_name or src_name in cand_name or cand_name in src_name:
+                                return idx
+
+            def_out = host_apis[wasapi_idx].get("default_output_device", -1)
+            if def_out is not None and def_out >= 0:
+                return int(def_out)
+        except Exception:
+            pass
+        return device_index
+
     def get_device_latencies(
         self,
         output_device_index: Optional[int] = None,
@@ -286,12 +341,42 @@ class HardwareManager:
         buf = int(kwargs.get("buffer_size", buffer_size))
         out_idx = kwargs.get("output_device_index", output_device_index)
         in_idx = kwargs.get("input_device_index", input_device_index)
-        wasapi_excl = kwargs.get(
-            "wasapi_exclusive",
-            self.settings.get("audio", {}).get("wasapi_exclusive", True)
+        streaming_mode = bool(kwargs.get("streaming_mode", False))
+        wasapi_excl = (
+            False
+            if streaming_mode
+            else kwargs.get(
+                "wasapi_exclusive",
+                self.settings.get("audio", {}).get("wasapi_exclusive", True)
+            )
         )
 
         sr = max(1, sr)
+        if streaming_mode:
+            eff_buf = self.get_streaming_block_size(sr, buf)
+            base_buf_ms = (eff_buf / sr) * 1000.0
+            out_lat_ms = (self.STREAMING_HOST_LATENCY_SEC * 1000.0) + base_buf_ms
+            in_lat_ms = max(base_buf_ms, (buf / sr) * 1000.0)
+            if HAS_SOUNDDEVICE and in_idx is not None and in_idx >= 0:
+                try:
+                    d_in = sd.query_devices(in_idx)
+                    hw_in_low = d_in.get("default_low_input_latency", 0.0)
+                    if hw_in_low > 0:
+                        in_lat_ms = max(in_lat_ms, hw_in_low * 1000.0)
+                except Exception:
+                    pass
+            roundtrip_ms = in_lat_ms + out_lat_ms
+            return {
+                "input_ms": round(in_lat_ms, 2),
+                "output_ms": round(out_lat_ms, 2),
+                "roundtrip_ms": round(roundtrip_ms, 2),
+                "buffer_ms": round(base_buf_ms, 2),
+                "input_latency_ms": round(in_lat_ms, 2),
+                "output_latency_ms": round(out_lat_ms, 2),
+                "roundtrip_latency_ms": round(roundtrip_ms, 2),
+                "buffer_duration_ms": round(base_buf_ms, 2),
+            }
+
         base_buf_ms = (buf / sr) * 1000.0
 
         out_lat_ms = base_buf_ms
@@ -334,6 +419,7 @@ class HardwareManager:
         ou le panneau audio Windows (mmsys.cpl), exactement comme le bouton 'Panneau de configuration' de Cubase.
         Retourne (succès: bool, nom_du_panneau: str).
         """
+        silent_test = os.environ.get("NOVADAW_SILENT_TESTS") == "1"
         vendor_candidates = [
             (r"C:\Program Files (x86)\Avid\Eleven Rack\Panel.exe", "Panneau de Contrôle Avid Eleven Rack"),
             (r"C:\Program Files\Avid\Eleven Rack\Panel.exe", "Panneau de Contrôle Avid Eleven Rack"),
@@ -351,12 +437,16 @@ class HardwareManager:
         ]
         for path, name in vendor_candidates:
             if os.path.exists(path):
+                if silent_test:
+                    return True, name
                 try:
                     subprocess.Popen([path])
                     return True, name
                 except Exception:
                     pass
 
+        if silent_test:
+            return True, "Panneau Son & Matériel Windows (mmsys.cpl)"
         try:
             subprocess.Popen(["control", "mmsys.cpl", "sounds"])
             return True, "Panneau Son & Matériel Windows (mmsys.cpl)"
@@ -648,10 +738,14 @@ class HardwareManager:
                 pass
 
         wasapi_excl = bool(self.settings.get("audio", {}).get("wasapi_exclusive", True))
+        streaming_mode = bool(self.settings.get("audio", {}).get("streaming_mode", False))
         extra = None
-        if wasapi_excl and HAS_SOUNDDEVICE and "wasapi" in host_api_name.lower() and hasattr(sd, "WasapiSettings"):
+        if HAS_SOUNDDEVICE and "wasapi" in host_api_name.lower() and hasattr(sd, "WasapiSettings"):
             try:
-                extra = sd.WasapiSettings(exclusive=True)
+                if streaming_mode:
+                    extra = sd.WasapiSettings(exclusive=False, auto_convert=True)
+                elif wasapi_excl:
+                    extra = sd.WasapiSettings(exclusive=True)
             except Exception:
                 extra = None
 
@@ -667,6 +761,7 @@ class HardwareManager:
         audio_cfg["sample_rate"] = sample_rate
         audio_cfg["buffer_size"] = buffer_size
         audio_cfg["wasapi_exclusive"] = wasapi_excl
+        audio_cfg["streaming_mode"] = streaming_mode
 
         self.save_settings()
         return audio_cfg

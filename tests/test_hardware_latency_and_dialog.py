@@ -64,40 +64,48 @@ def test_audio_engine_record_latency_compensation():
     engine.close()
 
 
-def test_device_settings_dialog_audio_tab(qapp):
+def test_device_settings_dialog_audio_tab(qapp, monkeypatch, tmp_path):
     """Vérifie l'interface graphique de configuration audio style Cubase 6."""
+    import core.hardware_manager as hm_mod
+    monkeypatch.setattr(hm_mod, "SETTINGS_FILE", str(tmp_path / "settings.json"))
+    saved_audio = dict(hardware_manager.settings.get("audio", {}))
+
     engine = AudioEngine()
     dlg = DeviceSettingsDialog(engine)
+    try:
+        assert hasattr(dlg, "combo_host_api")
+        assert hasattr(dlg, "combo_buffer_size")
+        assert hasattr(dlg, "spin_record_offset")
+        assert hasattr(dlg, "lbl_in_latency")
+        assert hasattr(dlg, "lbl_out_latency")
+        assert hasattr(dlg, "lbl_rtl_latency")
+        assert hasattr(dlg, "lbl_buf_duration")
+        assert hasattr(dlg, "btn_control_panel")
+        assert hasattr(dlg, "btn_reset_engine")
+        assert hasattr(dlg, "chk_streaming_mode")
 
-    assert hasattr(dlg, "combo_host_api")
-    assert hasattr(dlg, "combo_buffer_size")
-    assert hasattr(dlg, "spin_record_offset")
-    assert hasattr(dlg, "lbl_in_latency")
-    assert hasattr(dlg, "lbl_out_latency")
-    assert hasattr(dlg, "lbl_rtl_latency")
-    assert hasattr(dlg, "lbl_buf_duration")
-    assert hasattr(dlg, "btn_control_panel")
-    assert hasattr(dlg, "btn_reset_engine")
+        dlg.chk_streaming_mode.setChecked(False)
 
-    # Vérifier le changement de taille de buffer
-    idx_128 = dlg.combo_buffer_size.findData(128)
-    if idx_128 >= 0:
-        dlg.combo_buffer_size.setCurrentIndex(idx_128)
-        assert dlg.combo_buffer_size.currentData() == 128
-        assert "2.9" in dlg.lbl_buf_duration.text() or "ms" in dlg.lbl_buf_duration.text()
+        # Vérifier le changement de taille de buffer
+        idx_128 = dlg.combo_buffer_size.findData(128)
+        if idx_128 >= 0:
+            dlg.combo_buffer_size.setCurrentIndex(idx_128)
+            assert dlg.combo_buffer_size.currentData() == 128
+            assert "2.9" in dlg.lbl_buf_duration.text() or "ms" in dlg.lbl_buf_duration.text()
 
-    # Vérifier la compensation de latence d'enregistrement
-    dlg.spin_record_offset.setValue(256)
-    assert "+5.80 ms" in dlg.lbl_offset_ms.text() or "ms" in dlg.lbl_offset_ms.text()
+        # Vérifier la compensation de latence d'enregistrement
+        dlg.spin_record_offset.setValue(256)
+        assert "+5.80 ms" in dlg.lbl_offset_ms.text() or "ms" in dlg.lbl_offset_ms.text()
 
-    # Tester le bouton réinitialisation moteur
-    dlg._on_reset_engine()
-    assert "succès" in dlg.lbl_control_panel_status.text() or "réinitialisé" in dlg.lbl_control_panel_status.text()
+        # Tester le bouton réinitialisation moteur
+        dlg._on_reset_engine()
+        assert "succès" in dlg.lbl_control_panel_status.text() or "réinitialisé" in dlg.lbl_control_panel_status.text()
 
-    # Sauvegarde et application
-    dlg._on_apply_and_save()
-    assert engine.record_latency_compensation_samples == 256
-    assert hardware_manager.settings["audio"]["record_offset_samples"] == 256
-
-    dlg.close()
-    engine.close()
+        # Sauvegarde et application
+        dlg._on_apply_and_save()
+        assert engine.record_latency_compensation_samples == 256
+        assert hardware_manager.settings["audio"]["record_offset_samples"] == 256
+    finally:
+        hardware_manager.settings["audio"].update(saved_audio)
+        dlg.close()
+        engine.close()

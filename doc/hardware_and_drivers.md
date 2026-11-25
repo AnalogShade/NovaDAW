@@ -20,7 +20,10 @@ Le singleton `hardware_manager` (instance de [`HardwareManager`](../core/hardwar
     "sample_rate": 48000,
     "buffer_size": 256,
     "record_offset_samples": 0,
-    "asio_guard": true
+    "asio_guard_enabled": true,
+    "wasapi_exclusive": true,
+    "streaming_mode": false,
+    "release_driver_background": false
   },
   "graphics": {
     "gpu_index": 0,
@@ -62,6 +65,15 @@ Lors du premier lancement ou si le périphérique précédemment sauvegardé a �
 - **[`get_optimal_buffer_size(device_index, sample_rate)`](../core/hardware_manager.py)** :
   - Si l'API hôte est **`ASIO`** ou **`WASAPI`** : **`256 samples`** (basse latence studio).
   - Si l'API hôte est **`DirectSound`** ou **`MME`** : **`512 samples`** (stabilité accrue).
+
+### 2.4 Mode Streaming & Capture Vidéo Sans Glitch (`streaming_mode`)
+- Disponible dans [`DeviceSettingsDialog`](../ui/device_settings_dialog.py) au même endroit que l'option `Mode WASAPI Exclusif` (`chk_streaming_mode`).
+- **Activé (`streaming_mode = True`)** :
+  - Suspend temporairement `wasapi_exclusive` sans écraser la préférence studio de l'utilisateur.
+  - Résout automatiquement l'interface de sortie sur **Windows WASAPI Partagé 32-bit (`FP32`)** via `resolve_wasapi_output_device()` avec `sd.WasapiSettings(exclusive=False, auto_convert=True)` pour que NVIDIA App (ShadowPlay), OBS Studio et Discord captent le flux numérique exact sans erreur de fréquence (`44.1 kHz <-> 48 kHz`).
+  - Aligne la taille de bloc sur un multiple entier exact du quantum `10 ms` de `audiodg.exe` (`441` éch. à `44.1 kHz`, `480` éch. à `48 kHz` via `get_streaming_block_size()`) avec un tampon hôte anti-coupure de `40 ms` (`~50 ms` au total), éliminant toute micro-coupure liée au GIL Python ou à la capture GPU sans aucune perte de qualité sonore.
+- **Désactivé (`streaming_mode = False`, défaut)** :
+  - Restaure instantanément les réglages studio ultra-basse latence d'origine (`buffer_size`, `wasapi_exclusive`, `latency="low"`).
 
 ---
 

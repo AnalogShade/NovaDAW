@@ -564,7 +564,11 @@ def get_hardware_devices_action(app) -> Dict[str, Any]:
     current_audio = {
         "sample_rate": app.audio_engine.sample_rate if hasattr(app, "audio_engine") else 44100,
         "buffer_size": app.audio_engine.block_size if hasattr(app, "audio_engine") else 512,
+        "effective_buffer_size": app.audio_engine.effective_block_size if hasattr(app, "audio_engine") else 512,
         "output_device": getattr(app.audio_engine, "output_device", None),
+        "wasapi_exclusive": getattr(app.audio_engine, "_wasapi_exclusive", True) if hasattr(app, "audio_engine") else True,
+        "streaming_mode": getattr(app.audio_engine, "streaming_mode", False) if hasattr(app, "audio_engine") else False,
+        "active_stream_mode": getattr(app.audio_engine, "active_stream_mode", "shared") if hasattr(app, "audio_engine") else "shared",
         "is_playing": app.audio_engine.is_playing if hasattr(app, "audio_engine") else False
     }
 
@@ -587,7 +591,9 @@ def set_audio_device_action(
     app,
     output_device_index: Optional[int] = None,
     sample_rate: Optional[int] = None,
-    buffer_size: Optional[int] = None
+    buffer_size: Optional[int] = None,
+    wasapi_exclusive: Optional[bool] = None,
+    streaming_mode: Optional[bool] = None,
 ) -> Dict[str, Any]:
     from core.hardware_manager import hardware_manager
 
@@ -595,7 +601,9 @@ def set_audio_device_action(
         app.audio_engine.configure_device(
             output_device=output_device_index,
             sample_rate=sample_rate,
-            buffer_size=buffer_size
+            buffer_size=buffer_size,
+            wasapi_exclusive=wasapi_exclusive,
+            streaming_mode=streaming_mode,
         )
         # Sauvegarder dans les préférences
         if output_device_index is not None:
@@ -604,24 +612,40 @@ def set_audio_device_action(
             hardware_manager.settings["audio"]["sample_rate"] = int(sample_rate)
         if buffer_size is not None:
             hardware_manager.settings["audio"]["buffer_size"] = int(buffer_size)
+        if wasapi_exclusive is not None:
+            hardware_manager.settings["audio"]["wasapi_exclusive"] = bool(wasapi_exclusive)
+        if streaming_mode is not None:
+            hardware_manager.settings["audio"]["streaming_mode"] = bool(streaming_mode)
         hardware_manager.save_settings()
 
-        latency_ms = hardware_manager.calculate_latency_ms(
-            app.audio_engine.block_size,
-            app.audio_engine.sample_rate
-        )
-
-        if hasattr(app, "lbl_engine_info"):
+        if hasattr(app, "_refresh_engine_info_label"):
+            app._refresh_engine_info_label()
+        elif hasattr(app, "lbl_engine_info"):
+            latency_ms = hardware_manager.calculate_latency_ms(
+                app.audio_engine.block_size,
+                app.audio_engine.sample_rate
+            )
             app.lbl_engine_info.setText(
                 f"Moteur Audio : {app.audio_engine.sample_rate} Hz Stéréo | Buffer: {app.audio_engine.block_size} ({latency_ms} ms)"
             )
+
+        latencies = hardware_manager.get_device_latencies(
+            output_device_index=app.audio_engine.output_device,
+            sample_rate=app.audio_engine.sample_rate,
+            buffer_size=app.audio_engine.block_size,
+            streaming_mode=app.audio_engine.streaming_mode,
+            wasapi_exclusive=app.audio_engine._wasapi_exclusive,
+        )
 
         return {
             "status": "success",
             "output_device_index": app.audio_engine.output_device,
             "sample_rate": app.audio_engine.sample_rate,
             "buffer_size": app.audio_engine.block_size,
-            "latency_ms": latency_ms
+            "effective_buffer_size": app.audio_engine.effective_block_size,
+            "streaming_mode": app.audio_engine.streaming_mode,
+            "wasapi_exclusive": app.audio_engine._wasapi_exclusive,
+            "latency_ms": latencies.get("output_ms", 0.0),
         }
 
     return {"status": "error", "message": "Moteur audio indisponible."}

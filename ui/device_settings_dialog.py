@@ -370,6 +370,32 @@ class DeviceSettingsDialog(QDialog):
         self.chk_wasapi_exclusive.stateChanged.connect(lambda _s: self._update_latency_label())
         grp_perf_l.addWidget(self.chk_wasapi_exclusive)
 
+        self.chk_streaming_mode = QCheckBox("🎥 Mode Streaming & Capture Vidéo (Sans glitch pour NVIDIA App / OBS — latence assouplie)")
+        self.chk_streaming_mode.setChecked(False)
+        self.chk_streaming_mode.setToolTip(
+            "Active un flux WASAPI Partagé 32-bit (FP32) synchronisé sur le quantum 10 ms de Windows "
+            "(auto-convert 44.1/48 kHz + tampon anti-coupure ~50 ms) pour garantir une qualité audio "
+            "100 % identique à l'écoute dans vos enregistrements vidéo et streams, sans altérer vos "
+            "réglages studio lorsque vous le désactivez."
+        )
+        self.chk_streaming_mode.stateChanged.connect(lambda _s: self._on_streaming_mode_toggled())
+        grp_perf_l.addWidget(self.chk_streaming_mode)
+
+        self.lbl_streaming_info = QLabel(
+            "🎥 <b>Mode Streaming actif :</b> Le mode Exclusif est temporairement suspendu et le tampon est "
+            "aligné sur l'horloge Windows (10 ms / ~50 ms anti-coupure) pour éliminer tout craquement GIL/GPU "
+            "avec 0 % de perte de qualité sonore. Vos réglages studio basse latence seront restaurés dès la désactivation.<br>"
+            "<span style='color: #94a3b8;'>💡 <i>Astuce NVIDIA App (Alt+Z &gt; Audio) : activez « Séparer les deux pistes » "
+            "(ou coupez le micro ambiant) pour éviter que le micro ne reprenne le son des enceintes.</i></span>"
+        )
+        self.lbl_streaming_info.setWordWrap(True)
+        self.lbl_streaming_info.setStyleSheet(
+            "background-color: #0d1f2d; border: 1px solid #0284c7; border-radius: 5px; "
+            "padding: 8px 10px; color: #bae6fd; font-size: 11px;"
+        )
+        self.lbl_streaming_info.setVisible(False)
+        grp_perf_l.addWidget(self.lbl_streaming_info)
+
         self.chk_release_background = QCheckBox("Libérer le pilote audio lorsque NovaDAW est en arrière-plan")
         self.chk_release_background.setChecked(False)
         self.chk_release_background.setToolTip("Permet à d'autres applications (lecteur média, navigateur) d'accéder au périphérique audio quand NovaDAW est minimisé")
@@ -572,13 +598,25 @@ class DeviceSettingsDialog(QDialog):
 
         wasapi_excl = hardware_manager.settings.get("audio", {}).get("wasapi_exclusive", True)
         if hasattr(self, "chk_wasapi_exclusive"):
+            self.chk_wasapi_exclusive.blockSignals(True)
             self.chk_wasapi_exclusive.setChecked(wasapi_excl)
+            self.chk_wasapi_exclusive.blockSignals(False)
+
+        streaming_mode = getattr(
+            self.audio_engine,
+            "streaming_mode",
+            hardware_manager.settings.get("audio", {}).get("streaming_mode", False),
+        )
+        if hasattr(self, "chk_streaming_mode"):
+            self.chk_streaming_mode.blockSignals(True)
+            self.chk_streaming_mode.setChecked(bool(streaming_mode))
+            self.chk_streaming_mode.blockSignals(False)
 
         rel_bg = hardware_manager.settings.get("audio", {}).get("release_driver_background", False)
         if hasattr(self, "chk_release_background"):
             self.chk_release_background.setChecked(rel_bg)
 
-        self._update_latency_label()
+        self._on_streaming_mode_toggled()
 
         # 3. GPU List
         gpus = hardware_manager.get_gpu_devices()
@@ -670,6 +708,23 @@ class DeviceSettingsDialog(QDialog):
         self.combo_input.setCurrentIndex(sel_in_idx)
         self._update_latency_label()
 
+    def _on_streaming_mode_toggled(self):
+        streaming_on = self.chk_streaming_mode.isChecked() if hasattr(self, "chk_streaming_mode") else False
+        if hasattr(self, "chk_wasapi_exclusive"):
+            self.chk_wasapi_exclusive.setEnabled(not streaming_on)
+        if hasattr(self, "combo_buffer_size"):
+            self.combo_buffer_size.setEnabled(not streaming_on)
+            if streaming_on:
+                self.combo_buffer_size.setToolTip(
+                    "Géré automatiquement en Mode Streaming (aligné sur le quantum 10 ms de Windows). "
+                    "Votre taille de tampon studio est conservée et sera restaurée dès la désactivation."
+                )
+            else:
+                self.combo_buffer_size.setToolTip("")
+        if hasattr(self, "lbl_streaming_info"):
+            self.lbl_streaming_info.setVisible(streaming_on)
+        self._update_latency_label()
+
     def _update_latency_label(self):
         sr = self.combo_sample_rate.currentData() or 44100
         buf = self.combo_buffer_size.currentData() or 256
@@ -680,12 +735,14 @@ class DeviceSettingsDialog(QDialog):
         in_dev = in_idx if in_idx is not None and in_idx >= 0 else None
 
         wasapi_excl = self.chk_wasapi_exclusive.isChecked() if hasattr(self, "chk_wasapi_exclusive") else True
+        streaming_mode = self.chk_streaming_mode.isChecked() if hasattr(self, "chk_streaming_mode") else False
         latencies = hardware_manager.get_device_latencies(
             input_device_index=in_dev,
             output_device_index=out_dev,
             buffer_size=buf,
             sample_rate=sr,
             wasapi_exclusive=wasapi_excl,
+            streaming_mode=streaming_mode,
         )
 
         in_ms = latencies.get("input_ms", latencies.get("input_latency_ms", 0.0))
@@ -728,6 +785,7 @@ class DeviceSettingsDialog(QDialog):
         rec_offset = self.spin_record_offset.value() if hasattr(self, "spin_record_offset") else 0
         asio_guard = self.chk_asio_guard.isChecked() if hasattr(self, "chk_asio_guard") else True
         wasapi_excl = self.chk_wasapi_exclusive.isChecked() if hasattr(self, "chk_wasapi_exclusive") else True
+        streaming_mode = self.chk_streaming_mode.isChecked() if hasattr(self, "chk_streaming_mode") else False
 
         success = self.audio_engine.configure_device(
             output_device=out_dev_idx if out_dev_idx >= 0 else None,
@@ -737,11 +795,13 @@ class DeviceSettingsDialog(QDialog):
             record_offset_samples=rec_offset,
             asio_guard=asio_guard,
             wasapi_exclusive=wasapi_excl,
+            streaming_mode=streaming_mode,
         )
         if hasattr(self, "lbl_control_panel_status"):
             if success:
                 self.lbl_control_panel_status.setStyleSheet("color: #00E676; font-size: 11px;")
-                self.lbl_control_panel_status.setText("Moteur audio réinitialisé avec succès.")
+                mode_info = " (Mode Streaming actif)" if streaming_mode else ""
+                self.lbl_control_panel_status.setText(f"Moteur audio réinitialisé avec succès{mode_info}.")
             else:
                 self.lbl_control_panel_status.setStyleSheet("color: #FF5252; font-size: 11px;")
                 self.lbl_control_panel_status.setText("Erreur lors de la réinitialisation du moteur.")
@@ -775,6 +835,7 @@ class DeviceSettingsDialog(QDialog):
         rec_offset = self.spin_record_offset.value() if hasattr(self, "spin_record_offset") else 0
         asio_guard = self.chk_asio_guard.isChecked() if hasattr(self, "chk_asio_guard") else True
         wasapi_excl = self.chk_wasapi_exclusive.isChecked() if hasattr(self, "chk_wasapi_exclusive") else True
+        streaming_mode = self.chk_streaming_mode.isChecked() if hasattr(self, "chk_streaming_mode") else False
         rel_bg = self.chk_release_background.isChecked() if hasattr(self, "chk_release_background") else False
 
         # Application au moteur audio
@@ -786,6 +847,7 @@ class DeviceSettingsDialog(QDialog):
             record_offset_samples=rec_offset,
             asio_guard=asio_guard,
             wasapi_exclusive=wasapi_excl,
+            streaming_mode=streaming_mode,
         )
 
         # 2. Sauvegarde dans HardwareManager
@@ -799,6 +861,7 @@ class DeviceSettingsDialog(QDialog):
         hardware_manager.settings["audio"]["record_offset_samples"] = rec_offset
         hardware_manager.settings["audio"]["asio_guard_enabled"] = asio_guard
         hardware_manager.settings["audio"]["wasapi_exclusive"] = wasapi_excl
+        hardware_manager.settings["audio"]["streaming_mode"] = streaming_mode
         hardware_manager.settings["audio"]["release_driver_background"] = rel_bg
 
         # 3. Réglages graphiques

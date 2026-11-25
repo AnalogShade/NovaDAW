@@ -80,11 +80,21 @@ class AudioEngine:
         _global_audio_engine = self
 
         self._wasapi_exclusive: bool = True
+        self._streaming_mode: bool = False
+        self._active_stream_mode: str = "shared"
+        self._effective_stream_block_size: int = 256
+        self._suspended_in_background: bool = False
+        loaded_asio_guard: bool = True
+        loaded_record_offset: int = 0
         # Configuration automatique universelle du matériel audio
         try:
             from core.hardware_manager import hardware_manager
             audio_cfg = hardware_manager.settings.get("audio", {})
             self._wasapi_exclusive = bool(audio_cfg.get("wasapi_exclusive", True))
+            self._streaming_mode = bool(audio_cfg.get("streaming_mode", False))
+            loaded_asio_guard = bool(audio_cfg.get("asio_guard_enabled", True))
+            if os.environ.get("NOVADAW_SILENT_TESTS") != "1":
+                loaded_record_offset = int(audio_cfg.get("record_offset_samples", 0))
             out_idx = audio_cfg.get("output_device_index") if output_device is None else output_device
 
             # Valider si le périphérique sauvegardé existe encore ou lancer l'auto-configuration
@@ -100,9 +110,12 @@ class AudioEngine:
                 self.input_device = hardware_manager.get_default_input_device_index()
 
             extra = None
-            if self._wasapi_exclusive and HAS_SOUNDDEVICE and hardware_manager.is_wasapi_device(self.output_device) and hasattr(sd, "WasapiSettings"):
+            if HAS_SOUNDDEVICE and hardware_manager.is_wasapi_device(self.output_device) and hasattr(sd, "WasapiSettings"):
                 try:
-                    extra = sd.WasapiSettings(exclusive=True)
+                    if self._streaming_mode:
+                        extra = sd.WasapiSettings(exclusive=False, auto_convert=True)
+                    elif self._wasapi_exclusive:
+                        extra = sd.WasapiSettings(exclusive=True)
                 except Exception:
                     extra = None
             optimal_sr = hardware_manager.get_optimal_sample_rate(self.output_device, extra_settings=extra)
@@ -114,6 +127,7 @@ class AudioEngine:
             self.block_size = block_size if block_size is not None else 512
             self.output_device = output_device
             self.input_device = input_device
+        self._effective_stream_block_size = self.block_size
 
         self.project: Optional[Project] = None
 
@@ -124,7 +138,7 @@ class AudioEngine:
         # Système de Pré-rendu Audio et Cache ASIO-Guard en RAM (Hybrid Audio Engine)
         self._track_audio_caches: Dict[str, Dict[str, Any]] = {}
         self._track_cache_lock = threading.Lock()
-        self._asio_guard_enabled: bool = True
+        self._asio_guard_enabled: bool = loaded_asio_guard
         # One producer for all tracks; invalidation makes in-flight buffers obsolete.
         self._cache_job_lock = threading.Lock()
         self._cache_render_lock = threading.Lock()
@@ -142,7 +156,7 @@ class AudioEngine:
         self._recorded_audio_blocks: List[np.ndarray] = []
         self._recorded_midi_notes: List[MidiNote] = []
         self._record_lock = threading.Lock()
-        self.record_latency_compensation_samples: int = 0
+        self.record_latency_compensation_samples: int = loaded_record_offset
         self._record_sample_rate: int = self.sample_rate
 
         # Monitoring audio live (entrée micro -> effets de piste -> sortie temps réel)
@@ -205,8 +219,24 @@ class AudioEngine:
 
         self._start_stream()
 
-    def configure_device(self, output_device: Optional[int] = None, input_device: Optional[int] = None, sample_rate: Optional[int] = None, block_size: Optional[int] = None, buffer_size: Optional[int] = None, record_offset_samples: Optional[int] = None, asio_guard: Optional[bool] = None, wasapi_exclusive: Optional[bool] = None) -> bool:
+    @property
+    def streaming_mode(self) -> bool:
+        """Indique si le mode Streaming & Capture Vidéo sans glitch est actif."""
+        return self._streaming_mode
+
+    @property
+    def effective_block_size(self) -> int:
+        """Retourne la taille réelle de bloc utilisée par le flux actif (sans altérer self.block_size studio)."""
+        return self._effective_stream_block_size if self._streaming_mode else self.block_size
+
+    @property
+    def active_stream_mode(self) -> str:
+        """Retourne le mode réel du flux ouvert ('streaming', 'wasapi_exclusive', 'shared')."""
+        return self._active_stream_mode
+
+    def configure_device(self, output_device: Optional[int] = None, input_device: Optional[int] = None, sample_rate: Optional[int] = None, block_size: Optional[int] = None, buffer_size: Optional[int] = None, record_offset_samples: Optional[int] = None, asio_guard: Optional[bool] = None, wasapi_exclusive: Optional[bool] = None, streaming_mode: Optional[bool] = None) -> bool:
         """Modifie le périphérique audio, la fréquence d'échantillonnage ou la taille du buffer et redémarre le flux."""
+        prev_sr = self.sample_rate
         self.close()
         effective_buffer = buffer_size if buffer_size is not None else block_size
         if output_device is not None:
@@ -223,7 +253,12 @@ class AudioEngine:
             self._asio_guard_enabled = bool(asio_guard)
         if wasapi_exclusive is not None:
             self._wasapi_exclusive = bool(wasapi_exclusive)
+        if streaming_mode is not None:
+            self._streaming_mode = bool(streaming_mode)
+        self._suspended_in_background = False
         self._start_stream()
+        if self.sample_rate != prev_sr and self.project is not None:
+            self.invalidate_all_track_caches(trigger_async=self._asio_guard_enabled)
         return self._stream is not None or os.environ.get("NOVADAW_SILENT_TESTS") == "1"
 
     def play_test_tone(self, freq: float = 440.0, duration_sec: float = 0.6):
@@ -298,72 +333,157 @@ class AudioEngine:
 
     def _start_stream(self):
         self._cache_closed = False
+        global _global_audio_engine
+        _global_audio_engine = self
+        from core.hardware_manager import hardware_manager
+
         if os.environ.get("NOVADAW_SILENT_TESTS") == "1":
+            self._effective_stream_block_size = (
+                hardware_manager.get_streaming_block_size(self.sample_rate, self.block_size)
+                if self._streaming_mode
+                else self.block_size
+            )
+            self._active_stream_mode = (
+                "streaming"
+                if self._streaming_mode
+                else ("wasapi_exclusive" if self._wasapi_exclusive else "shared")
+            )
             self._stream = None
             return
-
-        from core.hardware_manager import hardware_manager
 
         target_device = self.output_device
         if target_device is not None and target_device < 0:
             target_device = None
 
-        is_wasapi = hardware_manager.is_wasapi_device(target_device)
-        wasapi_excl_settings = None
-        if is_wasapi and self._wasapi_exclusive and HAS_SOUNDDEVICE and hasattr(sd, "WasapiSettings"):
-            try:
-                wasapi_excl_settings = sd.WasapiSettings(exclusive=True)
-            except Exception:
-                wasapi_excl_settings = None
-
-        # Préparer les essais d'ouverture : WASAPI Exclusif d'abord (si actif), puis Partagé en repli
-        extra_modes = [wasapi_excl_settings, None] if wasapi_excl_settings is not None else [None]
-
         opened = False
-        for extra in extra_modes:
-            valid_sr = hardware_manager.get_optimal_sample_rate(target_device, extra_settings=extra)
-            candidate_srs = [self.sample_rate, valid_sr, 44100, 48000] if extra is None else [valid_sr, self.sample_rate, 44100, 48000]
-            seen = set()
-            candidate_srs = [x for x in candidate_srs if not (x in seen or seen.add(x))]
-            block_trials = [self.block_size, 0] if extra is not None else [self.block_size]
 
-            for sr in candidate_srs:
-                for blk in block_trials:
-                    try:
-                        if target_device is not None:
-                            if extra is not None:
-                                sd.check_output_settings(device=target_device, samplerate=sr, channels=2, dtype="float32", extra_settings=extra)
+        # --- CHEMIN 1 : MODE STREAMING & CAPTURE VIDÉO SANS GLITCH (NVIDIA App / OBS) ---
+        if self._streaming_mode:
+            stream_device = hardware_manager.resolve_wasapi_output_device(target_device)
+            is_wasapi_stream = hardware_manager.is_wasapi_device(stream_device)
+            wasapi_shared_auto = None
+            if is_wasapi_stream and HAS_SOUNDDEVICE and hasattr(sd, "WasapiSettings"):
+                try:
+                    wasapi_shared_auto = sd.WasapiSettings(exclusive=False, auto_convert=True)
+                except Exception:
+                    wasapi_shared_auto = None
+
+            extra_modes = [wasapi_shared_auto, None] if wasapi_shared_auto is not None else [None]
+            for extra in extra_modes:
+                valid_sr = hardware_manager.get_optimal_sample_rate(stream_device, extra_settings=extra)
+                candidate_srs = [self.sample_rate, valid_sr, 48000, 44100]
+                seen = set()
+                candidate_srs = [x for x in candidate_srs if not (x in seen or seen.add(x))]
+
+                for sr in candidate_srs:
+                    aligned_blk = hardware_manager.get_streaming_block_size(sr, self.block_size)
+                    block_trials = [aligned_blk, self.block_size] if aligned_blk != self.block_size else [aligned_blk]
+                    for blk in block_trials:
+                        try:
+                            if stream_device is not None:
+                                if extra is not None:
+                                    sd.check_output_settings(
+                                        device=stream_device,
+                                        samplerate=sr,
+                                        channels=2,
+                                        dtype="float32",
+                                        extra_settings=extra,
+                                    )
+                                else:
+                                    sd.check_output_settings(device=stream_device, samplerate=sr)
                             else:
-                                sd.check_output_settings(device=target_device, samplerate=sr)
-                        else:
-                            sd.check_output_settings(samplerate=sr)
+                                sd.check_output_settings(samplerate=sr)
 
-                        kwargs = {
-                            "samplerate": sr,
-                            "blocksize": blk,
-                            "channels": 2,
-                            "dtype": "float32",
-                            "latency": "low",
-                            "callback": self._audio_callback,
-                        }
-                        if target_device is not None:
-                            kwargs["device"] = target_device
-                        if extra is not None:
-                            kwargs["extra_settings"] = extra
+                            kwargs = {
+                                "samplerate": sr,
+                                "blocksize": blk,
+                                "channels": 2,
+                                "dtype": "float32",
+                                "latency": hardware_manager.STREAMING_HOST_LATENCY_SEC,
+                                "callback": self._audio_callback,
+                            }
+                            if stream_device is not None:
+                                kwargs["device"] = stream_device
+                            if extra is not None:
+                                kwargs["extra_settings"] = extra
 
-                        self._stream = sd.OutputStream(**kwargs)
-                        self._stream.start()
-                        self.sample_rate = sr
-                        opened = True
-                        mode_lbl = "WASAPI Exclusif" if extra is not None else "Standard"
-                        print(f"[AudioEngine] Flux audio démarré ({mode_lbl}, device={target_device}, sr={sr}, block={blk})")
+                            self._stream = sd.OutputStream(**kwargs)
+                            self._stream.start()
+                            self.sample_rate = sr
+                            self._effective_stream_block_size = blk if blk > 0 else aligned_blk
+                            self._active_stream_mode = "streaming"
+                            opened = True
+                            print(
+                                f"[AudioEngine] Flux audio démarré (Mode Streaming sans glitch, "
+                                f"device={stream_device}, sr={sr}, block={blk}, latency={self._stream.latency*1000:.1f}ms)"
+                            )
+                            break
+                        except Exception:
+                            continue
+                    if opened:
                         break
-                    except Exception:
-                        continue
                 if opened:
                     break
-            if opened:
-                break
+
+        # --- CHEMIN 2 : MODE STUDIO BASSE LATENCE (Comportement d'origine 100% préservé) ---
+        else:
+            is_wasapi = hardware_manager.is_wasapi_device(target_device)
+            wasapi_excl_settings = None
+            if is_wasapi and self._wasapi_exclusive and HAS_SOUNDDEVICE and hasattr(sd, "WasapiSettings"):
+                try:
+                    wasapi_excl_settings = sd.WasapiSettings(exclusive=True)
+                except Exception:
+                    wasapi_excl_settings = None
+
+            # Préparer les essais d'ouverture : WASAPI Exclusif d'abord (si actif), puis Partagé en repli
+            extra_modes = [wasapi_excl_settings, None] if wasapi_excl_settings is not None else [None]
+
+            for extra in extra_modes:
+                valid_sr = hardware_manager.get_optimal_sample_rate(target_device, extra_settings=extra)
+                candidate_srs = [self.sample_rate, valid_sr, 44100, 48000] if extra is None else [valid_sr, self.sample_rate, 44100, 48000]
+                seen = set()
+                candidate_srs = [x for x in candidate_srs if not (x in seen or seen.add(x))]
+                block_trials = [self.block_size, 0] if extra is not None else [self.block_size]
+
+                for sr in candidate_srs:
+                    for blk in block_trials:
+                        try:
+                            if target_device is not None:
+                                if extra is not None:
+                                    sd.check_output_settings(device=target_device, samplerate=sr, channels=2, dtype="float32", extra_settings=extra)
+                                else:
+                                    sd.check_output_settings(device=target_device, samplerate=sr)
+                            else:
+                                sd.check_output_settings(samplerate=sr)
+
+                            kwargs = {
+                                "samplerate": sr,
+                                "blocksize": blk,
+                                "channels": 2,
+                                "dtype": "float32",
+                                "latency": "low",
+                                "callback": self._audio_callback,
+                            }
+                            if target_device is not None:
+                                kwargs["device"] = target_device
+                            if extra is not None:
+                                kwargs["extra_settings"] = extra
+
+                            self._stream = sd.OutputStream(**kwargs)
+                            self._stream.start()
+                            self.sample_rate = sr
+                            self._effective_stream_block_size = blk if blk > 0 else self.block_size
+                            self._active_stream_mode = "wasapi_exclusive" if extra is not None else "shared"
+                            opened = True
+                            mode_lbl = "WASAPI Exclusif" if extra is not None else "Standard"
+                            print(f"[AudioEngine] Flux audio démarré ({mode_lbl}, device={target_device}, sr={sr}, block={blk})")
+                            break
+                        except Exception:
+                            continue
+                    if opened:
+                        break
+                if opened:
+                    break
 
         # Si le périphérique a échoué (ex: débranché ou invalide), déclencher l'auto-détection universelle
         if not opened:
@@ -372,14 +492,18 @@ class AudioEngine:
                 new_cfg = hardware_manager.auto_configure_audio(force=True)
                 new_dev = new_cfg.get("output_device_index")
                 new_sr = new_cfg.get("sample_rate", 44100)
-                new_buf = new_cfg.get("buffer_size", 128)
+                new_buf = (
+                    hardware_manager.get_streaming_block_size(new_sr, new_cfg.get("buffer_size", 128))
+                    if self._streaming_mode
+                    else new_cfg.get("buffer_size", 128)
+                )
 
                 kwargs = {
                     "samplerate": new_sr,
                     "blocksize": new_buf,
                     "channels": 2,
                     "dtype": "float32",
-                    "latency": "low",
+                    "latency": hardware_manager.STREAMING_HOST_LATENCY_SEC if self._streaming_mode else "low",
                     "callback": self._audio_callback
                 }
                 if new_dev is not None and new_dev >= 0:
@@ -389,7 +513,10 @@ class AudioEngine:
                 self._stream.start()
                 self.output_device = new_dev
                 self.sample_rate = new_sr
-                self.block_size = new_buf
+                if not self._streaming_mode:
+                    self.block_size = new_buf
+                self._effective_stream_block_size = new_buf
+                self._active_stream_mode = "streaming" if self._streaming_mode else "shared"
                 opened = True
                 print(f"[AudioEngine] Flux audio rétabli avec succès via auto-détection ({new_sr} Hz) !")
             except Exception as e_fallback:
@@ -401,6 +528,30 @@ class AudioEngine:
             self._stream = None
         else:
             self._ensure_live_vst_streamer()
+
+    def suspend_for_background(self) -> bool:
+        """Libère le flux audio matériel lorsque NovaDAW passe en arrière-plan (sauf lecture/enregistrement/streaming)."""
+        if self._streaming_mode or self.is_playing or self.is_recording or self._monitor_enabled:
+            return False
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+            self._suspended_in_background = True
+            return True
+        return False
+
+    def resume_from_background(self) -> bool:
+        """Réactive le flux audio matériel lorsque NovaDAW revient au premier plan."""
+        if not self._suspended_in_background:
+            return False
+        self._suspended_in_background = False
+        if self._stream is None and os.environ.get("NOVADAW_SILENT_TESTS") != "1":
+            self._start_stream()
+        return self._stream is not None or os.environ.get("NOVADAW_SILENT_TESTS") == "1"
 
     def close(self):
         with self._cache_job_lock:
@@ -3005,8 +3156,8 @@ class AudioEngine:
                             note_dur_sec = note.duration / beats_per_sec
                             wave = SynthVoice.generate_note(note.pitch, note_dur_sec, self.sample_rate, note.velocity)
 
-                            # Offset dans le buffer
-                            note_offset_samples = int((abs_note_start - start_b) / beats_per_sec * self.sample_rate)
+                            # Offset dans le buffer (round évite la répétition d'1 échantillon par dérive flottante)
+                            note_offset_samples = round((abs_note_start - start_b) / beats_per_sec * self.sample_rate)
                             wave_start_sample = 0
                             buf_start_sample = note_offset_samples
 

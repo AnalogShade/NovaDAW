@@ -6,7 +6,7 @@ import time
 from typing import Optional, Dict, Any
 import soundfile as sf
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QScrollArea, QTabWidget, QFileDialog, QMessageBox, QStatusBar,
     QFrame, QLabel, QPushButton, QSizePolicy, QProgressBar
 )
@@ -914,12 +914,11 @@ class MainWindow(QMainWindow):
 
         status.addPermanentWidget(self.cache_container)
 
-        lat_ms = hardware_manager.calculate_latency_ms(self.audio_engine.block_size, self.audio_engine.sample_rate)
-        self.lbl_engine_info = QLabel(f"⚙️ Moteur Audio : {self.audio_engine.sample_rate} Hz Stéréo | Tampon: {self.audio_engine.block_size} ({lat_ms} ms)")
+        self.lbl_engine_info = QLabel("")
         self.lbl_engine_info.setCursor(Qt.PointingHandCursor)
-        self.lbl_engine_info.setToolTip("Cliquez pour configurer vos périphériques audio, pilotes ou carte graphique")
-        self.lbl_engine_info.setStyleSheet("color: #38bdf8; font-weight: 600; padding: 0 4px;")
+        self.lbl_engine_info.setToolTip("Cliquez pour configurer vos périphériques audio, le Mode Streaming ou la carte graphique")
         self.lbl_engine_info.mousePressEvent = lambda e: self.open_device_settings_dialog()
+        self._refresh_engine_info_label()
         status.addPermanentWidget(self.lbl_engine_info)
         status.showMessage("Prêt - Bienvenue dans NovaDAW")
 
@@ -2597,6 +2596,10 @@ class MainWindow(QMainWindow):
             font-weight: bold;
         """)
 
+        box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        box.show()
+        box.raise_()
+        box.activateWindow()
         box.exec()
         clicked = box.clickedButton()
 
@@ -2910,6 +2913,10 @@ class MainWindow(QMainWindow):
             }
         """)
 
+        box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        box.show()
+        box.raise_()
+        box.activateWindow()
         box.exec()
         return box.clickedButton() == btn_yes
 
@@ -3105,15 +3112,50 @@ class MainWindow(QMainWindow):
         """Ouvre directement l'onglet MCP / IA du panneau des périphériques."""
         self.open_device_settings_dialog(initial_tab=2)
 
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.ActivationChange and os.environ.get("NOVADAW_SILENT_TESTS") != "1":
+            rel_bg = hardware_manager.settings.get("audio", {}).get("release_driver_background", False)
+            if not rel_bg:
+                return
+            state = QApplication.applicationState()
+            if state == Qt.ApplicationActive:
+                self.audio_engine.resume_from_background()
+            elif state in (Qt.ApplicationInactive, Qt.ApplicationHidden, Qt.ApplicationSuspended):
+                self.audio_engine.suspend_for_background()
+
+    def _refresh_engine_info_label(self):
+        if not hasattr(self, "lbl_engine_info"):
+            return
+        if getattr(self.audio_engine, "streaming_mode", False):
+            latencies = hardware_manager.get_device_latencies(
+                output_device_index=self.audio_engine.output_device,
+                sample_rate=self.audio_engine.sample_rate,
+                buffer_size=self.audio_engine.block_size,
+                streaming_mode=True,
+            )
+            out_ms = latencies.get("output_ms", 50.0)
+            eff_blk = self.audio_engine.effective_block_size
+            self.lbl_engine_info.setText(
+                f"🎥 Mode Streaming : {self.audio_engine.sample_rate} Hz Stéréo | Tampon: {eff_blk} (~{out_ms:.0f} ms)"
+            )
+            self.lbl_engine_info.setStyleSheet("color: #34d399; font-weight: 700; padding: 0 4px;")
+        else:
+            lat_ms = hardware_manager.calculate_latency_ms(
+                self.audio_engine.block_size,
+                self.audio_engine.sample_rate
+            )
+            self.lbl_engine_info.setText(
+                f"⚙️ Moteur Audio : {self.audio_engine.sample_rate} Hz Stéréo | Tampon: {self.audio_engine.block_size} ({lat_ms} ms)"
+            )
+            self.lbl_engine_info.setStyleSheet("color: #38bdf8; font-weight: 600; padding: 0 4px;")
+
     def _on_hardware_settings_applied(self):
-        lat_ms = hardware_manager.calculate_latency_ms(
-            self.audio_engine.block_size,
-            self.audio_engine.sample_rate
-        )
-        self.lbl_engine_info.setText(
-            f"⚙️ Moteur Audio : {self.audio_engine.sample_rate} Hz Stéréo | Tampon: {self.audio_engine.block_size} ({lat_ms} ms)"
-        )
-        self.statusBar().showMessage("Configuration des périphériques mise à jour avec succès.", 3000)
+        self._refresh_engine_info_label()
+        if getattr(self.audio_engine, "streaming_mode", False):
+            self.statusBar().showMessage("🎥 Mode Streaming & Capture Vidéo activé (WASAPI Partagé 32-bit sans glitch).", 4000)
+        else:
+            self.statusBar().showMessage("Configuration des périphériques mise à jour avec succès.", 3000)
 
     def closeEvent(self, event):
         if not self.maybe_save_changes(reason="close"):
@@ -3125,6 +3167,23 @@ class MainWindow(QMainWindow):
             stop_global_keyboard_hook()
         except Exception:
             pass
+        try:
+            from ui.plugin_dialogs import _open_native_editors
+            for dlg in list(_open_native_editors.values()):
+                try:
+                    dlg.close()
+                except Exception:
+                    pass
+            _open_native_editors.clear()
+        except Exception:
+            pass
+        for child_win_attr in ("virtual_keyboard_dialog", "floating_vst_rack", "_help_dialog"):
+            child_win = getattr(self, child_win_attr, None)
+            if child_win is not None:
+                try:
+                    child_win.close()
+                except Exception:
+                    pass
         global_plugin_manager.close_all_editors()
         if hasattr(self, "ipc_server"):
             self.ipc_server.stop()

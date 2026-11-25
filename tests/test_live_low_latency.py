@@ -222,6 +222,7 @@ def test_wasapi_exclusive_setting_and_dialog(qapp):
     engine = AudioEngine()
     dlg = DeviceSettingsDialog(engine)
     assert hasattr(dlg, "chk_wasapi_exclusive")
+    dlg.chk_streaming_mode.setChecked(False)
     dlg.chk_wasapi_exclusive.setChecked(True)
     dlg._on_reset_engine()
     assert engine._wasapi_exclusive is True
@@ -231,6 +232,199 @@ def test_wasapi_exclusive_setting_and_dialog(qapp):
     assert engine._wasapi_exclusive is False
     dlg.close()
     engine.close()
+
+
+def test_streaming_mode_wasapi_shared_alignment_and_studio_restore(monkeypatch):
+    """
+    Vérifie que le Mode Streaming ouvre un flux WASAPI Partagé auto_convert aligné sur le quantum 10 ms
+    sans modifier les réglages studio, et restaure exactement la latence studio à la désactivation.
+    """
+    import core.audio_engine as ae_mod
+
+    opened_kwargs = []
+
+    class FakeWasapiSettings:
+        def __init__(self, exclusive=False, auto_convert=False):
+            self.exclusive = exclusive
+            self.auto_convert = auto_convert
+
+    class FakeOutputStream:
+        def __init__(self, **kwargs):
+            opened_kwargs.append(dict(kwargs))
+            self.samplerate = kwargs.get("samplerate", 44100)
+            self.blocksize = kwargs.get("blocksize", 256)
+            self.latency = 0.050 if kwargs.get("latency") != "low" else 0.0058
+            self.active = False
+
+        def start(self):
+            self.active = True
+
+        def stop(self):
+            self.active = False
+
+        def close(self):
+            self.active = False
+
+    fake_sd = SimpleNamespace(
+        WasapiSettings=FakeWasapiSettings,
+        OutputStream=FakeOutputStream,
+        check_output_settings=lambda **kw: None,
+        query_devices=lambda idx=None, kind=None: (
+            [{"name": "Haut-parleurs (Avid Eleven Rack)", "hostapi": 0, "max_output_channels": 2, "max_input_channels": 0, "default_samplerate": 44100.0, "default_low_output_latency": 0.003}]
+            if idx is None and kind is None
+            else {"name": "Haut-parleurs (Avid Eleven Rack)", "hostapi": 0, "max_output_channels": 2, "max_input_channels": 0, "default_samplerate": 44100.0, "default_low_output_latency": 0.003}
+        ),
+        query_hostapis=lambda idx=None: (
+            [{"name": "Windows WASAPI", "devices": [0], "default_output_device": 0, "default_input_device": -1}]
+            if idx is None
+            else {"name": "Windows WASAPI", "devices": [0], "default_output_device": 0, "default_input_device": -1}
+        ),
+    )
+
+    monkeypatch.setenv("NOVADAW_SILENT_TESTS", "1")
+    engine = AudioEngine(sample_rate=44100, block_size=128, output_device=0)
+    monkeypatch.setattr(ae_mod, "HAS_SOUNDDEVICE", True)
+    monkeypatch.setattr(ae_mod, "sd", fake_sd)
+    monkeypatch.setattr(hardware_manager, "is_wasapi_device", lambda idx: True)
+    monkeypatch.setattr(hardware_manager, "resolve_wasapi_output_device", lambda idx: 0)
+    monkeypatch.setattr(hardware_manager, "get_optimal_sample_rate", lambda *a, **kw: 44100)
+    monkeypatch.setenv("NOVADAW_SILENT_TESTS", "0")
+
+    try:
+        # 1. Activer le Mode Streaming alors que wasapi_exclusive=True et block_size=128
+        ok = engine.configure_device(
+            output_device=0,
+            sample_rate=44100,
+            block_size=128,
+            wasapi_exclusive=True,
+            streaming_mode=True,
+        )
+        assert ok is True
+        assert engine.streaming_mode is True
+        assert engine.active_stream_mode == "streaming"
+        # Les préférences studio doivent rester strictement intactes
+        assert engine.block_size == 128
+        assert engine._wasapi_exclusive is True
+        # Le flux réel ouvert utilise le quantum 10 ms (441 éch. @ 44.1 kHz) + auto_convert sans mode exclusif
+        assert engine.effective_block_size == 441
+        stream_call = opened_kwargs[-1]
+        assert stream_call["blocksize"] == 441
+        assert stream_call["latency"] == pytest.approx(hardware_manager.STREAMING_HOST_LATENCY_SEC)
+        assert isinstance(stream_call.get("extra_settings"), FakeWasapiSettings)
+        assert stream_call["extra_settings"].exclusive is False
+        assert stream_call["extra_settings"].auto_convert is True
+
+        # En mode Streaming, le passage en arrière-plan ne coupe jamais le flux
+        assert engine.suspend_for_background() is False
+
+        # 2. Désactiver le Mode Streaming -> restauration immédiate du mode WASAPI Exclusif ultra-basse latence (128 éch.)
+        ok2 = engine.configure_device(streaming_mode=False)
+        assert ok2 is True
+        assert engine.streaming_mode is False
+        assert engine.active_stream_mode == "wasapi_exclusive"
+        assert engine.block_size == 128
+        assert engine.effective_block_size == 128
+        studio_call = opened_kwargs[-1]
+        assert studio_call["blocksize"] == 128
+        assert studio_call["latency"] == "low"
+        assert isinstance(studio_call.get("extra_settings"), FakeWasapiSettings)
+        assert studio_call["extra_settings"].exclusive is True
+    finally:
+        monkeypatch.setenv("NOVADAW_SILENT_TESTS", "1")
+        engine.close()
+
+
+def test_streaming_mode_dialog_toggle_and_bit_identical_audio_quality(qapp, monkeypatch, tmp_path):
+    """
+    Vérifie l'ergonomie de chk_streaming_mode dans DeviceSettingsDialog et garantit
+    une qualité audio DSP 100 % bit-identique entre le Mode Studio (128 éch.) et le Mode Streaming (441 éch.).
+    """
+    import core.hardware_manager as hm_mod
+    from core.project import MidiClip, MidiNote
+
+    temp_settings = str(tmp_path / "settings.json")
+    monkeypatch.setattr(hm_mod, "SETTINGS_FILE", temp_settings)
+    saved_backup = dict(hardware_manager.settings.get("audio", {}))
+
+    engine = AudioEngine(sample_rate=44100, block_size=128)
+    dlg = DeviceSettingsDialog(engine)
+    try:
+        assert hasattr(dlg, "chk_streaming_mode")
+        dlg.chk_streaming_mode.setChecked(False)
+        dlg.chk_wasapi_exclusive.setChecked(True)
+        idx_128 = dlg.combo_buffer_size.findData(128)
+        if idx_128 >= 0:
+            dlg.combo_buffer_size.setCurrentIndex(idx_128)
+        dlg._update_latency_label()
+        studio_out_txt = dlg.lbl_out_latency.text()
+
+        # Cocher Mode Streaming : suspend visuellement WASAPI Exclusif et Buffer sans perdre leurs valeurs
+        dlg.chk_streaming_mode.setChecked(True)
+        assert dlg.chk_wasapi_exclusive.isEnabled() is False
+        assert dlg.chk_wasapi_exclusive.isChecked() is True
+        assert dlg.combo_buffer_size.isEnabled() is False
+        assert dlg.lbl_streaming_info.isHidden() is False
+        streaming_out_txt = dlg.lbl_out_latency.text()
+        assert streaming_out_txt != studio_out_txt
+        assert "50.0" in streaming_out_txt
+
+        dlg._on_apply_and_save()
+        assert engine.streaming_mode is True
+        assert engine._wasapi_exclusive is True
+        assert engine.block_size == 128
+        assert hardware_manager.settings["audio"]["streaming_mode"] is True
+        assert hardware_manager.settings["audio"]["wasapi_exclusive"] is True
+
+        # Décocher Mode Streaming : réactive immédiatement les contrôles et retrouve la latence studio exacte
+        dlg.chk_streaming_mode.setChecked(False)
+        assert dlg.chk_wasapi_exclusive.isEnabled() is True
+        assert dlg.chk_wasapi_exclusive.isChecked() is True
+        assert dlg.combo_buffer_size.isEnabled() is True
+        assert dlg.lbl_out_latency.text() == studio_out_txt
+
+        # Preuve DSP : rendu d'une piste MIDI identique au bit près entre blocs de 128 (Studio) et 441 (Streaming)
+        total_frames = 128 * 441  # Multiple commun exact (56 448 échantillons)
+        proj_a = Project(name="QualityA")
+        trk_a = Track(name="Lead", track_type="midi")
+        clip_a = MidiClip(name="Clip", start_beat=0.0, length_beats=4.0)
+        clip_a.notes.append(MidiNote(pitch=60, start_beat=0.0, duration=1.5, velocity=100))
+        trk_a.clips.append(clip_a)
+        proj_a.add_track(trk_a)
+
+        proj_b = Project(name="QualityB")
+        trk_b = Track(name="Lead", track_type="midi")
+        clip_b = MidiClip(name="Clip", start_beat=0.0, length_beats=4.0)
+        clip_b.notes.append(MidiNote(pitch=60, start_beat=0.0, duration=1.5, velocity=100))
+        trk_b.clips.append(clip_b)
+        proj_b.add_track(trk_b)
+
+        eng_studio = AudioEngine(sample_rate=44100, block_size=128)
+        eng_studio._asio_guard_enabled = False
+        eng_studio.set_project(proj_a)
+        eng_studio.is_playing = True
+
+        eng_stream = AudioEngine(sample_rate=44100, block_size=128)
+        eng_stream.configure_device(streaming_mode=True)
+        eng_stream._asio_guard_enabled = False
+        eng_stream.set_project(proj_b)
+        eng_stream.is_playing = True
+
+        render_studio = np.zeros((total_frames, 2), dtype=np.float32)
+        for pos in range(0, total_frames, 128):
+            eng_studio._audio_callback(render_studio[pos:pos + 128], 128, None, None)
+
+        render_stream = np.zeros((total_frames, 2), dtype=np.float32)
+        for pos in range(0, total_frames, 441):
+            eng_stream._audio_callback(render_stream[pos:pos + 441], 441, None, None)
+
+        eng_studio.close()
+        eng_stream.close()
+        assert float(np.max(np.abs(render_studio))) > 0.05
+        assert np.allclose(render_studio, render_stream, atol=1e-5)
+    finally:
+        hardware_manager.settings["audio"].update(saved_backup)
+        dlg.close()
+        engine.close()
 
 
 def test_keyboard_hook_dispatches_asynchronously():

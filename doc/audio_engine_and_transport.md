@@ -12,7 +12,7 @@ Ce document décrit en détail le fonctionnement interne du moteur audio temps r
 NovaDAW s'interface avec les pilotes audio via la bibliothèque `sounddevice` (surcouche PortAudio) et `core/hardware_manager.py` :
 - **Pilotes Supportés** :
   - **ASIO (Audio Stream Input/Output)** : Pilote de studio ultra-faible latence (< 5 ms).
-  - **Windows WASAPI (Windows Audio Session API)** : Pilote natif moderne recommandé en mode exclusif ou partagé.
+  - **Windows WASAPI (Windows Audio Session API)** : Pilote natif moderne recommandé en mode exclusif (ultra-basse latence studio) ou en **Mode Streaming & Capture Vidéo** (`streaming_mode=True` : WASAPI Partagé FP32 `auto_convert=True`, aligné sur le quantum Windows de `10 ms` avec tampon hôte anti-famine de `40 ms` pour NVIDIA App / OBS sans aucune perte de qualité audio).
   - **DirectSound & MME** : Pilotes universels pour compatibilité maximale.
 - **Réglages du Buffer & Latence** :
   - Fréquence d'échantillonnage : 44.1 kHz, 48 kHz, 88.2 kHz, 96 kHz, 192 kHz.
