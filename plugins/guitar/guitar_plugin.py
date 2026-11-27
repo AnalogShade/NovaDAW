@@ -11,11 +11,13 @@ Modélisation physique par guides d'ondes numériques (Digital Waveguide Synthes
   le Gestionnaire de Presets universel et le bouton Bypass de NovaDAW.
 """
 import copy
+import ctypes
 import math
 import threading
 from typing import Dict, Any, Optional, List, Tuple
 import numpy as np
 
+from core import dsp_native
 from plugins.base import BasePlugin
 from plugins.registry import register_plugin
 from plugins.synth.synth_dsp import StereoStudioReverb
@@ -391,6 +393,13 @@ class NovaGuitarPlugin(BasePlugin):
         side_mix = np.zeros(frames, dtype=np.float64)
         active_keys = set()
 
+        use_batch_c = (
+            dsp_native.NATIVE_AVAILABLE
+            and dsp_native.nova_guitar_voices_batch_accum is not None
+        )
+        batch_items = [] if use_batch_c else None
+        sw_clamped = max(0.0, min(1.0, self.stereo_width))
+
         for note, n_start_b, n_dur_b, n_start_sec, n_off_sec in candidates:
             pitch = int(getattr(note, "pitch", 60))
             vel = int(getattr(note, "velocity", 100))
@@ -420,25 +429,57 @@ class NovaGuitarPlugin(BasePlugin):
                 voice = self._create_voice(pitch, vel, note_dur_samples, sample_rate)
                 voices_dict[v_key] = voice
             elif live_id is not None:
-                # Synchronise la frontière Note-Off lorsque la note live est relâchée
                 voice.note_dur_samples = max(voice.rendered_samples, note_dur_samples)
 
-            # Avance rapide si on démarre en milieu de note (seek)
-            if desired_voice_sample > voice.rendered_samples:
-                skip = desired_voice_sample - voice.rendered_samples
-                voice.skip_samples(skip)
-
-            voice_mono = voice.render_samples(render_count)
-
-            # Légère spatialisation naturelle du manche selon la hauteur (grave léger gauche, aigu léger droite)
-            # Limitée à ±0.16 pour préserver le centrage d'une note seule tout en aérant les accords
             pitch_norm = max(-1.0, min(1.0, (pitch - 58.0) / 18.0))
-            pan = pitch_norm * max(0.0, min(1.0, self.stereo_width)) * 0.16
+            pan = pitch_norm * sw_clamped * 0.16
             g_l = math.sqrt(0.5 * (1.0 - pan))
             g_r = math.sqrt(0.5 * (1.0 + pan))
+            side_gain = (g_l - g_r) * 0.5
 
-            mono_mix[local_start:local_start + render_count] += voice_mono
-            side_mix[local_start:local_start + render_count] += voice_mono * ((g_l - g_r) * 0.5)
+            if (
+                batch_items is not None
+                and voice.plane_a._native is not None
+                and (voice.plane_b is None or voice.plane_b._native is not None)
+            ):
+                skip_n = max(0, desired_voice_sample - voice.rendered_samples)
+                batch_items.append((voice, voice.rendered_samples, skip_n, note_dur_samples, local_start, render_count, side_gain))
+                voice.rendered_samples = desired_voice_sample + render_count
+            else:
+                if desired_voice_sample > voice.rendered_samples:
+                    voice.skip_samples(desired_voice_sample - voice.rendered_samples)
+                voice_mono = voice.render_samples(render_count)
+                mono_mix[local_start:local_start + render_count] += voice_mono
+                side_mix[local_start:local_start + render_count] += voice_mono * side_gain
+
+        if batch_items:
+            nv = len(batch_items)
+            arr_pa = (ctypes.c_void_p * nv)(*(it[0].plane_a._native for it in batch_items))
+            arr_pb = (ctypes.c_void_p * nv)(*(it[0].plane_b._native if it[0].plane_b is not None else 0 for it in batch_items))
+            arr_exc = (dsp_native.c_double_p * nv)(*(it[0]._exc_ptr for it in batch_items))
+            arr_elen = (ctypes.c_int32 * nv)(*(it[0]._exc_len for it in batch_items))
+            arr_ss = (ctypes.c_int32 * nv)(*(it[1] for it in batch_items))
+            arr_sk = (ctypes.c_int32 * nv)(*(it[2] for it in batch_items))
+            arr_nd = (ctypes.c_int32 * nv)(*(it[3] for it in batch_items))
+            arr_ls = (ctypes.c_int32 * nv)(*(it[4] for it in batch_items))
+            arr_rc = (ctypes.c_int32 * nv)(*(it[5] for it in batch_items))
+            arr_sg = (ctypes.c_double * nv)(*(it[6] for it in batch_items))
+            dsp_native.nova_guitar_voices_batch_accum(
+                nv,
+                arr_pa,
+                arr_pb,
+                arr_exc,
+                arr_elen,
+                arr_ss,
+                arr_sk,
+                arr_nd,
+                arr_ls,
+                arr_rc,
+                arr_sg,
+                ctypes.byref(ctypes.c_double.from_buffer(mono_mix)),
+                ctypes.byref(ctypes.c_double.from_buffer(side_mix)),
+                frames,
+            )
 
         # Nettoyage des voix terminées
         if len(voices_dict) > len(active_keys):
@@ -470,7 +511,9 @@ class NovaGuitarPlugin(BasePlugin):
             out_l = widened_l
             out_r = widened_r
 
-        stereo = np.column_stack((out_l, out_r)).astype(np.float32)
+        stereo = np.empty((frames, 2), dtype=np.float32)
+        stereo[:, 0] = out_l
+        stereo[:, 1] = out_r
 
         # Compensation douce si accord dense
         if len(candidates) > 1:
@@ -482,13 +525,16 @@ class NovaGuitarPlugin(BasePlugin):
             reverb.sample_rate = sample_rate
             stereo = reverb.process(stereo)
 
-        out = stereo * float(self.master_volume)
+        mv = float(self.master_volume)
+        if mv != 1.0:
+            stereo *= mv
+        out = stereo
         # Limiteur doux de protection contre la saturation numérique
         peak = float(np.max(np.abs(out))) if len(out) > 0 else 0.0
         if peak > 0.98:
-            out = np.tanh(out * 0.92) * 1.04
+            out = (np.tanh(out * 0.92) * 1.04).astype(np.float32)
 
-        return out.astype(np.float32)
+        return out if out.dtype == np.float32 else out.astype(np.float32)
 
     def render_note(
         self,

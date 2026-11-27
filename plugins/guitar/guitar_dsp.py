@@ -10,6 +10,7 @@ Licence MIT — Implémentation 100 % originale basée sur la physique des guide
 - Étage de sortie commutable : Caisse acoustique modale (Nylon / Folk) ou Micro magnétique électrique (DI)
 """
 import ctypes
+from functools import lru_cache
 import math
 from typing import Optional, Dict, Tuple, Any
 import numpy as np
@@ -180,6 +181,87 @@ def _lfilter_fast(b: np.ndarray, a: np.ndarray, x: np.ndarray, zi: np.ndarray) -
     return out, z
 
 
+@lru_cache(maxsize=512)
+def _cached_plane_coeffs(
+    freq: float,
+    sample_rate: int,
+    brightness: float,
+    string_tension: float,
+    sustain_sec: float,
+    release_sec: float,
+    palm_mute: float,
+) -> Tuple[int, float, float, float, float, float, float, float, float, int, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    sr = max(8000, int(sample_rate))
+    f = max(25.0, min(float(freq), sr * 0.38))
+    w0 = 2.0 * math.pi * f / float(sr)
+    period_total = float(sr) / f
+
+    bright = max(0.05, min(0.98, float(brightness)))
+    mute = max(0.0, min(1.0, float(palm_mute)))
+    p_sus_raw = 0.04 + (1.0 - bright) * 0.42 + mute * 0.36
+    freq_scale = min(1.0, max(0.35, 220.0 / f))
+    p_sustain = max(0.02, min(0.84, p_sus_raw * (0.65 + 0.35 * freq_scale)))
+
+    eff_sustain = max(0.15, float(sustain_sec) * (1.0 - 0.85 * mute))
+    eff_sustain *= (180.0 / max(80.0, f)) ** 0.32
+    eff_sustain = max(0.12, min(14.0, eff_sustain))
+    g_sustain = min(0.9996, max(0.90, 10.0 ** (-3.0 / (eff_sustain * f))))
+
+    rel_t = max(0.04, float(release_sec))
+    g_release = min(0.9994, max(0.32, 10.0 ** (-1.5 / (rel_t * f))))
+    rel_norm = max(0.0, min(1.0, (rel_t - 0.04) / 1.16))
+    extra_damp = (1.0 - rel_norm) ** 1.5
+    p_release = min(
+        0.84,
+        max(p_sustain, p_sustain + extra_damp * (0.68 - p_sustain) + 0.03 * (1.0 - p_sustain)),
+    )
+
+    tension = max(0.0, min(1.0, float(string_tension)))
+    a_disp = -0.34 * (1.0 - tension) * min(1.0, 350.0 / max(80.0, f))
+
+    tau_loss = _phase_delay_at(
+        np.array([1.0 - p_sustain]), np.array([1.0, -p_sustain]), w0
+    )
+    tau_disp = _phase_delay_at(
+        np.array([a_disp, 1.0]), np.array([1.0, a_disp]), w0
+    )
+
+    rem = period_total - tau_loss - tau_disp
+    n_int = max(4, int(math.floor(rem)))
+    delta = rem - n_int
+    if delta < 0.20 and n_int > 4:
+        n_int -= 1
+        delta += 1.0
+
+    eta = (1.0 - delta) / (1.0 + delta)
+    for _ in range(3):
+        tau_frac = _phase_delay_at(np.array([eta, 1.0]), np.array([1.0, eta]), w0)
+        err = delta - tau_frac
+        delta_corr = max(0.08, min(1.6, delta + err))
+        eta = (1.0 - delta_corr) / (1.0 + delta_corr)
+    eta = max(-0.78, min(0.78, eta))
+
+    def _coeffs(g_val: float, p_val: float) -> Tuple[np.ndarray, np.ndarray]:
+        b_loss = np.array([g_val * (1.0 - p_val)], dtype=np.float64)
+        a_loss = np.array([1.0, -p_val], dtype=np.float64)
+        b_frac = np.array([eta, 1.0], dtype=np.float64)
+        a_frac = np.array([1.0, eta], dtype=np.float64)
+        b_disp = np.array([a_disp, 1.0], dtype=np.float64)
+        a_disp_arr = np.array([1.0, a_disp], dtype=np.float64)
+        b_out = np.ascontiguousarray(np.convolve(b_loss, np.convolve(b_frac, b_disp)), dtype=np.float64)
+        a_out = np.ascontiguousarray(np.convolve(a_loss, np.convolve(a_frac, a_disp_arr)), dtype=np.float64)
+        b_out.setflags(write=False)
+        a_out.setflags(write=False)
+        return b_out, a_out
+
+    b_sus, a_sus = _coeffs(g_sustain, p_sustain)
+    b_rel, a_rel = _coeffs(g_release, p_release)
+    return (
+        sr, f, w0, period_total, p_sustain, g_sustain, g_release, p_release,
+        a_disp, n_int, eta, b_sus, a_sus, b_rel, a_rel,
+    )
+
+
 class WaveguideStringPlane:
     """
     Plan de vibration unique d'une corde dans un guide d'ondes numérique (Digital Waveguide).
@@ -196,97 +278,53 @@ class WaveguideStringPlane:
         release_sec: float = 0.22,
         palm_mute: float = 0.0,
     ):
-        self.sample_rate = max(8000, int(sample_rate))
-        self.freq = max(25.0, min(float(freq), self.sample_rate * 0.38))
-        self.w0 = 2.0 * math.pi * self.freq / float(self.sample_rate)
-        self.period_total = float(self.sample_rate) / self.freq
-
-        # 1. Paramètres du filtre de pertes (dépendant de la fréquence & de la brillance)
-        bright = max(0.05, min(0.98, float(brightness)))
-        mute = max(0.0, min(1.0, float(palm_mute)))
-        # Pôle passe-bas : plus bright est bas ou mute est élevé, plus les aigus s'amortissent vite
-        p_sustain = 0.04 + (1.0 - bright) * 0.42 + mute * 0.36
-        # Légère adaptation selon la tessiture pour garder des cordes graves claires
-        freq_scale = min(1.0, max(0.35, 220.0 / self.freq))
-        self.p_sustain = max(0.02, min(0.84, p_sustain * (0.65 + 0.35 * freq_scale)))
-
-        # Gain par période calculé depuis le temps T60 visé
-        eff_sustain = max(0.15, float(sustain_sec) * (1.0 - 0.85 * mute))
-        # Les notes aiguës s'éteignent naturellement un peu plus vite
-        eff_sustain *= (180.0 / max(80.0, self.freq)) ** 0.32
-        eff_sustain = max(0.12, min(14.0, eff_sustain))
-        self.g_sustain = min(0.9996, max(0.90, 10.0 ** (-3.0 / (eff_sustain * self.freq))))
-
-        # Paramètres en phase de relâchement (Note-Off / étouffement doigt)
-        # On calibre -30 dB à rel_t (soit T60 = 2.0 * rel_t) afin que la corde reste
-        # clairement audible pendant toute la durée choisie en ms après le Note-Off.
-        rel_t = max(0.04, float(release_sec))
-        self.g_release = min(0.9994, max(0.32, 10.0 ** (-1.5 / (rel_t * self.freq))))
-        # Plus le relâchement est court, plus l'étouffement des aigus est marqué (muting) ;
-        # sur un relâchement long, la corde continue de vibrer librement avec ses harmoniques.
-        rel_norm = max(0.0, min(1.0, (rel_t - 0.04) / 1.16))
-        extra_damp = (1.0 - rel_norm) ** 1.5
-        self.p_release = min(
-            0.84,
-            max(self.p_sustain, self.p_sustain + extra_damp * (0.68 - self.p_sustain) + 0.03 * (1.0 - self.p_sustain)),
+        (
+            self.sample_rate,
+            self.freq,
+            self.w0,
+            self.period_total,
+            self.p_sustain,
+            self.g_sustain,
+            self.g_release,
+            self.p_release,
+            self.a_disp,
+            self.n_int,
+            self.eta,
+            self.b_sustain,
+            self.a_sustain,
+            self.b_release,
+            self.a_release,
+        ) = _cached_plane_coeffs(
+            float(freq),
+            int(sample_rate),
+            float(brightness),
+            float(string_tension),
+            float(sustain_sec),
+            float(release_sec),
+            float(palm_mute),
         )
-
-        # 2. Filtre de dispersion (Tension / Rigidité de la corde)
-        # Tension faible ou corde rigide -> dispersion négative -> partiels aigus légèrement plus hauts
-        tension = max(0.0, min(1.0, float(string_tension)))
-        # Coefficient all-pass négatif borné pour garantie de stabilité absolue
-        self.a_disp = -0.34 * (1.0 - tension) * min(1.0, 350.0 / max(80.0, self.freq))
-
-        # 3. Calcul des retards de phase et ajustement exact du délai fractionnaire Thiran
-        tau_loss = _phase_delay_at(
-            np.array([1.0 - self.p_sustain]), np.array([1.0, -self.p_sustain]), self.w0
-        )
-        tau_disp = _phase_delay_at(
-            np.array([self.a_disp, 1.0]), np.array([1.0, self.a_disp]), self.w0
-        )
-
-        rem = self.period_total - tau_loss - tau_disp
-        n_int = max(4, int(math.floor(rem)))
-        delta = rem - n_int
-        if delta < 0.20 and n_int > 4:
-            n_int -= 1
-            delta += 1.0
-
-        # Raffinement itératif du coefficient Thiran pour une justesse parfaite même dans l'aigu
-        eta = (1.0 - delta) / (1.0 + delta)
-        for _ in range(3):
-            tau_frac = _phase_delay_at(np.array([eta, 1.0]), np.array([1.0, eta]), self.w0)
-            err = delta - tau_frac
-            delta_corr = max(0.08, min(1.6, delta + err))
-            eta = (1.0 - delta_corr) / (1.0 + delta_corr)
-        eta = max(-0.78, min(0.78, eta))
-
-        self.n_int = n_int
-        self.eta = eta
-
-        # Précalcul des coefficients combinés (Sustain & Release) : ordre 3
-        self.b_sustain, self.a_sustain = self._build_loop_coeffs(self.g_sustain, self.p_sustain)
-        self.b_release, self.a_release = self._build_loop_coeffs(self.g_release, self.p_release)
 
         # État interne persistant (ligne à retard circulaire + mémoire IIR + DC blocker)
-        self.ring = np.zeros(self.n_int, dtype=np.float64)
-        self.ring_pos = 0
-        self.zi_loop = np.zeros(len(self.a_sustain) - 1, dtype=np.float64)
-        self.zi_dc = np.zeros(1, dtype=np.float64)
         self.in_release = False
         self._native = None
         if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_guitar_plane_create is not None:
-            b_sus_c = np.ascontiguousarray(self.b_sustain, dtype=np.float64)
-            a_sus_c = np.ascontiguousarray(self.a_sustain, dtype=np.float64)
-            b_rel_c = np.ascontiguousarray(self.b_release, dtype=np.float64)
-            a_rel_c = np.ascontiguousarray(self.a_release, dtype=np.float64)
             self._native = dsp_native.nova_guitar_plane_create(
                 int(self.n_int),
-                b_sus_c.ctypes.data_as(dsp_native.c_double_p),
-                a_sus_c.ctypes.data_as(dsp_native.c_double_p),
-                b_rel_c.ctypes.data_as(dsp_native.c_double_p),
-                a_rel_c.ctypes.data_as(dsp_native.c_double_p),
+                self.b_sustain.ctypes.data_as(dsp_native.c_double_p),
+                self.a_sustain.ctypes.data_as(dsp_native.c_double_p),
+                self.b_release.ctypes.data_as(dsp_native.c_double_p),
+                self.a_release.ctypes.data_as(dsp_native.c_double_p),
             )
+        if self._native is None:
+            self.ring = np.zeros(self.n_int, dtype=np.float64)
+            self.ring_pos = 0
+            self.zi_loop = np.zeros(len(self.a_sustain) - 1, dtype=np.float64)
+            self.zi_dc = np.zeros(1, dtype=np.float64)
+        else:
+            self.ring = None
+            self.ring_pos = 0
+            self.zi_loop = None
+            self.zi_dc = None
 
     def __del__(self):
         native = getattr(self, "_native", None)
@@ -333,6 +371,11 @@ class WaveguideStringPlane:
             )
             return out
 
+        if self.ring is None:
+            self.ring = np.zeros(self.n_int, dtype=np.float64)
+            self.ring_pos = 0
+            self.zi_loop = np.zeros(len(self.a_sustain) - 1, dtype=np.float64)
+            self.zi_dc = np.zeros(1, dtype=np.float64)
         b, a = (self.b_release, self.a_release) if self.in_release else (self.b_sustain, self.a_sustain)
         out = np.empty(n_out, dtype=np.float64)
 
@@ -553,14 +596,15 @@ class GuitarBodyOrPickupProcessor:
         if len(signal) == 0:
             return signal
         if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_guitar_body_process is not None:
-            x_c = np.ascontiguousarray(signal, dtype=np.float64)
-            out = np.empty(len(x_c), dtype=np.float64)
+            x_c = signal if (signal.dtype == np.float64 and signal.flags.c_contiguous) else np.ascontiguousarray(signal, dtype=np.float64)
+            n_sig = len(x_c)
+            out = np.empty(n_sig, dtype=np.float64)
             mode_id = _GUITAR_MODE_MAP.get(mode, 3)
             dsp_native.nova_guitar_body_process(
                 ctypes.byref(self._native_state),
-                x_c.ctypes.data_as(dsp_native.c_double_p),
-                out.ctypes.data_as(dsp_native.c_double_p),
-                len(x_c),
+                ctypes.byref(ctypes.c_double.from_buffer(x_c)) if x_c.flags.writeable else x_c.ctypes.data_as(dsp_native.c_double_p),
+                ctypes.byref(ctypes.c_double.from_buffer(out)),
+                n_sig,
                 mode_id,
                 float(body_resonance),
                 float(pickup_position),
@@ -599,6 +643,34 @@ class GuitarBodyOrPickupProcessor:
             for f in self._filters:
                 out, f["zi"] = _lfilter_fast(f["b"], f["a"], out, f["zi"])
             return out
+
+
+@lru_cache(maxsize=512)
+def _cached_pluck_excitation(
+    length_samples: int,
+    period_samples: float,
+    sample_rate: int,
+    velocity: int,
+    pluck_position: float,
+    pick_attack: float,
+    guitar_mode: str,
+    eff_seed: int,
+    use_scipy: bool,
+) -> np.ndarray:
+    rng = np.random.default_rng(eff_seed)
+    exc = generate_pluck_excitation(
+        length_samples=length_samples,
+        period_samples=period_samples,
+        sample_rate=sample_rate,
+        velocity=velocity,
+        pluck_position=pluck_position,
+        pick_attack=pick_attack,
+        guitar_mode=guitar_mode,
+        rng=rng,
+    )
+    exc_c = np.ascontiguousarray(exc, dtype=np.float64)
+    exc_c.setflags(write=False)
+    return exc_c
 
 
 class GuitarStringVoice:
@@ -659,19 +731,26 @@ class GuitarStringVoice:
                 palm_mute=palm_mute,
             )
 
-        rng = np.random.default_rng(seed if seed is not None else (self.pitch * 131 + self.velocity * 17))
+        eff_seed = int(seed) if seed is not None else (self.pitch * 131 + self.velocity * 17)
         exc_len = min(int(0.045 * self.sample_rate), max(64, int(self.plane_a.period_total * 2.5)))
-        self.excitation = generate_pluck_excitation(
-            length_samples=exc_len,
-            period_samples=self.plane_a.period_total,
-            sample_rate=self.sample_rate,
-            velocity=self.velocity,
-            pluck_position=pluck_position,
-            pick_attack=pick_attack,
-            guitar_mode=guitar_mode,
-            rng=rng,
+        self._exc_c = _cached_pluck_excitation(
+            int(exc_len),
+            float(self.plane_a.period_total),
+            int(self.sample_rate),
+            int(self.velocity),
+            float(pluck_position),
+            float(pick_attack),
+            str(guitar_mode),
+            eff_seed,
+            bool(HAS_SCIPY),
         )
-        self._exc_c = np.ascontiguousarray(self.excitation, dtype=np.float64)
+        self._exc_ptr = (
+            self._exc_c.ctypes.data_as(dsp_native.c_double_p)
+            if dsp_native.c_double_p is not None
+            else None
+        )
+        self._exc_len = len(self._exc_c)
+        self.excitation = self._exc_c
         self.rendered_samples = 0
 
     def skip_samples(self, count: int) -> None:
@@ -686,8 +765,8 @@ class GuitarStringVoice:
             dsp_native.nova_guitar_voice_render(
                 self.plane_a._native,
                 self.plane_b._native if self.plane_b is not None else None,
-                self._exc_c.ctypes.data_as(dsp_native.c_double_p),
-                len(self._exc_c),
+                self._exc_ptr,
+                self._exc_len,
                 self.rendered_samples,
                 self.note_dur_samples,
                 None,
@@ -715,11 +794,11 @@ class GuitarStringVoice:
             dsp_native.nova_guitar_voice_render(
                 self.plane_a._native,
                 self.plane_b._native if self.plane_b is not None else None,
-                self._exc_c.ctypes.data_as(dsp_native.c_double_p),
-                len(self._exc_c),
+                self._exc_ptr,
+                self._exc_len,
                 self.rendered_samples,
                 self.note_dur_samples,
-                out.ctypes.data_as(dsp_native.c_double_p),
+                ctypes.byref(ctypes.c_double.from_buffer(out)),
                 count,
             )
             self.rendered_samples += count
@@ -810,15 +889,15 @@ class GuitarStereoWidener:
             return mono, mono
 
         if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_guitar_widener_process is not None:
-            x_c = np.ascontiguousarray(mono, dtype=np.float64)
+            x_c = mono if (mono.dtype == np.float64 and mono.flags.c_contiguous) else np.ascontiguousarray(mono, dtype=np.float64)
             n = len(x_c)
             out_l = np.empty(n, dtype=np.float64)
             out_r = np.empty(n, dtype=np.float64)
             dsp_native.nova_guitar_widener_process(
                 ctypes.byref(self._native_state),
-                x_c.ctypes.data_as(dsp_native.c_double_p),
-                out_l.ctypes.data_as(dsp_native.c_double_p),
-                out_r.ctypes.data_as(dsp_native.c_double_p),
+                ctypes.byref(ctypes.c_double.from_buffer(x_c)) if x_c.flags.writeable else x_c.ctypes.data_as(dsp_native.c_double_p),
+                ctypes.byref(ctypes.c_double.from_buffer(out_l)),
+                ctypes.byref(ctypes.c_double.from_buffer(out_r)),
                 n,
                 w,
             )

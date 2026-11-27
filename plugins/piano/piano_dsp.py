@@ -1,4 +1,5 @@
 """Modal-physical synthesis of struck grand piano strings, hammer impact, duplex scale, and room."""
+import ctypes
 from dataclasses import dataclass
 from functools import lru_cache
 import math
@@ -298,19 +299,21 @@ def _project_modes(output, modes, state, elapsed, sample_rate):
     rem = total - n_full * MODE_BLOCK_FRAMES
 
     if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_piano_eval_positions is not None:
-        poles_c = np.ascontiguousarray(modes.poles, dtype=np.complex128)
-        state_c = np.ascontiguousarray(state, dtype=np.complex128)
+        poles_c = modes.poles if (modes.poles.dtype == np.complex128 and modes.poles.flags.c_contiguous) else np.ascontiguousarray(modes.poles, dtype=np.complex128)
+        state_c = state if (state.dtype == np.complex128 and state.flags.c_contiguous) else np.ascontiguousarray(state, dtype=np.complex128)
         num_modes = len(poles_c)
+        poles_ptr = ctypes.byref(ctypes.c_double.from_buffer(poles_c)) if poles_c.flags.writeable else poles_c.view(np.float64).ctypes.data_as(dsp_native.c_double_p)
+        state_ptr = ctypes.byref(ctypes.c_double.from_buffer(state_c)) if state_c.flags.writeable else state_c.view(np.float64).ctypes.data_as(dsp_native.c_double_p)
         if n_full > 0:
             positions = np.empty((n_full, num_modes), dtype=np.complex64)
             dsp_native.nova_piano_eval_positions(
-                poles_c.view(np.float64).ctypes.data_as(dsp_native.c_double_p),
-                state_c.view(np.float64).ctypes.data_as(dsp_native.c_double_p),
+                poles_ptr,
+                state_ptr,
                 num_modes,
                 n_full,
                 float(elapsed),
                 float(MODE_BLOCK_FRAMES) / float(sample_rate),
-                positions.view(np.float32).ctypes.data_as(dsp_native.c_float_p),
+                ctypes.byref(ctypes.c_float.from_buffer(positions)),
             )
             blocks = positions @ modes.kernel_t
             output[:n_full * MODE_BLOCK_FRAMES] = blocks.imag.ravel()
@@ -318,13 +321,13 @@ def _project_modes(output, modes, state, elapsed, sample_rate):
             age = elapsed + (n_full * MODE_BLOCK_FRAMES) / sample_rate
             position = np.empty(num_modes, dtype=np.complex64)
             dsp_native.nova_piano_eval_positions(
-                poles_c.view(np.float64).ctypes.data_as(dsp_native.c_double_p),
-                state_c.view(np.float64).ctypes.data_as(dsp_native.c_double_p),
+                poles_ptr,
+                state_ptr,
                 num_modes,
                 1,
                 float(age),
                 0.0,
-                position.view(np.float32).ctypes.data_as(dsp_native.c_float_p),
+                ctypes.byref(ctypes.c_float.from_buffer(position)),
             )
             output[n_full * MODE_BLOCK_FRAMES:] = (modes.kernel[:rem] @ position).imag
         return
@@ -493,18 +496,20 @@ def render_bridge_force(pitch, velocity, first_sample, frames, held_samples, sam
         out[:thump_n] += strike.thump[first_sample:first_sample + thump_n]
 
     if first_sample + frames > held_samples:
-        after = np.maximum(np.arange(first_sample, first_sample + frames) - held_samples, 0)
-        released = after.astype(np.float32) / sample_rate
-        if pitch < 90:
-            # Lowering the felt damper takes a few milliseconds, then rapidly
-            # dissipates the transverse and longitudinal motion of the string.
-            contact_time = .012
-            load = released + contact_time * np.expm1(-released / contact_time)
-            out *= np.exp(-(40.0 + .21 * (pitch - 21)) * load)
-            tail = DAMPED_TAIL_SEC
-        else:
-            tail = DRY_TAIL_SEC
-        out *= np.clip((tail - released) / .05, 0, 1)
+        rel_start = max(0, held_samples - first_sample)
+        rel_len = frames - rel_start
+        if rel_len > 0:
+            s0 = max(0, first_sample - held_samples)
+            released = np.arange(s0, s0 + rel_len, dtype=np.float32) * np.float32(1.0 / sample_rate)
+            tail_view = out[rel_start:]
+            if pitch < 90:
+                contact_time = np.float32(0.012)
+                load = released + contact_time * np.expm1(-released / contact_time)
+                tail_view *= np.exp(np.float32(-(40.0 + 0.21 * (pitch - 21))) * load)
+                tail = np.float32(DAMPED_TAIL_SEC)
+            else:
+                tail = np.float32(DRY_TAIL_SEC)
+            tail_view *= np.clip((tail - released) * np.float32(20.0), np.float32(0.0), np.float32(1.0))
     return out
 
 

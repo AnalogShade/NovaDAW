@@ -141,6 +141,7 @@ nova_guitar_plane_destroy = None
 nova_guitar_plane_reset = None
 nova_guitar_plane_step = None
 nova_guitar_voice_render = None
+nova_guitar_voices_batch_accum = None
 nova_guitar_body_reset = None
 nova_guitar_body_process = None
 nova_guitar_widener_reset = None
@@ -171,7 +172,7 @@ def _bind_library() -> None:
     global nova_comp_reset, nova_comp_process, nova_mixer_process
     global nova_sb_create, nova_sb_destroy, nova_sb_reset, nova_sb_process, nova_piano_eval_positions
     global nova_guitar_plane_create, nova_guitar_plane_destroy, nova_guitar_plane_reset
-    global nova_guitar_plane_step, nova_guitar_voice_render
+    global nova_guitar_plane_step, nova_guitar_voice_render, nova_guitar_voices_batch_accum
     global nova_guitar_body_reset, nova_guitar_body_process
     global nova_guitar_widener_reset, nova_guitar_widener_process
     global nova_synth_osc_process, nova_synth_adsr_process
@@ -415,6 +416,26 @@ def _bind_library() -> None:
         ]
         g_voice_render.restype = None
 
+        g_voices_batch = getattr(loaded, "nova_guitar_voices_batch_accum", None)
+        if g_voices_batch is not None:
+            g_voices_batch.argtypes = [
+                ctypes.c_int32,                 # num_voices
+                ctypes.POINTER(ctypes.c_void_p),  # planes_a
+                ctypes.POINTER(ctypes.c_void_p),  # planes_b
+                ctypes.POINTER(c_double_p),     # exc_ptrs
+                c_int32_p,                      # exc_lens
+                c_int32_p,                      # start_samples
+                c_int32_p,                      # skip_counts
+                c_int32_p,                      # note_durs
+                c_int32_p,                      # local_starts
+                c_int32_p,                      # render_counts
+                c_double_p,                     # side_gains
+                c_double_p,                     # mono_mix
+                c_double_p,                     # side_mix
+                ctypes.c_int32,                 # total_frames
+            ]
+            g_voices_batch.restype = None
+
         g_body_state_p = ctypes.POINTER(NovaGuitarBodyState)
         g_body_reset = loaded.nova_guitar_body_reset
         g_body_reset.argtypes = [g_body_state_p]
@@ -624,6 +645,7 @@ def _bind_library() -> None:
         nova_guitar_plane_reset = g_plane_reset
         nova_guitar_plane_step = g_plane_step
         nova_guitar_voice_render = g_voice_render
+        nova_guitar_voices_batch_accum = g_voices_batch
         nova_guitar_body_reset = g_body_reset
         nova_guitar_body_process = g_body_process
         nova_guitar_widener_reset = g_wid_reset

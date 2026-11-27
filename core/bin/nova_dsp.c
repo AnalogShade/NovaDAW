@@ -2501,6 +2501,78 @@ NOVA_API void NOVA_CALL nova_guitar_voice_render(
     }
 }
 
+NOVA_API void NOVA_CALL nova_guitar_voices_batch_accum(
+    int32_t num_voices,
+    void** planes_a,
+    void** planes_b,
+    const double** exc_ptrs,
+    const int32_t* exc_lens,
+    const int32_t* start_samples,
+    const int32_t* skip_counts,
+    const int32_t* note_durs,
+    const int32_t* local_starts,
+    const int32_t* render_counts,
+    const double* side_gains,
+    double* mono_mix,
+    double* side_mix,
+    int32_t total_frames
+) {
+    double tmp[512];
+    int32_t v;
+    if (num_voices <= 0 || !planes_a || !mono_mix || total_frames <= 0) {
+        return;
+    }
+    for (v = 0; v < num_voices; ++v) {
+        NovaGuitarPlane* pa = (NovaGuitarPlane*)planes_a[v];
+        NovaGuitarPlane* pb = planes_b ? (NovaGuitarPlane*)planes_b[v] : NULL;
+        const double* exc = exc_ptrs ? exc_ptrs[v] : NULL;
+        int32_t elen = exc_lens ? exc_lens[v] : 0;
+        int32_t cur_s = start_samples[v];
+        int32_t sk = skip_counts ? skip_counts[v] : 0;
+        int32_t ndur = note_durs[v];
+        int32_t ls = local_starts[v];
+        int32_t rc = render_counts[v];
+        double sg = side_gains ? side_gains[v] : 0.0;
+        int32_t pos = 0;
+
+        if (!pa) {
+            continue;
+        }
+        if (sk > 0) {
+            nova_guitar_voice_render(pa, pb, exc, elen, cur_s, ndur, NULL, sk);
+            cur_s += sk;
+        }
+        if (ls < 0 || rc <= 0 || ls >= total_frames) {
+            continue;
+        }
+        if (ls + rc > total_frames) {
+            rc = total_frames - ls;
+        }
+        while (pos < rc) {
+            int32_t blk = rc - pos;
+            int32_t i;
+            double* dst_m = mono_mix + ls + pos;
+            if (blk > 512) {
+                blk = 512;
+            }
+            nova_guitar_voice_render(pa, pb, exc, elen, cur_s + pos, ndur, tmp, blk);
+            if (side_mix && sg != 0.0) {
+                double* dst_s = side_mix + ls + pos;
+                for (i = 0; i < blk; ++i) {
+                    double val = tmp[i];
+                    dst_m[i] += val;
+                    dst_s[i] += val * sg;
+                }
+            } else {
+                for (i = 0; i < blk; ++i) {
+                    dst_m[i] += tmp[i];
+                }
+            }
+            pos += blk;
+        }
+    }
+}
+
 typedef struct NovaGuitarBodyState {
     int32_t cached_mode;
     int32_t cached_sr;
