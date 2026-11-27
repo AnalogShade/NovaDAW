@@ -6,6 +6,8 @@ import math
 import numpy as np
 from scipy.signal import butter, sosfilt
 
+from core import dsp_native
+
 from plugins.piano.piano_soundboard import PianoSoundboard
 from plugins.piano.piano_voicing import (
     INHARMONICITY, KEYS, LATE_LOSS, PROMPT_SHARE, band_indices, modal_voicing,
@@ -293,12 +295,45 @@ def _project_modes(output, modes, state, elapsed, sample_rate):
     if total == 0:
         return
     n_full = total // MODE_BLOCK_FRAMES
+    rem = total - n_full * MODE_BLOCK_FRAMES
+
+    if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_piano_eval_positions is not None:
+        poles_c = np.ascontiguousarray(modes.poles, dtype=np.complex128)
+        state_c = np.ascontiguousarray(state, dtype=np.complex128)
+        num_modes = len(poles_c)
+        if n_full > 0:
+            positions = np.empty((n_full, num_modes), dtype=np.complex64)
+            dsp_native.nova_piano_eval_positions(
+                poles_c.view(np.float64).ctypes.data_as(dsp_native.c_double_p),
+                state_c.view(np.float64).ctypes.data_as(dsp_native.c_double_p),
+                num_modes,
+                n_full,
+                float(elapsed),
+                float(MODE_BLOCK_FRAMES) / float(sample_rate),
+                positions.view(np.float32).ctypes.data_as(dsp_native.c_float_p),
+            )
+            blocks = positions @ modes.kernel_t
+            output[:n_full * MODE_BLOCK_FRAMES] = blocks.imag.ravel()
+        if rem > 0:
+            age = elapsed + (n_full * MODE_BLOCK_FRAMES) / sample_rate
+            position = np.empty(num_modes, dtype=np.complex64)
+            dsp_native.nova_piano_eval_positions(
+                poles_c.view(np.float64).ctypes.data_as(dsp_native.c_double_p),
+                state_c.view(np.float64).ctypes.data_as(dsp_native.c_double_p),
+                num_modes,
+                1,
+                float(age),
+                0.0,
+                position.view(np.float32).ctypes.data_as(dsp_native.c_float_p),
+            )
+            output[n_full * MODE_BLOCK_FRAMES:] = (modes.kernel[:rem] @ position).imag
+        return
+
     if n_full > 0:
         ages = elapsed + (np.arange(n_full, dtype=np.float64) * MODE_BLOCK_FRAMES) / sample_rate
         positions = (state[None, :] * np.exp(ages[:, None] * modes.poles[None, :])).astype(np.complex64)
         blocks = positions @ modes.kernel_t
         output[:n_full * MODE_BLOCK_FRAMES] = blocks.imag.ravel()
-    rem = total - n_full * MODE_BLOCK_FRAMES
     if rem > 0:
         age = elapsed + (n_full * MODE_BLOCK_FRAMES) / sample_rate
         position = (state * np.exp(age * modes.poles)).astype(np.complex64)
@@ -346,16 +381,15 @@ def _hammer_at_bridge(modes, drive, duration, core_share, sample_rate):
     return force, separation
 
 
-def _hammer_thump(pitch, velocity, sample_rate, hardness):
-    """Synthesize subtle, non-pitched mechanical keybed mass and wool-felt impact brush."""
+@lru_cache(maxsize=256)
+def _hammer_thump_base(pitch, sample_rate, hardness_key):
+    """Cached velocity-independent hammer mechanical thump & wool-felt brush envelopes."""
     register = np.clip((pitch - 21) / 87, 0.0, 1.0)
-    strike = velocity / 127.0
     frames = max(64, round(0.032 * sample_rate))
     t = np.arange(frames, dtype=np.float64) / sample_rate
     rng = np.random.default_rng(10007 * pitch + 313)
 
     # 1. Aperiodic low-frequency keybed/rim felt mass (42-155 Hz broadband impulse).
-    #    Zero pitched sine oscillators so it never sounds like tapping a hollow guitar box.
     thud_noise = rng.standard_normal(frames)
     thud_sos = butter(
         2, [min(42.0, 0.12 * sample_rate), min(145.0 + 45.0 * register, 0.30 * sample_rate)],
@@ -364,27 +398,37 @@ def _hammer_thump(pitch, velocity, sample_rate, hardness):
     thud_filtered = sosfilt(thud_sos, thud_noise)
     thud_filtered /= np.sqrt(np.mean(thud_filtered**2) + 1e-12)
     thud_env = (1.0 - np.exp(-t / 0.0022)) * np.exp(-t / (0.009 + 0.005 * (1.0 - register)))
-    thud_amp = (0.048 + 0.055 * (1.0 - register)) * (strike ** 1.40)
-    wood = thud_filtered * thud_env * thud_amp
+    thud_scale = 0.048 + 0.055 * (1.0 - register)
 
     # 2. Compressed wool-felt hammer-crown brush (short 2.5-4.5 ms velvet transient).
     noise = rng.standard_normal(frames)
-    low_hz = min(620.0 + 780.0 * register + 380.0 * hardness, 0.28 * sample_rate)
-    high_hz = min(1950.0 + 1850.0 * register + 1450.0 * hardness, 0.42 * sample_rate)
+    low_hz = min(620.0 + 780.0 * register + 380.0 * hardness_key, 0.28 * sample_rate)
+    high_hz = min(1950.0 + 1850.0 * register + 1450.0 * hardness_key, 0.42 * sample_rate)
     if high_hz <= low_hz + 80.0:
         high_hz = min(low_hz + 150.0, 0.44 * sample_rate)
     sos = butter(2, [low_hz, high_hz], btype="bandpass", fs=sample_rate, output="sos")
     felt_noise = sosfilt(sos, noise)
     felt_noise /= np.sqrt(np.mean(felt_noise**2) + 1e-12)
 
-    knock_decay = 0.0026 + 0.0020 * (1.0 - register) * (1.0 - 0.35 * hardness)
+    knock_decay = 0.0026 + 0.0020 * (1.0 - register) * (1.0 - 0.35 * hardness_key)
     knock_env = (1.0 - np.exp(-t / 0.0006)) * np.exp(-t / knock_decay)
-    knock_amp = (0.018 + 0.044 * hardness) * (0.65 + 0.55 * register) * (strike ** 1.70)
-    knock = felt_noise * knock_env * knock_amp
+    knock_scale = (0.018 + 0.044 * hardness_key) * (0.65 + 0.55 * register)
 
     fade = np.clip((frames - 1 - np.arange(frames)) / max(1, round(0.004 * sample_rate)), 0.0, 1.0)
-    out = (wood + knock) * fade
-    out[0] = 0.0
+    wood_base = thud_filtered * thud_env * thud_scale * fade
+    knock_base = felt_noise * knock_env * knock_scale * fade
+    wood_base[0] = 0.0
+    knock_base[0] = 0.0
+    wood_base.setflags(write=False)
+    knock_base.setflags(write=False)
+    return wood_base, knock_base
+
+
+def _hammer_thump(pitch, velocity, sample_rate, hardness):
+    """Synthesize subtle, non-pitched mechanical keybed mass and wool-felt impact brush."""
+    strike = velocity / 127.0
+    wood_base, knock_base = _hammer_thump_base(int(pitch), int(sample_rate), round(float(hardness), 4))
+    out = wood_base * (strike ** 1.40) + knock_base * (strike ** 1.70)
     return out.astype(np.float32)
 
 

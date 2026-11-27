@@ -148,21 +148,26 @@ class NovaGuitarAmpPlugin(BasePlugin):
         if audio is None or len(audio) == 0:
             return audio
 
-        if audio.ndim == 1:
+        if audio.dtype == np.float32 and audio.ndim == 2 and audio.shape[1] == 2 and audio.flags.c_contiguous:
+            in_buf = audio
+        elif audio.ndim == 1:
             in_buf = np.column_stack((audio, audio)).astype(np.float32)
+        elif audio.ndim == 2 and audio.shape[1] == 1:
+            in_buf = np.column_stack((audio[:, 0], audio[:, 0])).astype(np.float32)
+        elif audio.ndim == 2 and audio.shape[1] > 2:
+            in_buf = np.ascontiguousarray(audio[:, :2], dtype=np.float32)
         else:
             in_buf = np.ascontiguousarray(audio, dtype=np.float32)
 
-        max_in = float(np.max(np.abs(in_buf)))
-        in_pk_db = 20.0 * math.log10(max(1e-5, max_in))
-        self.current_input_peak_db = in_pk_db
-
         if not self.enabled:
+            max_in = float(np.max(np.abs(in_buf)))
+            in_pk_db = 20.0 * math.log10(max(1e-5, max_in))
+            self.current_input_peak_db = in_pk_db
             self.current_output_peak_db = in_pk_db
             return in_buf
 
         with self._dsp_lock:
-            out_buf = self._dsp.process_block(
+            out_buf, in_pk_db, out_pk_db = self._dsp.process_block_with_peaks(
                 in_buf=in_buf,
                 sample_rate=sample_rate,
                 distortion=self.distortion,
@@ -173,8 +178,8 @@ class NovaGuitarAmpPlugin(BasePlugin):
                 cab_enabled=self.cab_enabled,
             )
 
-        max_out = float(np.max(np.abs(out_buf))) if len(out_buf) > 0 else 0.0
-        self.current_output_peak_db = 20.0 * math.log10(max(1e-5, max_out))
+        self.current_input_peak_db = in_pk_db
+        self.current_output_peak_db = out_pk_db
         return out_buf
 
     def get_state(self) -> Dict[str, Any]:

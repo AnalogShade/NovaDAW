@@ -12,9 +12,12 @@ Architecture studio temps réel sans clic inter-buffers :
 6. Simulateur de Baffle (Cabinet Sim 1x12 / 4x12) commutable
 7. Volume Master avec protection douce anti-clipping
 """
+import ctypes
 import math
 from typing import Optional, Tuple, Any
 import numpy as np
+
+from core import dsp_native
 
 try:
     import scipy.signal as sig
@@ -211,6 +214,24 @@ class GuitarAmpDSP:
         self._cab_zi: Optional[np.ndarray] = None
 
         self._cached_sr: Optional[int] = None
+        self._c_in_pk = ctypes.c_float(-60.0)
+        self._c_out_pk = ctypes.c_float(-60.0)
+        self._c_in_pk_p = ctypes.byref(self._c_in_pk)
+        self._c_out_pk_p = ctypes.byref(self._c_out_pk)
+        self._native = (
+            dsp_native.nova_amp_create(self.sample_rate)
+            if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_amp_create is not None
+            else None
+        )
+
+    def __del__(self):
+        native = getattr(self, "_native", None)
+        if native is not None and dsp_native is not None and dsp_native.nova_amp_destroy is not None:
+            try:
+                dsp_native.nova_amp_destroy(native)
+            except Exception:
+                pass
+            self._native = None
 
     def _reset_distortion_states(self) -> None:
         if self._tight_zi is not None:
@@ -234,6 +255,8 @@ class GuitarAmpDSP:
         self._dist_active = False
 
     def reset(self) -> None:
+        if self._native is not None and dsp_native.nova_amp_reset is not None:
+            dsp_native.nova_amp_reset(self._native)
         self._prev_sample.fill(0.0)
         if self._pre_zi is not None:
             self._pre_zi.fill(0.0)
@@ -351,6 +374,40 @@ class GuitarAmpDSP:
         if n_samples == 0:
             return in_buf
 
+        if self._native is not None and dsp_native.nova_amp_process is not None:
+            if in_buf.ndim == 1:
+                in_c = np.column_stack((in_buf, in_buf)).astype(np.float32)
+            elif in_buf.ndim == 2 and in_buf.shape[1] == 1:
+                in_c = np.column_stack((in_buf[:, 0], in_buf[:, 0])).astype(np.float32)
+            elif in_buf.ndim == 2 and in_buf.shape[1] > 2:
+                in_c = np.ascontiguousarray(in_buf[:, :2], dtype=np.float32)
+            else:
+                in_c = np.ascontiguousarray(in_buf, dtype=np.float32)
+            out = np.empty((n_samples, 2), dtype=np.float32)
+            dsp_native.nova_amp_process(
+                self._native,
+                in_c.ctypes.data_as(dsp_native.c_float_p),
+                out.ctypes.data_as(dsp_native.c_float_p),
+                int(n_samples),
+                max(8000, int(sample_rate)),
+                float(distortion),
+                float(low_db),
+                float(mid_db),
+                float(treble_db),
+                float(volume),
+                1 if cab_enabled else 0,
+                None,
+                None,
+            )
+            return out
+
+        if in_buf.ndim == 1:
+            in_buf = np.column_stack((in_buf, in_buf))
+        elif in_buf.ndim == 2 and in_buf.shape[1] == 1:
+            in_buf = np.column_stack((in_buf[:, 0], in_buf[:, 0]))
+        elif in_buf.ndim == 2 and in_buf.shape[1] > 2:
+            in_buf = in_buf[:, :2]
+
         sr = max(8000, int(sample_rate))
         self._ensure_static_filters(sr)
         self._ensure_tone_stack(low_db, mid_db, treble_db, sr)
@@ -440,3 +497,64 @@ class GuitarAmpDSP:
             out = np.tanh(out * 0.90) * 1.05
 
         return out.astype(np.float32)
+
+    def process_block_with_peaks(
+        self,
+        in_buf: np.ndarray,
+        sample_rate: int,
+        distortion: float,
+        low_db: float,
+        mid_db: float,
+        treble_db: float,
+        volume: float,
+        cab_enabled: bool = True,
+    ) -> Tuple[np.ndarray, float, float]:
+        """Fast path returning (out_buf, in_peak_db, out_peak_db) in a single C pass."""
+        n_samples = len(in_buf)
+        if n_samples == 0:
+            return in_buf, -60.0, -60.0
+
+        if self._native is not None and dsp_native.nova_amp_process is not None:
+            if in_buf.dtype == np.float32 and in_buf.ndim == 2 and in_buf.shape[1] == 2 and in_buf.flags.c_contiguous:
+                in_c = in_buf
+            elif in_buf.ndim == 1:
+                in_c = np.column_stack((in_buf, in_buf)).astype(np.float32)
+            elif in_buf.ndim == 2 and in_buf.shape[1] == 1:
+                in_c = np.column_stack((in_buf[:, 0], in_buf[:, 0])).astype(np.float32)
+            elif in_buf.ndim == 2 and in_buf.shape[1] > 2:
+                in_c = np.ascontiguousarray(in_buf[:, :2], dtype=np.float32)
+            else:
+                in_c = np.ascontiguousarray(in_buf, dtype=np.float32)
+            out = np.empty((n_samples, 2), dtype=np.float32)
+            dsp_native.nova_amp_process(
+                self._native,
+                in_c.ctypes.data_as(dsp_native.c_float_p),
+                out.ctypes.data_as(dsp_native.c_float_p),
+                int(n_samples),
+                max(8000, int(sample_rate)),
+                float(distortion),
+                float(low_db),
+                float(mid_db),
+                float(treble_db),
+                float(volume),
+                1 if cab_enabled else 0,
+                self._c_in_pk_p,
+                self._c_out_pk_p,
+            )
+            return out, float(self._c_in_pk.value), float(self._c_out_pk.value)
+
+        max_in = float(np.max(np.abs(in_buf)))
+        in_pk_db = 20.0 * math.log10(max(1e-5, max_in))
+        out = self.process_block(
+            in_buf=in_buf,
+            sample_rate=sample_rate,
+            distortion=distortion,
+            low_db=low_db,
+            mid_db=mid_db,
+            treble_db=treble_db,
+            volume=volume,
+            cab_enabled=cab_enabled,
+        )
+        max_out = float(np.max(np.abs(out))) if len(out) > 0 else 0.0
+        out_pk_db = 20.0 * math.log10(max(1e-5, max_out))
+        return out, in_pk_db, out_pk_db

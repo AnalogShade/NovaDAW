@@ -9,15 +9,19 @@ Caractéristiques :
 - Effets d'espace : Ping-Pong Delay, Reverb Studio, Saturation analogique.
 - Contrôlable à 100% par le protocole MCP et entièrement sérialisable dans les sessions .ndaw.
 """
+import ctypes
 import uuid
 import copy
 import threading
 from typing import Dict, Any, Optional, List, Tuple
 import numpy as np
 
+from core import dsp_native
 from plugins.base import BasePlugin
 from plugins.registry import register_plugin
 from plugins.synth.synth_dsp import (
+    _OSC_WAVE_MAP,
+    _SVF_TYPE_MAP,
     pitch_to_freq,
     generate_oscillator,
     compute_adsr_envelope,
@@ -25,6 +29,19 @@ from plugins.synth.synth_dsp import (
     StereoPingPongDelay,
     StereoStudioReverb
 )
+
+_LFO_WAVE_MAP = {
+    "sine": 0,
+    "triangle": 1,
+    "saw": 2,
+    "square": 3,
+}
+
+_LFO_TARGET_MAP = {
+    "cutoff": 0,
+    "pitch": 1,
+    "amp": 2,
+}
 
 
 class SynthLayer:
@@ -1196,8 +1213,11 @@ class NovaSynthPlugin(BasePlugin):
             active_candidates.sort(key=lambda item: item[1], reverse=True)
             active_candidates = active_candidates[:6]
 
-        # Vecteur de base normalisé précalculé une seule fois pour tout le bloc
-        t_base = np.arange(frames, dtype=np.float64) / sample_rate if active_candidates else None
+        # Vecteur de base normalisé précalculé paresseusement si le chemin Python est requis
+        t_base = None
+        use_native_layer = (
+            dsp_native.NATIVE_AVAILABLE and dsp_native.nova_synth_render_layer is not None
+        )
 
         # Rendu note par note
         for note, note_start_sec, note_off_sec, note_start_b, note_dur_b in active_candidates:
@@ -1207,7 +1227,7 @@ class NovaSynthPlugin(BasePlugin):
             t_start_rel = slice_start_sec - note_start_sec
             t_end_rel = slice_end_sec - note_start_sec
             note_off_rel = note_off_sec - note_start_sec
-            t_note = t_base + t_start_rel
+            t_note = None
 
             # Rendu pour chaque couche sonore
             for layer in active_layers:
@@ -1219,6 +1239,82 @@ class NovaSynthPlugin(BasePlugin):
                 if t_start_rel >= (note_off_rel + layer.release):
                     continue
 
+                bus_dest = max(0, min(9, layer.output_bus))
+                if bus_index is not None and bus_dest != bus_index:
+                    continue
+
+                wave_lower = (layer.waveform or "sine").lower().strip()
+                lfo_wave_id = _LFO_WAVE_MAP.get(layer.lfo_waveform, -1)
+                if (
+                    use_native_layer
+                    and wave_lower != "noise"
+                    and (not layer.lfo_enabled or layer.lfo_depth <= 0.01 or lfo_wave_id >= 0)
+                ):
+                    voice_key = (pitch, round(note_start_b, 4), layer.layer_id, getattr(note, "_live_id", None))
+                    svf = voice_svf_dict.get(voice_key)
+                    if svf is None:
+                        svf = ChamberlinSVF()
+                    bus_buf = buses.get(bus_dest)
+                    target_bus = bus_buf if bus_buf is not None else np.zeros((frames, 2), dtype=np.float32)
+
+                    effective_pitch = pitch + (layer.octave * 12) + layer.semitone + (layer.fine_tune / 100.0)
+                    freq = pitch_to_freq(effective_pitch)
+                    wave_id = _OSC_WAVE_MAP.get(wave_lower, 0)
+                    ftype_id = _SVF_TYPE_MAP.get((layer.filter_type or "lowpass").lower(), 0)
+                    lfo_target_id = _LFO_TARGET_MAP.get(layer.lfo_target, 3)
+
+                    rendered_ok = dsp_native.nova_synth_render_layer(
+                        ctypes.byref(svf._native_state),
+                        target_bus.ctypes.data_as(dsp_native.c_float_p),
+                        frames,
+                        int(sample_rate),
+                        float(t_start_rel),
+                        float(t_end_rel),
+                        float(note_off_rel),
+                        float(layer.attack),
+                        float(layer.decay),
+                        float(layer.sustain),
+                        float(layer.release),
+                        float(layer.volume),
+                        float(vel),
+                        float(layer.pan),
+                        float(freq),
+                        wave_id,
+                        float(layer.pulse_width),
+                        float(layer.fm_ratio),
+                        float(layer.fm_depth),
+                        float(layer.unison_detune),
+                        float(layer.unison_spread),
+                        float(layer.filter_env_amount),
+                        float(layer.filter_attack),
+                        float(layer.filter_decay),
+                        float(layer.filter_sustain),
+                        float(layer.filter_release),
+                        1 if layer.lfo_enabled else 0,
+                        lfo_wave_id if lfo_wave_id >= 0 else 0,
+                        float(layer.lfo_rate),
+                        float(layer.lfo_depth),
+                        lfo_target_id,
+                        float(slice_start_sec),
+                        float(slice_end_sec),
+                        ftype_id,
+                        float(layer.cutoff),
+                        float(layer.resonance),
+                        float(layer.drive),
+                    )
+                    if rendered_ok:
+                        active_keys.add(voice_key)
+                        if voice_key not in voice_svf_dict:
+                            voice_svf_dict[voice_key] = svf
+                        if bus_buf is None:
+                            buses[bus_dest] = target_bus
+                    continue
+
+                if t_note is None:
+                    if t_base is None:
+                        t_base = np.arange(frames, dtype=np.float64) / sample_rate
+                    t_note = t_base + t_start_rel
+
                 # 1. Enveloppe d'amplitude
                 amp_env = compute_adsr_envelope(
                     t_start_rel, t_end_rel, frames, note_off_rel,
@@ -1228,9 +1324,6 @@ class NovaSynthPlugin(BasePlugin):
                 if max_env <= 0.003 or (max_env * layer.volume * vel) <= 0.002:
                     continue
 
-                bus_dest = max(0, min(9, layer.output_bus))
-                if bus_index is not None and bus_dest != bus_index:
-                    continue
                 voice_key = (pitch, round(note_start_b, 4), layer.layer_id, getattr(note, "_live_id", None))
                 active_keys.add(voice_key)
 

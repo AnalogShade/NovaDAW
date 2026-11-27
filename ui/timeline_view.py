@@ -2,8 +2,11 @@
 ui/timeline_view.py - Règle temporelle, grille d'arrangement, clips et tête de lecture
 """
 from typing import Optional, Tuple, List, Set
+from bisect import bisect_left, bisect_right
 import copy
+import math
 import uuid
+import numpy as np
 from PySide6.QtWidgets import (
     QWidget, QScrollArea, QVBoxLayout, QHBoxLayout, QFrame, QMenu, QInputDialog, QToolTip
 )
@@ -11,7 +14,7 @@ from PySide6.QtGui import (
     QPainter, QColor, QPen, QBrush, QFont, QFontMetrics, QMouseEvent, QWheelEvent,
     QPolygonF, QCursor, QPixmap, QPainterPath
 )
-from PySide6.QtCore import Qt, Signal, QPointF, QRectF
+from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QRect
 from core.project import (
     Project, Track, MidiClip, AudioClip, MidiNote, ClipType,
     AutomationLane, AutomationPoint, format_automation_value
@@ -97,6 +100,9 @@ class TimelineRuler(QWidget):
         self.loop_end_beat = 16.0
         self.loop_enabled = False  # Désactivé par défaut au démarrage
         self.scroll_offset = 0.0
+        self._drawn_playhead_px: Optional[float] = None
+        self._expected_playhead_beat: Optional[float] = None
+        self._drawn_playhead_xform: Optional[Tuple[float, float]] = None
 
         # Aimantage & Grille temporelle
         self.snap_enabled = True
@@ -106,6 +112,42 @@ class TimelineRuler(QWidget):
         self._drag_anchor_beat = 0.0
         self._hovered_handle = None  # None, "start", "end", "region"
         self.setMouseTracking(True)
+
+        # Objets graphiques mis en cache pour éviter les allocations à 60 Hz
+        self._bg_color = QColor("#14151c")
+        self._bar_font = QFont("Consolas", 9, QFont.Bold)
+        self._handle_font = QFont("Segoe UI", 7, QFont.Bold)
+        self._hud_font = QFont("Segoe UI", 8, QFont.Bold)
+        self._hud_fm = QFontMetrics(self._hud_font)
+        self._bar_pen = QPen(QColor("#475069"), 1)
+        self._bar_text_pen = QColor("#94a3b8")
+        self._beat_pen = QPen(QColor("#252834"), 1)
+        self._subdiv_pen = QPen(QColor("#1b1e2a"), 1)
+        self._bottom_border_pen = QPen(QColor("#282a36"), 1)
+        self._loop_on_color = QColor(245, 158, 11)
+        self._loop_off_color = QColor(148, 163, 184)
+        self._loop_on_bg = QColor(245, 158, 11, 40)
+        self._loop_off_bg = QColor(148, 163, 184, 15)
+        self._loop_on_top_pen = QPen(self._loop_on_color, 2)
+        self._loop_off_top_pen = QPen(self._loop_off_color, 1.5)
+        self._loop_off_top_pen.setStyle(Qt.DashLine)
+        self._handle_active_col = QColor("#fbbf24")
+        self._handle_inactive_col = QColor("#94a3b8")
+        self._handle_white_col = QColor("#ffffff")
+        self._handle_active_pen_2 = QPen(self._handle_active_col, 2)
+        self._handle_active_pen_15 = QPen(self._handle_active_col, 1.5)
+        self._handle_inactive_pen_15 = QPen(self._handle_inactive_col, 1.5)
+        self._handle_active_pen_1 = QPen(self._handle_active_col, 1)
+        self._handle_inactive_pen_1 = QPen(self._handle_inactive_col, 1)
+        self._tab_hover_bg = QColor(245, 158, 11, 220)
+        self._tab_on_bg = QColor(245, 158, 11, 140)
+        self._tab_off_bg = QColor(51, 65, 85, 160)
+        self._hud_bg = QColor(15, 23, 42, 235)
+        self._hud_border_on = QPen(self._loop_on_color, 1)
+        self._hud_border_off = QPen(self._loop_off_color, 1)
+        self._hud_text_on = QColor("#fef08a")
+        self._hud_text_off = QColor("#e2e8f0")
+        self._playhead_brush = QBrush(QColor("#38bdf8"))
 
     def wheelEvent(self, event: QWheelEvent):
         """Ctrl + Molette pour zoomer / dézoomer la règle et la timeline"""
@@ -121,13 +163,36 @@ class TimelineRuler(QWidget):
 
     def set_zoom(self, ppb: float):
         self.pixels_per_beat = ppb
+        self._drawn_playhead_px = None
+        self._expected_playhead_beat = None
+        self._drawn_playhead_xform = None
         self.update()
 
     def set_playhead(self, beat: float):
-        old_px = int(self.playhead_beat * self.pixels_per_beat)
-        new_px = int(beat * self.pixels_per_beat)
+        if not math.isfinite(beat):
+            return
+        xform = (self.pixels_per_beat, self.scroll_offset)
+        if (
+            self._drawn_playhead_px is not None
+            and self._expected_playhead_beat == self.playhead_beat
+            and self._drawn_playhead_xform == xform
+        ):
+            old_px_f = self._drawn_playhead_px
+        else:
+            old_px_f = self.playhead_beat * self.pixels_per_beat - self.scroll_offset
+        new_px_f = beat * self.pixels_per_beat - self.scroll_offset
         self.playhead_beat = beat
-        if old_px == new_px:
+        self._expected_playhead_beat = beat
+        if abs(new_px_f - old_px_f) < 0.05:
+            self._drawn_playhead_px = old_px_f
+            self._drawn_playhead_xform = xform
+            return
+        old_px = int(old_px_f)
+        new_px = int(new_px_f)
+        w = self.width()
+        self._drawn_playhead_px = new_px_f
+        self._drawn_playhead_xform = xform
+        if (old_px < -10 or old_px > w + 10) and (new_px < -10 or new_px > w + 10):
             return
         h = self.height()
         min_x = min(old_px, new_px) - 8
@@ -164,6 +229,9 @@ class TimelineRuler(QWidget):
     def set_scroll_offset(self, offset: float):
         if self.scroll_offset != float(offset):
             self.scroll_offset = float(offset)
+            self._drawn_playhead_px = None
+            self._expected_playhead_beat = None
+            self._drawn_playhead_xform = None
             self.update()
 
     def _get_handle_at(self, x: float) -> Optional[str]:
@@ -310,110 +378,128 @@ class TimelineRuler(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
+        region = event.region()
+        er = event.rect()
+        if 1 < region.rectCount() <= 4:
+            region_rects = list(region)
+            area_sum = sum(r.width() * r.height() for r in region_rects)
+            if area_sum * 2 < er.width() * er.height():
+                for r in region_rects:
+                    painter.save()
+                    painter.setClipRect(r)
+                    self._paint_dirty_rect(painter, r)
+                    painter.restore()
+                return
+        self._paint_dirty_rect(painter, er)
+
+    def _paint_dirty_rect(self, painter: QPainter, dirty_rect: QRect):
         width = self.width()
         height = self.height()
+        dx1 = dirty_rect.left()
+        dx2 = dirty_rect.right()
+        lx1 = max(0, dx1 - 2)
+        lx2 = min(width, dx2 + 2)
 
         # Fond
-        painter.fillRect(0, 0, width, height, QColor("#14151c"))
+        painter.fillRect(dirty_rect, self._bg_color)
 
         # Positions à l'écran de la boucle
         x_start = self.loop_start_beat * self.pixels_per_beat - self.scroll_offset
         x_end = self.loop_end_beat * self.pixels_per_beat - self.scroll_offset
 
         # 1. Graduation des mesures (4 temps par mesure en 4/4)
-        first_bar = max(0, int(self.scroll_offset / (self.pixels_per_beat * 4)))
-        num_bars = int(width / (self.pixels_per_beat * 4)) + 4
-        font = QFont("Consolas", 9, QFont.Bold)
-        painter.setFont(font)
+        bar_px = self.pixels_per_beat * 4.0
+        first_bar = max(0, int((self.scroll_offset + dx1 - 50) / bar_px))
+        last_bar = max(first_bar, int((self.scroll_offset + dx2 + 50) / bar_px) + 1)
+        painter.setFont(self._bar_font)
 
-        for bar in range(first_bar, first_bar + num_bars):
+        tick_x_min = max(0, dx1 - 2)
+        tick_x_max = min(width, dx2 + 2)
+        step = self.grid_resolution if (self.snap_enabled and self.grid_resolution > 0.0) else 0.0
+        draw_subdivs = 0.0 < step < 1.0 and (step * self.pixels_per_beat) >= 6.0
+        num_sub = int(round(4.0 / step)) if draw_subdivs else 0
+
+        for bar in range(first_bar, last_bar + 1):
             bar_beat = bar * 4.0
             x = bar_beat * self.pixels_per_beat - self.scroll_offset
-            if x < -50 or x > width + 50:
-                continue
+            if x >= -50 and x <= width + 50:
+                if dx1 - 2 <= x <= dx2 + 2:
+                    painter.setPen(self._bar_pen)
+                    painter.drawLine(int(x), 0, int(x), height)
+                if dx1 - 50 <= x <= dx2 + 2:
+                    painter.setPen(self._bar_text_pen)
+                    painter.drawText(int(x) + 5, 20, str(bar + 1))
 
-            # Ligne de mesure principale
-            painter.setPen(QPen(QColor("#475069"), 1))
-            painter.drawLine(int(x), 0, int(x), height)
+                # Graduations de temps
+                painter.setPen(self._beat_pen)
+                for beat in range(1, 4):
+                    bx = (bar_beat + beat) * self.pixels_per_beat - self.scroll_offset
+                    if tick_x_min <= bx <= tick_x_max:
+                        painter.drawLine(int(bx), 16, int(bx), height)
 
-            # Numéro de mesure
-            painter.setPen(QColor("#94a3b8"))
-            painter.drawText(int(x) + 5, 20, str(bar + 1))
-
-            # Graduations de temps
-            painter.setPen(QPen(QColor("#252834"), 1))
-            for beat in range(1, 4):
-                bx = (bar_beat + beat) * self.pixels_per_beat - self.scroll_offset
-                if 0 <= bx <= width:
-                    painter.drawLine(int(bx), 16, int(bx), height)
-
-            # Subdivisions fines dans la règle si zoom suffisant et snap actif
-            step = self.grid_resolution if (self.snap_enabled and self.grid_resolution > 0.0) else 0.0
-            if 0.0 < step < 1.0 and (step * self.pixels_per_beat) >= 6.0:
-                painter.setPen(QPen(QColor("#1b1e2a"), 1))
-                num_sub = int(round(4.0 / step))
-                for s_idx in range(1, num_sub):
-                    cur_b = bar_beat + s_idx * step
-                    if abs(cur_b - round(cur_b)) > 1e-4:
-                        sub_x = cur_b * self.pixels_per_beat - self.scroll_offset
-                        if 0 <= sub_x <= width:
-                            painter.drawLine(int(sub_x), 22, int(sub_x), height)
+                # Subdivisions fines dans la règle si zoom suffisant et snap actif
+                if draw_subdivs:
+                    painter.setPen(self._subdiv_pen)
+                    for s_idx in range(1, num_sub):
+                        cur_b = bar_beat + s_idx * step
+                        if abs(cur_b - round(cur_b)) > 1e-4:
+                            sub_x = cur_b * self.pixels_per_beat - self.scroll_offset
+                            if tick_x_min <= sub_x <= tick_x_max:
+                                painter.drawLine(int(sub_x), 22, int(sub_x), height)
 
         # 2. Zone de boucle
         is_loop_on = self.loop_enabled
-        loop_color = QColor(245, 158, 11) if is_loop_on else QColor(148, 163, 184)
-        bg_color = QColor(245, 158, 11, 40) if is_loop_on else QColor(148, 163, 184, 15)
+        if x_end >= dx1 - 25 and x_start <= dx2 + 25:
+            bg_color = self._loop_on_bg if is_loop_on else self._loop_off_bg
+            loop_rect = QRectF(x_start, 0, max(2.0, x_end - x_start), height)
+            painter.fillRect(loop_rect, bg_color)
 
-        loop_rect = QRectF(x_start, 0, max(2.0, x_end - x_start), height)
-        painter.fillRect(loop_rect, bg_color)
-
-        # Barre supérieure de boucle
-        top_pen = QPen(loop_color, 2 if is_loop_on else 1.5)
-        if not is_loop_on:
-            top_pen.setStyle(Qt.DashLine)
-        painter.setPen(top_pen)
-        painter.drawLine(int(x_start), 2, int(x_end), 2)
+            # Barre supérieure de boucle
+            painter.setPen(self._loop_on_top_pen if is_loop_on else self._loop_off_top_pen)
+            painter.drawLine(int(x_start), 2, int(x_end), 2)
 
         # 3. Poignées d'ajustement gauche et droite (Loop Handles)
         # Poignée gauche (Début)
-        is_s_hover = (self._hovered_handle == "start" or self._active_drag == "start")
-        handle_s_color = QColor("#fbbf24") if (is_s_hover or is_loop_on) else QColor("#94a3b8")
+        if x_start + 20 >= dx1 and x_start - 4 <= dx2:
+            is_s_hover = (self._hovered_handle == "start" or self._active_drag == "start")
+            handle_s_color = self._handle_active_col if (is_s_hover or is_loop_on) else self._handle_inactive_col
 
-        # Trait vertical
-        painter.setPen(QPen(handle_s_color, 2 if is_s_hover else 1.5))
-        painter.drawLine(int(x_start), 0, int(x_start), height)
+            painter.setPen(
+                self._handle_active_pen_2 if is_s_hover
+                else (self._handle_active_pen_15 if is_loop_on else self._handle_inactive_pen_15)
+            )
+            painter.drawLine(int(x_start), 0, int(x_start), height)
 
-        # Onglet poignée gauche
-        tab_s_rect = QRectF(x_start, 1, 18, 16)
-        tab_s_bg = QColor(245, 158, 11, 220) if is_s_hover else (QColor(245, 158, 11, 140) if is_loop_on else QColor(51, 65, 85, 160))
-        painter.fillRect(tab_s_rect, tab_s_bg)
-        painter.setPen(QPen(handle_s_color, 1))
-        painter.drawRect(tab_s_rect)
+            tab_s_rect = QRectF(x_start, 1, 18, 16)
+            tab_s_bg = self._tab_hover_bg if is_s_hover else (self._tab_on_bg if is_loop_on else self._tab_off_bg)
+            painter.fillRect(tab_s_rect, tab_s_bg)
+            painter.setPen(self._handle_active_pen_1 if (is_s_hover or is_loop_on) else self._handle_inactive_pen_1)
+            painter.drawRect(tab_s_rect)
 
-        # Texte / Icône poignée gauche
-        painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
-        painter.setPen(QColor("#ffffff") if is_s_hover else handle_s_color)
-        painter.drawText(tab_s_rect, Qt.AlignCenter, "◀L")
+            painter.setFont(self._handle_font)
+            painter.setPen(self._handle_white_col if is_s_hover else handle_s_color)
+            painter.drawText(tab_s_rect, Qt.AlignCenter, "◀L")
 
         # Poignée droite (Fin)
-        is_e_hover = (self._hovered_handle == "end" or self._active_drag == "end")
-        handle_e_color = QColor("#fbbf24") if (is_e_hover or is_loop_on) else QColor("#94a3b8")
+        if x_end + 4 >= dx1 and x_end - 20 <= dx2:
+            is_e_hover = (self._hovered_handle == "end" or self._active_drag == "end")
+            handle_e_color = self._handle_active_col if (is_e_hover or is_loop_on) else self._handle_inactive_col
 
-        # Trait vertical
-        painter.setPen(QPen(handle_e_color, 2 if is_e_hover else 1.5))
-        painter.drawLine(int(x_end), 0, int(x_end), height)
+            painter.setPen(
+                self._handle_active_pen_2 if is_e_hover
+                else (self._handle_active_pen_15 if is_loop_on else self._handle_inactive_pen_15)
+            )
+            painter.drawLine(int(x_end), 0, int(x_end), height)
 
-        # Onglet poignée droite
-        tab_e_rect = QRectF(x_end - 18, 1, 18, 16)
-        tab_e_bg = QColor(245, 158, 11, 220) if is_e_hover else (QColor(245, 158, 11, 140) if is_loop_on else QColor(51, 65, 85, 160))
-        painter.fillRect(tab_e_rect, tab_e_bg)
-        painter.setPen(QPen(handle_e_color, 1))
-        painter.drawRect(tab_e_rect)
+            tab_e_rect = QRectF(x_end - 18, 1, 18, 16)
+            tab_e_bg = self._tab_hover_bg if is_e_hover else (self._tab_on_bg if is_loop_on else self._tab_off_bg)
+            painter.fillRect(tab_e_rect, tab_e_bg)
+            painter.setPen(self._handle_active_pen_1 if (is_e_hover or is_loop_on) else self._handle_inactive_pen_1)
+            painter.drawRect(tab_e_rect)
 
-        # Texte / Icône poignée droite
-        painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
-        painter.setPen(QColor("#ffffff") if is_e_hover else handle_e_color)
-        painter.drawText(tab_e_rect, Qt.AlignCenter, "R▶")
+            painter.setFont(self._handle_font)
+            painter.setPen(self._handle_white_col if is_e_hover else handle_e_color)
+            painter.drawText(tab_e_rect, Qt.AlignCenter, "R▶")
 
         # 4. Petit label interactif d'aide survol (HUD hint badge)
         if (self._hovered_handle in ("start", "end") or self._active_drag in ("start", "end")) and width > 300:
@@ -424,38 +510,61 @@ class TimelineRuler(QWidget):
                 hud_text = f"↔ Fin ({self.loop_end_beat:.1f}) | Maj+Clic pour redéfinir"
                 ideal_x = x_end - 220
 
-            font_hud = QFont("Segoe UI", 8, QFont.Bold)
-            fm = QFontMetrics(font_hud)
-            tw = fm.horizontalAdvance(hud_text)
+            tw = self._hud_fm.horizontalAdvance(hud_text)
             hud_w = tw + 14
             hud_h = 19
             hud_x = max(6.0, min(float(width - hud_w - 6), ideal_x))
             hud_y = 5.0
 
             hud_rect = QRectF(hud_x, hud_y, hud_w, hud_h)
-            painter.fillRect(hud_rect, QColor(15, 23, 42, 235))
-            painter.setPen(QPen(QColor("#f59e0b" if is_loop_on else "#94a3b8"), 1))
-            painter.drawRoundedRect(hud_rect, 4, 4)
+            if hud_rect.adjusted(-2, -2, 2, 2).intersects(QRectF(dirty_rect)):
+                painter.fillRect(hud_rect, self._hud_bg)
+                painter.setPen(self._hud_border_on if is_loop_on else self._hud_border_off)
+                painter.drawRoundedRect(hud_rect, 4, 4)
 
-            painter.setFont(font_hud)
-            painter.setPen(QColor("#fef08a" if is_loop_on else "#e2e8f0"))
-            painter.drawText(hud_rect, Qt.AlignCenter, hud_text)
+                painter.setFont(self._hud_font)
+                painter.setPen(self._hud_text_on if is_loop_on else self._hud_text_off)
+                painter.drawText(hud_rect, Qt.AlignCenter, hud_text)
 
         # Ligne de séparation inférieure
-        painter.setPen(QPen(QColor("#282a36"), 1))
-        painter.drawLine(0, height - 1, width, height - 1)
+        painter.setPen(self._bottom_border_pen)
+        painter.drawLine(lx1, height - 1, lx2, height - 1)
 
         # 5. Tête de lecture (Triangle cyan)
         px = self.playhead_beat * self.pixels_per_beat - self.scroll_offset
-        if -10 <= px <= width + 10:
+        if -10 <= px <= width + 10 and (dx1 - 8 <= px <= dx2 + 8):
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(QColor("#38bdf8")))
+            painter.setBrush(self._playhead_brush)
             tri = QPolygonF([
                 QPointF(px - 6, 0),
                 QPointF(px + 6, 0),
                 QPointF(px, 12)
             ])
             painter.drawPolygon(tri)
+            self._drawn_playhead_px = px
+            self._expected_playhead_beat = self.playhead_beat
+            self._drawn_playhead_xform = (self.pixels_per_beat, self.scroll_offset)
+
+
+class _SlicedAutomationLane:
+    """Proxy léger exposant uniquement les points d'une sous-piste intersectant dirty_rect."""
+    __slots__ = ("_lane", "points", "target_param", "color", "enabled")
+
+    def __init__(self, lane: AutomationLane, points: List[AutomationPoint]):
+        self._lane = lane
+        self.points = points
+        self.target_param = lane.target_param
+        self.color = lane.color
+        self.enabled = lane.enabled
+
+    def get_bounds(self) -> Tuple[float, float]:
+        return self._lane.get_bounds()
+
+    def clamp_value(self, value: float) -> float:
+        return self._lane.clamp_value(value)
+
+    def evaluate(self, beat: float, fallback_value: Optional[float] = None) -> float:
+        return AutomationLane.evaluate(self, beat, fallback_value)
 
 
 class TimelineGrid(QWidget):
@@ -533,6 +642,52 @@ class TimelineGrid(QWidget):
 
         self._scissors_cursor: Optional[QCursor] = None
 
+        # Caches d'objets graphiques & formes d'onde pour éviter les allocations à 60 Hz
+        self._bg_color = QColor("#121318")
+        self._empty_text_color = QColor("#475569")
+        self._empty_font = QFont("Segoe UI", 11)
+        self._track_sel_bg = QColor("#1c2233")
+        self._track_even_bg = QColor("#171821")
+        self._track_odd_bg = QColor("#14151c")
+        self._track_sel_pen = QPen(QColor(56, 189, 248, 90), 1)
+        self._track_sep_pen = QPen(QColor("#232634"), 1)
+        self._auto_enabled_bg = QColor("#0e1017")
+        self._auto_disabled_bg = QColor("#0b0c12")
+        self._bar_pen = QPen(QColor("#384055"), 1)
+        self._beat_pen = QPen(QColor("#222533"), 1)
+        self._subdiv_pen = QPen(QColor("#181a24"), 1)
+        self._loop_fill_color = QColor(245, 158, 11, 15)
+        self._time_sel_fill = QColor(56, 189, 248, 35)
+        self._time_sel_pen = QPen(QColor("#38bdf8"), 1)
+        self._time_sel_pen.setStyle(Qt.DashLine)
+        self._clip_font = QFont("Segoe UI", 9, QFont.Bold)
+        self._white_color = QColor("#ffffff")
+        self._white_brush = QBrush(self._white_color)
+        self._sel_halo_pen = QPen(QColor("#fbbf24"), 3)
+        self._sel_badge_color = QColor("#fbbf24")
+        self._rec_halo_pen = QPen(QColor(239, 68, 68, 140), 2)
+        self._rec_body_brush = QBrush(QColor(220, 38, 38, 200))
+        self._rec_border_pen = QPen(QColor("#fca5a5"), 2)
+        self._rec_header_col = QColor(153, 27, 27)
+        self._rec_header_brush = QBrush(self._rec_header_col)
+        self._rec_badge_color = QColor("#fca5a5")
+        self._rec_head_pen = QPen(self._white_color, 2)
+        self._clip_resize_pen = QPen(QColor(255, 255, 255, 100), 2)
+        self._wave_zero_pen = QPen(QColor(255, 255, 255, 30), 1)
+        self._wave_pen = QPen(QColor(255, 255, 255, 230), 1)
+        self._wave_empty_pen = QPen(QColor(255, 255, 255, 80), 1)
+        self._wave_empty_pen.setStyle(Qt.DashLine)
+        self._split_line_pen = QPen(QColor("#38bdf8"), 2)
+        self._split_line_pen.setStyle(Qt.DashLine)
+        self._split_tri_brush = QBrush(QColor("#38bdf8"))
+        self._split_font = QFont("Consolas", 8, QFont.Bold)
+        self._split_fm = QFontMetrics(self._split_font)
+        self._split_badge_brush = QBrush(QColor("#0284c7"))
+        self._split_badge_pen = QPen(QColor("#38bdf8"), 1)
+        self._playhead_pen = QPen(QColor("#38bdf8"), 2)
+        self._clip_style_cache = {}
+        self._waveform_peak_cache = {}
+
         self.setMouseTracking(True)
         self.update_dimensions()
 
@@ -540,6 +695,45 @@ class TimelineGrid(QWidget):
         if self.selected_track_id != track_id:
             self.selected_track_id = track_id
             self.update()
+
+    def invalidate_waveform_cache(self, clip_or_audio=None):
+        """Invalide explicitement le cache des pics de forme d'onde (tout ou ciblé par clip/id/audio)."""
+        if clip_or_audio is None:
+            self._waveform_peak_cache.clear()
+            return
+        if isinstance(clip_or_audio, str):
+            self._waveform_peak_cache.pop(clip_or_audio, None)
+            return
+        if isinstance(clip_or_audio, int):
+            self._waveform_peak_cache.pop(clip_or_audio, None)
+            stale_keys = [
+                k for k, v in self._waveform_peak_cache.items()
+                if isinstance(v, tuple) and v and isinstance(v[0], tuple) and v[0] and v[0][0] == clip_or_audio
+            ]
+            for k in stale_keys:
+                self._waveform_peak_cache.pop(k, None)
+            return
+        if isinstance(clip_or_audio, np.ndarray):
+            target_id = id(clip_or_audio)
+            stale_keys = [
+                k for k, v in self._waveform_peak_cache.items()
+                if isinstance(v, tuple) and v and isinstance(v[0], tuple) and v[0] and v[0][0] == target_id
+            ]
+            for k in stale_keys:
+                self._waveform_peak_cache.pop(k, None)
+            return
+        clip_id = getattr(clip_or_audio, "id", None)
+        if clip_id is not None:
+            self._waveform_peak_cache.pop(clip_id, None)
+        audio_data = getattr(clip_or_audio, "audio_data", None)
+        if audio_data is not None:
+            target_id = id(audio_data)
+            stale_keys = [
+                k for k, v in self._waveform_peak_cache.items()
+                if isinstance(v, tuple) and v and isinstance(v[0], tuple) and v[0] and v[0][0] == target_id
+            ]
+            for k in stale_keys:
+                self._waveform_peak_cache.pop(k, None)
 
     def get_scissors_cursor(self) -> QCursor:
         """Retourne le curseur personnalisé en forme de ciseaux (mis en cache)."""
@@ -783,6 +977,13 @@ class TimelineGrid(QWidget):
         else:
             self.update(old_px - 4, 0, 9, h)
             self.update(new_px - 4, 0, 9, h)
+        if any(getattr(c, "_is_recording", False) for t in self.project.tracks for c in t.clips):
+            for track, top_y, track_h in self.get_track_layout():
+                for clip in track.clips:
+                    if getattr(clip, "_is_recording", False):
+                        cx = clip.start_beat * self.pixels_per_beat
+                        cw = max(8.0, (beat - clip.start_beat) * self.pixels_per_beat)
+                        self.update(int(cx) - 4, top_y, int(cw) + 16, track_h)
 
     def get_track_layout(self) -> list:
         """Retourne la liste des tuples (track, top_y, height) pour chaque piste principale."""
@@ -1872,157 +2073,220 @@ class TimelineGrid(QWidget):
         if hasattr(self.parent(), "editing_toolbar"):
             self.parent().editing_toolbar.set_active_tool(tool_name)
 
+    def _get_clip_style(self, color_str: str, is_selected: bool):
+        key = (color_str, is_selected)
+        cached = self._clip_style_cache.get(key)
+        if cached is not None:
+            return cached
+        base_color = QColor(color_str)
+        alpha = 240 if is_selected else 180
+        body_color = QColor(base_color.red(), base_color.green(), base_color.blue(), alpha)
+        border_color = self._white_color if is_selected else base_color.lighter(130)
+        border_width = 2 if is_selected else 1
+        header_col = QColor(base_color.darker(140))
+        style = (QBrush(body_color), QPen(border_color, border_width), QBrush(header_col), header_col)
+        if len(self._clip_style_cache) >= 256:
+            self._clip_style_cache.pop(next(iter(self._clip_style_cache)))
+        self._clip_style_cache[key] = style
+        return style
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
+        region = event.region()
+        er = event.rect()
+        if 1 < region.rectCount() <= 4:
+            region_rects = list(region)
+            area_sum = sum(r.width() * r.height() for r in region_rects)
+            if area_sum * 2 < er.width() * er.height():
+                for r in region_rects:
+                    painter.save()
+                    painter.setClipRect(r)
+                    self._paint_dirty_rect(painter, r)
+                    painter.restore()
+                return
+        self._paint_dirty_rect(painter, er)
+
+    def _paint_dirty_rect(self, painter: QPainter, dirty_rect: QRect):
         width = self.width()
         height = self.height()
+        dx1 = dirty_rect.left()
+        dy1 = dirty_rect.top()
+        dx2 = dirty_rect.right()
+        dy2 = dirty_rect.bottom()
+        dw = dirty_rect.width()
+        lx1 = max(0, dx1 - 2)
+        lx2 = min(width, dx2 + 2)
+        ly1 = max(0, dy1 - 2)
+        ly2 = min(height, dy2 + 2)
 
         # Fond
-        painter.fillRect(0, 0, width, height, QColor("#121318"))
+        painter.fillRect(dirty_rect, self._bg_color)
 
         # Pistes & Lignes horizontales adaptées à chaque piste
         track_layout = self.get_track_layout()
         if not track_layout:
-            painter.setPen(QColor("#475569"))
-            painter.setFont(QFont("Segoe UI", 11))
-            painter.drawText(
-                QRectF(24, 24, 650, 36),
-                Qt.AlignLeft | Qt.AlignVCenter,
-                "Projet vide — Cliquez sur '+ Piste' ou [Ctrl+T] pour ajouter votre première piste"
-            )
+            if dirty_rect.intersects(QRect(24, 24, 650, 36)):
+                painter.setPen(self._empty_text_color)
+                painter.setFont(self._empty_font)
+                painter.drawText(
+                    QRectF(24, 24, 650, 36),
+                    Qt.AlignLeft | Qt.AlignVCenter,
+                    "Projet vide — Cliquez sur '+ Piste' ou [Ctrl+T] pour ajouter votre première piste"
+                )
         for i, (track, top_y, track_h) in enumerate(track_layout):
-            is_sel_track = (self.selected_track_id and track.id == self.selected_track_id)
+            if top_y + track_h + 2 < dy1 or top_y - 2 > dy2:
+                continue
+            is_sel_track = bool(self.selected_track_id and track.id == self.selected_track_id)
             if is_sel_track:
-                bg_col = QColor("#1c2233")
+                bg_col = self._track_sel_bg
             else:
-                bg_col = QColor("#171821") if i % 2 == 0 else QColor("#14151c")
-            painter.fillRect(0, top_y, width, track_h, bg_col)
+                bg_col = self._track_even_bg if i % 2 == 0 else self._track_odd_bg
+            painter.fillRect(dx1, top_y, dw, track_h, bg_col)
             if is_sel_track:
-                painter.setPen(QPen(QColor(56, 189, 248, 90), 1))
-                painter.drawLine(0, top_y, width, top_y)
-                painter.drawLine(0, top_y + track_h - 1, width, top_y + track_h - 1)
-            painter.setPen(QPen(QColor("#232634"), 1))
-            painter.drawLine(0, top_y + track_h, width, top_y + track_h)
+                painter.setPen(self._track_sel_pen)
+                if dy1 - 2 <= top_y <= dy2 + 2:
+                    painter.drawLine(lx1, top_y, lx2, top_y)
+                if dy1 - 2 <= (top_y + track_h - 1) <= dy2 + 2:
+                    painter.drawLine(lx1, top_y + track_h - 1, lx2, top_y + track_h - 1)
+            if dy1 - 2 <= (top_y + track_h) <= dy2 + 2:
+                painter.setPen(self._track_sep_pen)
+                painter.drawLine(lx1, top_y + track_h, lx2, top_y + track_h)
 
         # Fond des sous-pistes d'automatisation (avant la grille verticale musicale)
         auto_layout = self.get_automation_layout()
         for track, lane, ly, lh in auto_layout:
-            bg_col = QColor("#0e1017") if lane.enabled else QColor("#0b0c12")
-            painter.fillRect(0, ly, width, lh, bg_col)
+            if ly + lh < dy1 or ly > dy2:
+                continue
+            painter.fillRect(dx1, ly, dw, lh, self._auto_enabled_bg if lane.enabled else self._auto_disabled_bg)
 
         # Grille verticale musicale dynamique (Mesures, temps et subdivisions)
-        num_bars = int(width / (self.pixels_per_beat * 4)) + 4
+        ppb = self.pixels_per_beat
+        bar_px = ppb * 4.0
+        num_bars = int(width / bar_px) + 4
         step = self.grid_resolution if (self.snap_enabled and self.grid_resolution > 0.0) else 1.0
-        px_per_step = step * self.pixels_per_beat
+        px_per_step = step * ppb
+        first_bar = max(0, int((dx1 - 2) / bar_px))
+        last_bar = min(num_bars - 1, int((dx2 + 2) / bar_px))
+        x_min = dx1 - 2
+        x_max = dx2 + 2
 
-        for bar in range(num_bars):
+        for bar in range(first_bar, last_bar + 1):
             bar_beat = bar * 4.0
-            x = bar_beat * self.pixels_per_beat
+            x = bar_beat * ppb
 
             # Ligne de mesure principale (forte)
-            painter.setPen(QPen(QColor("#384055"), 1))
-            painter.drawLine(int(x), 0, int(x), height)
+            if x_min <= x <= x_max:
+                painter.setPen(self._bar_pen)
+                painter.drawLine(int(x), ly1, int(x), ly2)
 
             # Lignes de temps et subdivisions
             if step <= 0.0 or not self.snap_enabled or step == 1.0:
-                painter.setPen(QPen(QColor("#222533"), 1))
+                painter.setPen(self._beat_pen)
                 for beat in range(1, 4):
-                    bx = (bar_beat + beat) * self.pixels_per_beat
-                    painter.drawLine(int(bx), 0, int(bx), height)
+                    bx = (bar_beat + beat) * ppb
+                    if x_min <= bx <= x_max:
+                        painter.drawLine(int(bx), ly1, int(bx), ly2)
             elif step >= 4.0:
                 pass  # Seulement les barres de mesure
             elif step == 2.0:
-                painter.setPen(QPen(QColor("#222533"), 1))
-                bx = (bar_beat + 2.0) * self.pixels_per_beat
-                painter.drawLine(int(bx), 0, int(bx), height)
+                bx = (bar_beat + 2.0) * ppb
+                if x_min <= bx <= x_max:
+                    painter.setPen(self._beat_pen)
+                    painter.drawLine(int(bx), ly1, int(bx), ly2)
             else:
                 # Subdivisions fines (ex: 0.5 = croches, 0.25 = doubles-croches)
                 num_subdivs = int(round(4.0 / step))
                 for sub in range(1, num_subdivs):
                     cur_beat = bar_beat + sub * step
-                    bx = cur_beat * self.pixels_per_beat
+                    bx = cur_beat * ppb
+                    if bx < x_min or bx > x_max:
+                        continue
                     is_integer_beat = abs(cur_beat - round(cur_beat)) < 1e-4
                     if is_integer_beat:
-                        painter.setPen(QPen(QColor("#222533"), 1))
-                        painter.drawLine(int(bx), 0, int(bx), height)
+                        painter.setPen(self._beat_pen)
+                        painter.drawLine(int(bx), ly1, int(bx), ly2)
                     elif px_per_step >= 6.0:  # Empêche l'effet de moiré si trop dézoomé
-                        painter.setPen(QPen(QColor("#181a24"), 1))
-                        painter.drawLine(int(bx), 0, int(bx), height)
+                        painter.setPen(self._subdiv_pen)
+                        painter.drawLine(int(bx), ly1, int(bx), ly2)
 
         # Région de boucle en surbrillance verticale
         if self.project.loop_enabled:
-            lx1 = self.project.loop_start_beat * self.pixels_per_beat
-            lx2 = self.project.loop_end_beat * self.pixels_per_beat
-            painter.fillRect(QRectF(lx1, 0, lx2 - lx1, height), QColor(245, 158, 11, 15))
+            loop_x1 = self.project.loop_start_beat * ppb
+            loop_x2 = self.project.loop_end_beat * ppb
+            if loop_x2 >= dx1 - 2 and loop_x1 <= dx2 + 2:
+                painter.fillRect(QRectF(loop_x1, 0, loop_x2 - loop_x1, height), self._loop_fill_color)
 
         # Zone temporelle sélectionnée par glisser sur la grille
         if self.time_selection:
             s, e = self.time_selection
-            sx = min(s, e) * self.pixels_per_beat
-            sw = max(2.0, abs(e - s) * self.pixels_per_beat)
-            sel_rect = QRectF(sx, 0, sw, height)
-            painter.fillRect(sel_rect, QColor(56, 189, 248, 35))
-            painter.setPen(QPen(QColor("#38bdf8"), 1, Qt.DashLine))
-            painter.drawRect(sel_rect)
+            sx = min(s, e) * ppb
+            sw = max(2.0, abs(e - s) * ppb)
+            if sx + sw >= dx1 - 2 and sx <= dx2 + 2:
+                sel_rect = QRectF(sx, 0, sw, height)
+                painter.fillRect(sel_rect, self._time_sel_fill)
+                painter.setPen(self._time_sel_pen)
+                painter.drawRect(sel_rect)
 
         # Dessin des Clips / Blocs
-        font_clip = QFont("Segoe UI", 9, QFont.Bold)
-        painter.setFont(font_clip)
+        painter.setFont(self._clip_font)
+        x_clip_left = dx1 - 6.0
+        x_clip_right = dx2 + 6.0
+        y_clip_top = dy1 - 6.0
+        y_clip_bot = dy2 + 6.0
 
         for track, top_y, track_h in track_layout:
+            if top_y + track_h < y_clip_top or top_y > y_clip_bot:
+                continue
             for clip in track.clips:
                 is_recording = getattr(clip, "_is_recording", False)
-                cx = clip.start_beat * self.pixels_per_beat
+                cx = clip.start_beat * ppb
                 if is_recording:
-                    cw = max(8.0, (self.playhead_beat - clip.start_beat) * self.pixels_per_beat)
+                    cw = max(8.0, (self.playhead_beat - clip.start_beat) * ppb)
                 else:
-                    cw = clip.length_beats * self.pixels_per_beat
+                    cw = clip.length_beats * ppb
+                if cx + cw < x_clip_left or cx > x_clip_right:
+                    continue
+
                 cy = top_y + 4
                 ch = max(18, track_h - 8)
-
                 clip_rect = QRectF(cx, cy, cw, ch)
                 is_selected = (self.selected_clip and self.selected_clip[1].id == clip.id) and not is_recording
 
                 if is_recording:
-                    base_color = QColor("#ef4444")
-                    body_color = QColor(220, 38, 38, 200)
-                    border_color = QColor("#fca5a5")
-                    border_width = 2
-                    # Halo rougeoyant d'enregistrement actif
                     painter.setBrush(Qt.NoBrush)
-                    painter.setPen(QPen(QColor(239, 68, 68, 140), 2))
+                    painter.setPen(self._rec_halo_pen)
                     painter.drawRoundedRect(clip_rect.adjusted(-2, -2, 2, 2), 6, 6)
+                    body_brush = self._rec_body_brush
+                    border_pen = self._rec_border_pen
+                    header_brush = self._rec_header_brush
+                    header_col = self._rec_header_col
                 else:
-                    base_color = QColor(clip.color)
-                    alpha = 240 if is_selected else 180
-                    body_color = QColor(base_color.red(), base_color.green(), base_color.blue(), alpha)
-                    border_color = QColor("#ffffff") if is_selected else base_color.lighter(130)
-                    border_width = 2 if is_selected else 1
-                    # Si sélectionné : Halo d'illumination ambre / or éclatant
                     if is_selected:
                         painter.setBrush(Qt.NoBrush)
-                        painter.setPen(QPen(QColor("#fbbf24"), 3))
+                        painter.setPen(self._sel_halo_pen)
                         painter.drawRoundedRect(clip_rect.adjusted(-2, -2, 2, 2), 6, 6)
+                    body_brush, border_pen, header_brush, header_col = self._get_clip_style(
+                        str(clip.color), bool(is_selected)
+                    )
 
                 # Corps du bloc
-                painter.setBrush(QBrush(body_color))
-                painter.setPen(QPen(border_color, border_width))
+                painter.setBrush(body_brush)
+                painter.setPen(border_pen)
                 painter.drawRoundedRect(clip_rect, 5, 5)
 
                 # Barre d'en-tête du clip
                 h_header = min(18, int(ch * 0.35))
                 header_rect = QRectF(cx, cy, cw, h_header)
-                header_col = QColor(153, 27, 27) if is_recording else QColor(base_color.darker(140))
-                painter.setBrush(QBrush(header_col))
+                painter.setBrush(header_brush)
                 painter.drawRoundedRect(header_rect, 4, 4)
                 if h_header >= 10:
                     painter.fillRect(QRectF(cx, cy + h_header - 4, cw, 4), header_col)
 
                 # Titre du bloc (si assez d'espace vertical)
                 if ch >= 26:
-                    painter.setPen(QColor("#ffffff"))
+                    painter.setPen(self._white_color)
                     fm = painter.fontMetrics()
                     avail_w = int(cw - 16)
                     if avail_w > 10:
@@ -2037,24 +2301,33 @@ class TimelineGrid(QWidget):
                 # Badge ou étoile si sélectionné ou recording
                 if cw > 40 and ch >= 26:
                     if is_recording:
-                        painter.setPen(QColor("#fca5a5"))
+                        painter.setPen(self._rec_badge_color)
                         painter.drawText(int(cx + cw - 20), int(cy) + min(14, max(10, h_header - 2)), "●")
                     elif is_selected:
-                        painter.setPen(QColor("#fbbf24"))
+                        painter.setPen(self._sel_badge_color)
                         painter.drawText(int(cx + cw - 18), int(cy) + min(14, max(10, h_header - 2)), "★")
 
                 # Aperçu du contenu à l'intérieur du clip
                 if ch >= 36:
                     if isinstance(clip, MidiClip):
                         painter.setPen(Qt.NoPen)
-                        painter.setBrush(QBrush(QColor("#ffffff")))
+                        painter.setBrush(self._white_brush)
                         content_top = cy + h_header + 4
                         content_h = ch - h_header - 8
+                        span_h = max(4, content_h - 4)
+                        n_x_left = dx1 - 2.0
+                        n_x_right = dx2 + 2.0
+                        n_y_top = dy1 - 2.0
+                        n_y_bot = dy2 + 2.0
                         for note in clip.notes:
+                            nx = cx + (note.start_beat * ppb)
+                            nw = max(3.0, note.duration * ppb - 1)
+                            if nx + nw < n_x_left or nx > n_x_right:
+                                continue
                             norm_pitch = max(0.0, min(1.0, (note.pitch - 36) / 48.0))
-                            ny = content_top + (1.0 - norm_pitch) * max(4, content_h - 4)
-                            nx = cx + (note.start_beat * self.pixels_per_beat)
-                            nw = max(3.0, note.duration * self.pixels_per_beat - 1)
+                            ny = content_top + (1.0 - norm_pitch) * span_h
+                            if ny + 3.0 < n_y_top or ny > n_y_bot:
+                                continue
                             painter.drawRoundedRect(QRectF(nx, ny, nw, 3), 1, 1)
 
                     elif isinstance(clip, AudioClip):
@@ -2064,15 +2337,18 @@ class TimelineGrid(QWidget):
                         half_h = max(2.0, (content_h / 2.0) * 0.88)
 
                         # Ligne de zéro (centre)
-                        painter.setPen(QPen(QColor(255, 255, 255, 30), 1))
-                        painter.drawLine(int(cx) + 3, int(mid_y), int(cx + cw) - 3, int(mid_y))
+                        z_x1 = max(int(cx) + 3, dx1 - 2)
+                        z_x2 = min(int(cx + cw) - 3, dx2 + 2)
+                        if z_x2 >= z_x1:
+                            painter.setPen(self._wave_zero_pen)
+                            painter.drawLine(z_x1, int(mid_y), z_x2, int(mid_y))
 
                         clip._ensure_audio_loaded()
                         if clip.audio_data is not None and len(clip.audio_data) > 0:
                             bpm = max(20.0, float(self.project.bpm))
                             samples_per_beat = (60.0 / bpm) * clip.sample_rate
                             offset_b = float(getattr(clip, "source_offset_beats", 0.0))
-                            
+
                             start_sample = int(offset_b * samples_per_beat)
                             dur_samples = int(clip.length_beats * samples_per_beat)
                             total_audio_samples = len(clip.audio_data)
@@ -2080,21 +2356,45 @@ class TimelineGrid(QWidget):
                             avail_samples = max(0, min(dur_samples, total_audio_samples - start_sample))
                             if avail_samples > 0 and samples_per_beat > 0:
                                 avail_beats = avail_samples / samples_per_beat
-                                avail_pixels = max(1, int(avail_beats * self.pixels_per_beat))
+                                avail_pixels = max(1, int(avail_beats * ppb))
                                 max_pixels = max(1, int(cw - 8))
                                 slice_pixels = min(max_pixels, avail_pixels)
 
-                                mins, maxs = clip.get_slice_waveform_peaks(
+                                s_start = max(0, min(total_audio_samples, start_sample))
+                                s_end = max(s_start, min(total_audio_samples, start_sample + avail_samples))
+                                audio_src = clip.audio_data[:, 0] if clip.audio_data.ndim > 1 else clip.audio_data
+                                audio_slice = audio_src[s_start:s_end]
+                                step = max(1, len(audio_slice) // 64)
+                                slice_fp = np.asarray(audio_slice[::step]).tobytes()
+                                sig = (
+                                    id(clip.audio_data),
+                                    total_audio_samples,
+                                    float(getattr(clip, "gain", 1.0)),
                                     start_sample,
                                     start_sample + avail_samples,
-                                    slice_pixels
+                                    slice_pixels,
+                                    slice_fp,
                                 )
+                                cached_peaks = None if is_recording else self._waveform_peak_cache.get(clip.id)
+                                if cached_peaks is not None and cached_peaks[0] == sig:
+                                    mins, maxs = cached_peaks[1]
+                                else:
+                                    mins, maxs = clip.get_slice_waveform_peaks(
+                                        start_sample,
+                                        start_sample + avail_samples,
+                                        slice_pixels
+                                    )
+                                    if not is_recording:
+                                        if len(self._waveform_peak_cache) >= 256:
+                                            self._waveform_peak_cache.pop(next(iter(self._waveform_peak_cache)))
+                                        self._waveform_peak_cache[clip.id] = (sig, (mins, maxs))
 
                                 if len(mins) > 0:
-                                    wave_pen = QPen(QColor(255, 255, 255, 230), 1)
-                                    painter.setPen(wave_pen)
+                                    painter.setPen(self._wave_pen)
                                     nb_peaks = len(mins)
-                                    for i in range(nb_peaks):
+                                    i_start = max(0, int(dx1 - 2 - (cx + 4)))
+                                    i_end = min(nb_peaks, int(dx2 + 2 - (cx + 4)) + 1)
+                                    for i in range(i_start, i_end):
                                         sx = int(cx + 4 + i)
                                         y1 = int(mid_y - maxs[i] * half_h)
                                         y2 = int(mid_y - mins[i] * half_h)
@@ -2102,19 +2402,26 @@ class TimelineGrid(QWidget):
                                             y2 = y1 + 1
                                         painter.drawLine(sx, y1, sx, y2)
                         else:
-                            painter.setPen(QPen(QColor(255, 255, 255, 80), 1, Qt.DashLine))
-                            painter.drawLine(int(cx) + 6, int(mid_y), int(cx + cw) - 6, int(mid_y))
+                            e_x1 = max(int(cx) + 6, dx1 - 2)
+                            e_x2 = min(int(cx + cw) - 6, dx2 + 2)
+                            if e_x2 >= e_x1:
+                                painter.setPen(self._wave_empty_pen)
+                                painter.drawLine(e_x1, int(mid_y), e_x2, int(mid_y))
 
                 # Tête d'enregistrement ou poignée de redimensionnement à droite
                 if is_recording:
-                    painter.setPen(QPen(QColor("#ffffff"), 2))
-                    painter.drawLine(int(cx + cw), int(cy), int(cx + cw), int(cy + ch))
+                    if dx1 - 3 <= (cx + cw) <= dx2 + 3:
+                        painter.setPen(self._rec_head_pen)
+                        painter.drawLine(int(cx + cw), int(cy), int(cx + cw), int(cy + ch))
                 else:
-                    painter.setPen(QPen(QColor(255, 255, 255, 100), 2))
-                    painter.drawLine(int(cx + cw) - 3, int(cy) + 6, int(cx + cw) - 3, int(cy + ch) - 6)
+                    if dx1 - 5 <= (cx + cw - 3) <= dx2 + 5:
+                        painter.setPen(self._clip_resize_pen)
+                        painter.drawLine(int(cx + cw) - 3, int(cy) + 6, int(cx + cw) - 3, int(cy + ch) - 6)
 
         # Dessin des courbes et points des sous-pistes d'automatisation
         for track, lane, ly, lh in auto_layout:
+            if ly + lh + 2 < dy1 or ly - 2 > dy2:
+                continue
             hov_pt_id = (
                 self._hover_auto_point[1]
                 if (self._hover_auto_point and self._hover_auto_point[0] == lane.id)
@@ -2130,17 +2437,34 @@ class TimelineGrid(QWidget):
                 if (self._drawing_auto_freehand and self._drawing_auto_freehand[1].id == lane.id)
                 else None
             )
+            if len(lane.points) > 4 and dw < width * 0.5:
+                beat_left = max(0.0, (dx1 - 16) / ppb)
+                beat_right = (dx2 + 16) / ppb
+                pts = lane.points
+                beats = [p.beat for p in pts]
+                i0 = max(0, bisect_left(beats, beat_left) - 1)
+                i1 = min(len(pts), bisect_right(beats, beat_right) + 2)
+                lane_arg = _SlicedAutomationLane(lane, pts[i0:i1])
+                hov_seg_arg = (
+                    hov_seg_idx - i0
+                    if (hov_seg_idx is not None and i0 <= hov_seg_idx < i1 - 1)
+                    else None
+                )
+            else:
+                lane_arg = lane
+                hov_seg_arg = hov_seg_idx
+
             paint_automation_lane(
                 painter=painter,
                 track=track,
-                lane=lane,
+                lane=lane_arg,
                 top_y=ly,
                 height=lh,
                 width=width,
-                pixels_per_beat=self.pixels_per_beat,
+                pixels_per_beat=ppb,
                 selected_point_ids=self.selected_automation_points,
                 hovered_point_id=hov_pt_id,
-                hovered_segment_idx=hov_seg_idx,
+                hovered_segment_idx=hov_seg_arg,
                 draw_preview=preview,
                 draw_background=False,
             )
@@ -2148,48 +2472,48 @@ class TimelineGrid(QWidget):
         # Guide visuel de découpe ciseaux si outil split actif
         if self.active_tool == "split" and self._hover_clip and self._hover_split_beat is not None:
             h_track, h_clip = self._hover_clip
-            cut_x = int(self._hover_split_beat * self.pixels_per_beat)
-            for t, ty, th in track_layout:
-                if t.id == h_track.id:
-                    guide_y1 = ty + 2
-                    guide_y2 = ty + th - 2
-                    painter.setPen(QPen(QColor("#38bdf8"), 2, Qt.DashLine))
-                    painter.drawLine(cut_x, guide_y1, cut_x, guide_y2)
-                    painter.setBrush(QBrush(QColor("#38bdf8")))
-                    painter.setPen(Qt.NoPen)
+            cut_x = int(self._hover_split_beat * ppb)
+            if dx1 - 80 <= cut_x <= dx2 + 80:
+                for t, ty, th in track_layout:
+                    if t.id == h_track.id:
+                        if ty + th + 22 < dy1 or ty - 22 > dy2:
+                            break
+                        guide_y1 = ty + 2
+                        guide_y2 = ty + th - 2
+                        painter.setPen(self._split_line_pen)
+                        painter.drawLine(cut_x, guide_y1, cut_x, guide_y2)
+                        painter.setBrush(self._split_tri_brush)
+                        painter.setPen(Qt.NoPen)
 
-                    # Triangle supérieur
-                    tri_top = QPolygonF([
-                        QPointF(cut_x - 5, guide_y1),
-                        QPointF(cut_x + 5, guide_y1),
-                        QPointF(cut_x, guide_y1 + 7)
-                    ])
-                    painter.drawPolygon(tri_top)
+                        tri_top = QPolygonF([
+                            QPointF(cut_x - 5, guide_y1),
+                            QPointF(cut_x + 5, guide_y1),
+                            QPointF(cut_x, guide_y1 + 7)
+                        ])
+                        painter.drawPolygon(tri_top)
 
-                    # Triangle inférieur
-                    tri_bot = QPolygonF([
-                        QPointF(cut_x - 5, guide_y2),
-                        QPointF(cut_x + 5, guide_y2),
-                        QPointF(cut_x, guide_y2 - 7)
-                    ])
-                    painter.drawPolygon(tri_bot)
+                        tri_bot = QPolygonF([
+                            QPointF(cut_x - 5, guide_y2),
+                            QPointF(cut_x + 5, guide_y2),
+                            QPointF(cut_x, guide_y2 - 7)
+                        ])
+                        painter.drawPolygon(tri_bot)
 
-                    # Badge textuel avec position exacte en temps
-                    tag_text = f"✂ {self._hover_split_beat:.2f} t"
-                    painter.setFont(QFont("Consolas", 8, QFont.Bold))
-                    fm = QFontMetrics(painter.font())
-                    tw = fm.horizontalAdvance(tag_text) + 8
-                    th_box = 16
-                    tag_x = max(0, cut_x - tw // 2)
-                    tag_y = max(0, guide_y1 - th_box - 2)
-                    painter.setBrush(QBrush(QColor("#0284c7")))
-                    painter.setPen(QPen(QColor("#38bdf8"), 1))
-                    painter.drawRoundedRect(tag_x, tag_y, tw, th_box, 3, 3)
-                    painter.setPen(QColor("#ffffff"))
-                    painter.drawText(tag_x, tag_y, tw, th_box, Qt.AlignCenter, tag_text)
-                    break
+                        tag_text = f"✂ {self._hover_split_beat:.2f} t"
+                        painter.setFont(self._split_font)
+                        tw = self._split_fm.horizontalAdvance(tag_text) + 8
+                        th_box = 16
+                        tag_x = max(0, cut_x - tw // 2)
+                        tag_y = max(0, guide_y1 - th_box - 2)
+                        painter.setBrush(self._split_badge_brush)
+                        painter.setPen(self._split_badge_pen)
+                        painter.drawRoundedRect(tag_x, tag_y, tw, th_box, 3, 3)
+                        painter.setPen(self._white_color)
+                        painter.drawText(tag_x, tag_y, tw, th_box, Qt.AlignCenter, tag_text)
+                        break
 
         # Tête de lecture (Ligne verticale)
-        px = self.playhead_beat * self.pixels_per_beat
-        painter.setPen(QPen(QColor("#38bdf8"), 2))
-        painter.drawLine(int(px), 0, int(px), height)
+        px = self.playhead_beat * ppb
+        if dx1 - 3 <= px <= dx2 + 3:
+            painter.setPen(self._playhead_pen)
+            painter.drawLine(int(px), ly1, int(px), ly2)

@@ -9,15 +9,44 @@ Fonctionnalités :
 - Effets d'espace intégrés : Saturation analogique, Délai Ping-Pong stéréo, Réverbération studio.
 - Gestion polyphonique multivoix sans clic ni coupure.
 """
+import ctypes
 import math
+import random
+import threading
 import numpy as np
 from typing import Optional, Tuple, Dict, Any, List
+
+from core import dsp_native
 
 try:
     import scipy.signal as sig
     HAS_SCIPY_SIG = True
 except Exception:
     HAS_SCIPY_SIG = False
+
+
+_OSC_WAVE_MAP = {
+    "sine": 0,
+    "triangle": 1,
+    "saw": 2,
+    "square": 3,
+    "pulse": 3,
+    "noise": 4,
+    "fm": 5,
+    "supersaw": 6,
+    "unison": 6,
+}
+
+_SVF_TYPE_MAP = {
+    "lowpass": 0,
+    "lp": 0,
+    "highpass": 1,
+    "hp": 1,
+    "bandpass": 2,
+    "bp": 2,
+    "notch": 3,
+    "rejet": 3,
+}
 
 
 def pitch_to_freq(pitch: float) -> float:
@@ -52,11 +81,42 @@ def generate_oscillator(
     if num_samples <= 0:
         return np.zeros((0, 2), dtype=np.float32)
 
+    wave_lower = (wave_type or "sine").lower().strip()
+    if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_synth_osc_process is not None:
+        t_c = None
+        t_ptr = None
+        if t_vec is not None:
+            if len(t_vec) == num_samples:
+                t_c = np.ascontiguousarray(t_vec, dtype=np.float64)
+                t_ptr = t_c.ctypes.data_as(dsp_native.c_double_p)
+            else:
+                t_ptr = False
+        if t_ptr is not False:
+            wave_id = _OSC_WAVE_MAP.get(wave_lower, 0)
+            rng_state = ctypes.c_uint64(random.getrandbits(64) | 1)
+            out = np.empty((num_samples, 2), dtype=np.float32)
+            dsp_native.nova_synth_osc_process(
+                wave_id,
+                float(freq),
+                int(num_samples),
+                int(sample_rate),
+                float(phase_offset),
+                float(pulse_width),
+                float(fm_ratio),
+                float(fm_depth),
+                float(unison_detune),
+                float(unison_spread),
+                float(time_offset),
+                t_ptr,
+                ctypes.byref(rng_state),
+                out.ctypes.data_as(dsp_native.c_float_p),
+            )
+            return out
+
     if t_vec is not None:
         t = t_vec
     else:
         t = (np.arange(num_samples, dtype=np.float64) / sample_rate) + float(time_offset)
-    wave_lower = (wave_type or "sine").lower().strip()
 
     # Fréquence normalisée
     freq = max(10.0, min(float(freq), sample_rate * 0.49))
@@ -191,6 +251,21 @@ def compute_adsr_envelope(
     if num_samples <= 0:
         return np.zeros(0, dtype=np.float32)
 
+    if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_synth_adsr_process is not None:
+        out = np.empty(num_samples, dtype=np.float32)
+        dsp_native.nova_synth_adsr_process(
+            float(t_start),
+            float(t_end),
+            int(num_samples),
+            float(note_off_time),
+            float(attack),
+            float(decay),
+            float(sustain),
+            float(release),
+            out.ctypes.data_as(dsp_native.c_float_p),
+        )
+        return out
+
     a = max(0.001, float(attack))
     d = max(0.001, float(decay))
     s = max(0.0, min(1.0, float(sustain)))
@@ -265,6 +340,10 @@ class ChamberlinSVF:
         self.band_l = 0.0
         self.low_r = 0.0
         self.band_r = 0.0
+        self._native_state = dsp_native.NovaSVFState()
+        self._native_state.prev_cutoff = -1.0
+        self._native_state.prev_q = -1.0
+        self._native_state.prev_type = -1
 
     def reset(self):
         self.zi = None
@@ -279,6 +358,13 @@ class ChamberlinSVF:
         self.band_l = 0.0
         self.low_r = 0.0
         self.band_r = 0.0
+        if dsp_native.nova_svf_reset is not None:
+            dsp_native.nova_svf_reset(ctypes.byref(self._native_state))
+        else:
+            ctypes.memset(ctypes.byref(self._native_state), 0, ctypes.sizeof(self._native_state))
+            self._native_state.prev_cutoff = -1.0
+            self._native_state.prev_q = -1.0
+            self._native_state.prev_type = -1
 
     def process(
         self,
@@ -301,6 +387,33 @@ class ChamberlinSVF:
         if n == 0:
             return audio
 
+        if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_svf_process is not None:
+            in_c = np.ascontiguousarray(audio, dtype=np.float32)
+            if in_c.ndim == 2 and in_c.shape[1] == 2:
+                ftype_lower = (filter_type or "lowpass").lower()
+                ftype_id = _SVF_TYPE_MAP.get(ftype_lower, 0)
+                mod_c = None
+                mod_ptr = None
+                if mod_cutoff is not None and len(mod_cutoff) == n:
+                    mod_c = np.ascontiguousarray(mod_cutoff, dtype=np.float32)
+                    mod_ptr = mod_c.ctypes.data_as(dsp_native.c_float_p)
+                out = np.empty((n, 2), dtype=np.float32)
+                dsp_native.nova_svf_process(
+                    ctypes.byref(self._native_state),
+                    in_c.ctypes.data_as(dsp_native.c_float_p),
+                    out.ctypes.data_as(dsp_native.c_float_p),
+                    n,
+                    int(sample_rate),
+                    ftype_id,
+                    float(cutoff),
+                    float(resonance),
+                    float(drive),
+                    mod_ptr,
+                )
+                return out
+
+        if not np.all(np.isfinite(audio)):
+            audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
         drive_gain = 1.0 + max(0.0, min(3.0, float(drive))) * 0.8
         in_sig = audio if drive <= 0.01 else audio * drive_gain
         ftype = (filter_type or "lowpass").lower()
@@ -411,15 +524,57 @@ class StereoPingPongDelay:
         self.feedback = 0.40
         self.ping_pong = True
         self.mix = 0.25
+        self._lock = threading.RLock()
+        self._native_sr = int(sample_rate)
+        self._native = (
+            dsp_native.nova_delay_create(self._native_sr)
+            if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_delay_create is not None
+            else None
+        )
+
+    def __del__(self):
+        native = getattr(self, "_native", None)
+        if native is not None and dsp_native is not None and dsp_native.nova_delay_destroy is not None:
+            try:
+                dsp_native.nova_delay_destroy(native)
+            except Exception:
+                pass
+            self._native = None
 
     def reset(self):
-        self.buffer_l.fill(0.0)
-        self.buffer_r.fill(0.0)
-        self.write_idx = 0
+        with self._lock:
+            if self._native is not None and dsp_native.nova_delay_reset is not None:
+                dsp_native.nova_delay_reset(self._native)
+            self.buffer_l.fill(0.0)
+            self.buffer_r.fill(0.0)
+            self.write_idx = 0
 
     def process(self, audio: np.ndarray) -> np.ndarray:
         if not self.enabled or self.mix <= 0.001 or len(audio) == 0:
             return audio
+
+        if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_delay_process is not None and self._native is not None:
+            in_c = np.ascontiguousarray(audio, dtype=np.float32)
+            if in_c.ndim == 2 and in_c.shape[1] == 2:
+                n = len(in_c)
+                out = np.empty((n, 2), dtype=np.float32)
+                eff_time = float(self.time_sec) * (float(self.sample_rate) / float(max(1, self._native_sr)))
+                with self._lock:
+                    dsp_native.nova_delay_process(
+                        self._native,
+                        in_c.ctypes.data_as(dsp_native.c_float_p),
+                        out.ctypes.data_as(dsp_native.c_float_p),
+                        n,
+                        eff_time,
+                        float(self.feedback),
+                        1 if self.ping_pong else 0,
+                        float(self.mix),
+                        1 if self.enabled else 0,
+                    )
+                return out
+
+        if not np.all(np.isfinite(audio)):
+            audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
 
         delay_samples = max(10, min(self.max_delay_samples - 1, int(self.time_sec * self.sample_rate)))
         wet = np.zeros_like(audio)
@@ -493,7 +648,23 @@ class StereoStudioReverb:
         self.comb_pole_zi_l = [np.zeros(1, dtype=np.float32) for _ in self.comb_lens_l]
         self.comb_pole_zi_r = [np.zeros(1, dtype=np.float32) for _ in self.comb_lens_r]
         self._comb_zi_8 = np.zeros((1, 8), dtype=np.float32)
+        self._lock = threading.RLock()
+        self._native_sr = int(sample_rate)
+        self._native = (
+            dsp_native.nova_reverb_create(self._native_sr)
+            if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_reverb_create is not None
+            else None
+        )
         self.reset()
+
+    def __del__(self):
+        native = getattr(self, "_native", None)
+        if native is not None and dsp_native is not None and dsp_native.nova_reverb_destroy is not None:
+            try:
+                dsp_native.nova_reverb_destroy(native)
+            except Exception:
+                pass
+            self._native = None
 
     def _update_coefficients(self):
         """Précalcule les coefficients des filtres de réverbération pour un rendu sans allocation."""
@@ -502,21 +673,45 @@ class StereoStudioReverb:
         self._last_damp = self.damping
 
     def reset(self):
-        for b in self.comb_buffers_l + self.comb_buffers_r + self.allpass_buffers_l + self.allpass_buffers_r:
-            b.fill(0.0)
-        self.comb_indices_l = [0] * len(self.comb_lens_l)
-        self.comb_indices_r = [0] * len(self.comb_lens_r)
-        self.comb_stores_l = [0.0] * len(self.comb_lens_l)
-        self.comb_stores_r = [0.0] * len(self.comb_lens_r)
-        self.allpass_indices_l = [0] * len(self.allpass_lens_l)
-        self.allpass_indices_r = [0] * len(self.allpass_lens_r)
-        self.comb_pole_zi_l = [np.zeros(1, dtype=np.float32) for _ in self.comb_lens_l]
-        self.comb_pole_zi_r = [np.zeros(1, dtype=np.float32) for _ in self.comb_lens_r]
-        self._comb_zi_8 = np.zeros((1, 8), dtype=np.float32)
+        with self._lock:
+            if getattr(self, "_native", None) is not None and dsp_native.nova_reverb_reset is not None:
+                dsp_native.nova_reverb_reset(self._native)
+            for b in self.comb_buffers_l + self.comb_buffers_r + self.allpass_buffers_l + self.allpass_buffers_r:
+                b.fill(0.0)
+            self.comb_indices_l = [0] * len(self.comb_lens_l)
+            self.comb_indices_r = [0] * len(self.comb_lens_r)
+            self.comb_stores_l = [0.0] * len(self.comb_lens_l)
+            self.comb_stores_r = [0.0] * len(self.comb_lens_r)
+            self.allpass_indices_l = [0] * len(self.allpass_lens_l)
+            self.allpass_indices_r = [0] * len(self.allpass_lens_r)
+            self.comb_pole_zi_l = [np.zeros(1, dtype=np.float32) for _ in self.comb_lens_l]
+            self.comb_pole_zi_r = [np.zeros(1, dtype=np.float32) for _ in self.comb_lens_r]
+            self._comb_zi_8 = np.zeros((1, 8), dtype=np.float32)
 
     def process(self, audio: np.ndarray) -> np.ndarray:
         if not self.enabled or self.mix <= 0.001 or len(audio) == 0:
             return audio
+
+        if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_reverb_process is not None and self._native is not None:
+            in_c = np.ascontiguousarray(audio, dtype=np.float32)
+            if in_c.ndim == 2 and in_c.shape[1] == 2:
+                n = len(in_c)
+                out = np.empty((n, 2), dtype=np.float32)
+                with self._lock:
+                    dsp_native.nova_reverb_process(
+                        self._native,
+                        in_c.ctypes.data_as(dsp_native.c_float_p),
+                        out.ctypes.data_as(dsp_native.c_float_p),
+                        n,
+                        float(self.room_size),
+                        float(self.damping),
+                        float(self.mix),
+                        1 if self.enabled else 0,
+                    )
+                return out
+
+        if not np.all(np.isfinite(audio)):
+            audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
 
         n = len(audio)
         chunk_size = max(16, min(min(self.comb_lens_l), min(self.comb_lens_r)))

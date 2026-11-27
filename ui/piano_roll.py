@@ -1,6 +1,7 @@
 """
 ui/piano_roll.py - Séquenceur MIDI / Piano Roll interactif avec clavier virtuel à gauche
 """
+import math
 from typing import Optional, List, Tuple
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -9,7 +10,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import (
     QPainter, QColor, QPen, QBrush, QFont, QMouseEvent, QWheelEvent, QPolygonF
 )
-from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QEvent
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QEvent, QRect
 from core.project import MidiClip, MidiNote, Track
 from core.audio_engine import AudioEngine
 
@@ -127,6 +128,9 @@ class NoteGridWidget(QWidget):
         self.pixels_per_beat = 60.0
         self.snap_beats = 0.25  # 1/16 de mesure par défaut
         self.playhead_project_beat = 0.0
+        self._drawn_playhead_px: Optional[float] = None
+        self._expected_playhead_beat: Optional[float] = None
+        self._drawn_playhead_xform: Optional[Tuple[float, bool, float]] = None
 
         # Interaction notes
         self.selected_note: Optional[MidiNote] = None
@@ -152,25 +156,71 @@ class NoteGridWidget(QWidget):
         self.setToolTip("Ctrl+clic : sélection multiple · Ctrl+glisser : rectangle · "
                         "Flèches : déplacer/transposer · Shift+↑/↓ : octave · Q : quantifier · "
                         "Ctrl+Z / Ctrl+Y : annuler/rétablir")
+
+        # Caches graphiques pour éviter les allocations répétées à 60 Hz
+        self._bg_black = QColor("#121318")
+        self._bg_white = QColor("#1a1c24")
+        self._row_sep_pen = QPen(QColor("#242733"), 1)
+        self._bar_pen = QPen(QColor("#3f4559"), 2)
+        self._beat_pen = QPen(QColor("#222533"), 1)
+        self._subdiv_pen = QPen(QColor("#181a24"), 1)
+        self._out_of_clip_col = QColor(0, 0, 0, 120)
+        self._note_base_col = QColor("#38bdf8")
+        self._note_sel_brush = QBrush(QColor("#7dd3fc"))
+        self._note_sel_pen = QPen(QColor("#ffffff"), 2)
+        self._note_unsel_brush = QBrush(self._note_base_col)
+        self._note_unsel_pen = QPen(self._note_base_col.darker(130), 1)
+        self._note_text_pen = QColor("#082f49")
+        self._note_font = QFont("Segoe UI", 8, QFont.Bold)
+        self._marquee_pen = QPen(QColor("#38bdf8"), 1)
+        self._marquee_pen.setStyle(Qt.DashLine)
+        self._marquee_brush = QColor(56, 189, 248, 40)
+        self._playhead_pen = QPen(QColor("#38bdf8"), 2)
+        self._playhead_brush = QBrush(QColor("#38bdf8"))
+
         self.update_dimensions()
 
     def set_playhead(self, beat: float):
-        offset = self.clip.start_beat if self.clip else 0.0
-        old_px = int((self.playhead_project_beat - offset) * self.pixels_per_beat)
-        new_px = int((beat - offset) * self.pixels_per_beat)
-        self.playhead_project_beat = beat
-        if old_px == new_px:
+        if not math.isfinite(beat):
             return
+        offset = self.clip.start_beat if self.clip else 0.0
+        xform = (self.pixels_per_beat, self.clip is not None, offset)
+        if (
+            self._drawn_playhead_px is not None
+            and self._expected_playhead_beat == self.playhead_project_beat
+            and self._drawn_playhead_xform == xform
+        ):
+            old_px_f = self._drawn_playhead_px
+        else:
+            old_px_f = (self.playhead_project_beat - offset) * self.pixels_per_beat
+        new_px_f = (beat - offset) * self.pixels_per_beat
+        self.playhead_project_beat = beat
+        self._expected_playhead_beat = beat
+        if abs(new_px_f - old_px_f) < 0.05:
+            self._drawn_playhead_px = old_px_f
+            self._drawn_playhead_xform = xform
+            return
+        old_px = int(old_px_f)
+        new_px = int(new_px_f)
         h = self.height()
         min_x = min(old_px, new_px) - 4
         max_x = max(old_px, new_px) + 4
+        self._drawn_playhead_px = new_px_f
+        self._drawn_playhead_xform = xform
         if max_x - min_x < 60:
             self.update(min_x, 0, max_x - min_x + 1, h)
+            # Bande supérieure pour les ailes ±6px du triangle de tête de lecture
+            self.update(min_x - 4, 0, max_x - min_x + 9, 14)
         else:
             self.update(old_px - 4, 0, 9, h)
             self.update(new_px - 4, 0, 9, h)
+            self.update(old_px - 8, 0, 17, 14)
+            self.update(new_px - 8, 0, 17, 14)
 
     def set_clip(self, clip: Optional[MidiClip]):
+        self._drawn_playhead_px = None
+        self._expected_playhead_beat = None
+        self._drawn_playhead_xform = None
         if self.clip is clip:
             self._sync_history()
             self.update_dimensions()
@@ -195,6 +245,9 @@ class NoteGridWidget(QWidget):
 
     def set_zoom(self, ppb: float):
         self.pixels_per_beat = max(15.0, min(300.0, float(ppb)))
+        self._drawn_playhead_px = None
+        self._expected_playhead_beat = None
+        self._drawn_playhead_xform = None
         self.update_dimensions()
         self.update()
 
@@ -563,97 +616,150 @@ class NoteGridWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
+        region = event.region()
+        er = event.rect()
+        if 1 < region.rectCount() <= 4:
+            region_rects = list(region)
+            area_sum = sum(r.width() * r.height() for r in region_rects)
+            if area_sum * 2 < er.width() * er.height():
+                for r in region_rects:
+                    painter.save()
+                    painter.setClipRect(r)
+                    self._paint_dirty_rect(painter, r)
+                    painter.restore()
+                return
+        self._paint_dirty_rect(painter, er)
+
+    def _paint_dirty_rect(self, painter: QPainter, dirty_rect: QRect):
         width = self.width()
         height = self.height()
+        dx1 = dirty_rect.left()
+        dy1 = dirty_rect.top()
+        dx2 = dirty_rect.right()
+        dy2 = dirty_rect.bottom()
+        dw = dirty_rect.width()
+        lx1 = max(0, dx1 - 2)
+        lx2 = min(width, dx2 + 2)
+        ly1 = max(0, dy1 - 2)
+        ly2 = min(height, dy2 + 2)
 
         # 1. Lignes horizontales (Notes)
-        for i in range(self.num_pitches):
-            pitch = (self.start_pitch + self.num_pitches - 1) - i
-            y = i * self.row_height
+        rh = self.row_height
+        first_row = max(0, (dy1 - 2) // rh)
+        last_row = min(self.num_pitches - 1, (dy2 + 2) // rh)
+        top_pitch = self.start_pitch + self.num_pitches - 1
+
+        for i in range(first_row, last_row + 1):
+            pitch = top_pitch - i
+            y = i * rh
             is_black = IS_BLACK_KEY[pitch % 12]
-
-            bg = QColor("#121318") if is_black else QColor("#1a1c24")
-            painter.fillRect(0, y, width, self.row_height, bg)
-
-            # Ligne de séparation subtile
-            painter.setPen(QPen(QColor("#242733"), 1))
-            painter.drawLine(0, y + self.row_height, width, y + self.row_height)
+            painter.fillRect(dx1, y, dw, rh, self._bg_black if is_black else self._bg_white)
+            painter.setPen(self._row_sep_pen)
+            painter.drawLine(lx1, y + rh, lx2, y + rh)
 
         # 2. Lignes verticales (Mesures et temps)
         clip_beats = self.clip.length_beats if self.clip else 16.0
-        num_beats = int(width / self.pixels_per_beat) + 2
+        ppb = self.pixels_per_beat
+        num_beats = int(width / ppb) + 2
+        first_beat = max(0, int((dx1 - 2) / ppb))
+        last_beat = min(num_beats - 1, int((dx2 + 2) / ppb))
+        x_min = dx1 - 2
+        x_max = dx2 + 2
 
-        for beat in range(num_beats):
-            x = beat * self.pixels_per_beat
-            is_bar = (beat % 4 == 0)
-
-            pen_color = QColor("#3f4559") if is_bar else QColor("#222533")
-            pen_width = 2 if is_bar else 1
-            painter.setPen(QPen(pen_color, pen_width))
-            painter.drawLine(int(x), 0, int(x), height)
+        for beat in range(first_beat, last_beat + 1):
+            x = beat * ppb
+            if x_min <= x <= x_max:
+                painter.setPen(self._bar_pen if (beat % 4 == 0) else self._beat_pen)
+                painter.drawLine(int(x), ly1, int(x), ly2)
 
             # Subdivisions (1/16 ou 1/4)
-            painter.setPen(QPen(QColor("#181a24"), 1))
+            painter.setPen(self._subdiv_pen)
             for sub in range(1, 4):
-                sx = (beat + sub * 0.25) * self.pixels_per_beat
-                painter.drawLine(int(sx), 0, int(sx), height)
+                sx = (beat + sub * 0.25) * ppb
+                if x_min <= sx <= x_max:
+                    painter.drawLine(int(sx), ly1, int(sx), ly2)
 
         # 3. Ombrage hors des limites du clip
         if self.clip:
-            clip_end_x = clip_beats * self.pixels_per_beat
-            if width > clip_end_x:
-                painter.fillRect(QRectF(clip_end_x, 0, width - clip_end_x, height), QColor(0, 0, 0, 120))
+            clip_end_x = clip_beats * ppb
+            if width > clip_end_x and (dx2 + 1) > clip_end_x:
+                shade_x1 = max(float(dx1), clip_end_x)
+                shade_x2 = min(float(width), float(dx2 + 1))
+                if shade_x2 > shade_x1:
+                    painter.fillRect(
+                        QRectF(shade_x1, float(dy1), shade_x2 - shade_x1, float(dirty_rect.height())),
+                        self._out_of_clip_col,
+                    )
 
         # 4. Dessin des Notes
         if self.clip:
-            for note in self.clip.notes:
-                y = self.y_for_pitch(note.pitch) + 1
-                x = note.start_beat * self.pixels_per_beat
-                w = max(4.0, note.duration * self.pixels_per_beat - 2)
-                h = self.row_height - 2
+            selected_ids = {id(n) for n in self.selected_notes}
+            if self.selected_note is not None:
+                selected_ids.add(id(self.selected_note))
+            x_left = dx1 - 3.0
+            x_right = dx2 + 3.0
+            y_top = dy1 - 3.0
+            y_bot = dy2 + 3.0
+            h = rh - 2
+            font_set = False
 
-                is_sel = any(note is n for n in self.selected_notes) or self.selected_note is note
+            for note in self.clip.notes:
+                x = note.start_beat * ppb
+                w = max(4.0, note.duration * ppb - 2)
+                right_extent = x + w + (48.0 if w > 24 else 0.0)
+                if right_extent < x_left or x > x_right:
+                    continue
+                y = (top_pitch - note.pitch) * rh + 1
+                if y + h < y_top or y > y_bot:
+                    continue
+
+                is_sel = id(note) in selected_ids
                 note_rect = QRectF(x, y, w, h)
 
-                base_col = QColor("#38bdf8")
                 if is_sel:
-                    painter.setBrush(QBrush(QColor("#7dd3fc")))
-                    painter.setPen(QPen(QColor("#ffffff"), 2))
+                    painter.setBrush(self._note_sel_brush)
+                    painter.setPen(self._note_sel_pen)
                 else:
-                    painter.setBrush(QBrush(base_col))
-                    painter.setPen(QPen(base_col.darker(130), 1))
+                    painter.setBrush(self._note_unsel_brush)
+                    painter.setPen(self._note_unsel_pen)
 
                 painter.drawRoundedRect(note_rect, 3, 3)
 
                 # Nom de note à l'intérieur
                 if w > 24:
-                    painter.setPen(QColor("#082f49"))
-                    font = QFont("Segoe UI", 8, QFont.Bold)
-                    painter.setFont(font)
-                    painter.drawText(int(x) + 4, int(y) + self.row_height - 5, pitch_to_name(note.pitch))
+                    if not font_set:
+                        painter.setFont(self._note_font)
+                        font_set = True
+                    painter.setPen(self._note_text_pen)
+                    painter.drawText(int(x) + 4, int(y) + rh - 5, pitch_to_name(note.pitch))
 
-        if self._marquee is not None:
-            painter.setPen(QPen(QColor("#38bdf8"), 1, Qt.DashLine))
-            painter.setBrush(QColor(56, 189, 248, 40))
+        if self._marquee is not None and self._marquee.adjusted(-2, -2, 2, 2).intersects(QRectF(dirty_rect)):
+            painter.setPen(self._marquee_pen)
+            painter.setBrush(self._marquee_brush)
             painter.drawRect(self._marquee)
 
         # 5. Tête de lecture / Curseur synchronisé avec la timeline principale
         if self.clip:
             rel_beat = self.playhead_project_beat - self.clip.start_beat
             if 0.0 <= rel_beat <= (clip_beats + 4.0):
-                px = rel_beat * self.pixels_per_beat
-                painter.setPen(QPen(QColor("#38bdf8"), 2))
-                painter.drawLine(int(px), 0, int(px), height)
+                px = rel_beat * ppb
+                if dx1 - 8 <= px <= dx2 + 8:
+                    painter.setPen(self._playhead_pen)
+                    painter.drawLine(int(px), ly1, int(px), ly2)
 
-                # Curseur triangulaire en haut
-                painter.setBrush(QBrush(QColor("#38bdf8")))
-                painter.setPen(Qt.NoPen)
-                tri = QPolygonF([
-                    QPointF(px - 6, 0),
-                    QPointF(px + 6, 0),
-                    QPointF(px, 12)
-                ])
-                painter.drawPolygon(tri)
+                    # Curseur triangulaire en haut
+                    if dy1 <= 14:
+                        painter.setBrush(self._playhead_brush)
+                        painter.setPen(Qt.NoPen)
+                        tri = QPolygonF([
+                            QPointF(px - 6, 0),
+                            QPointF(px + 6, 0),
+                            QPointF(px, 12)
+                        ])
+                        painter.drawPolygon(tri)
+                    self._drawn_playhead_px = px
+                    self._expected_playhead_beat = self.playhead_project_beat
+                    self._drawn_playhead_xform = (ppb, True, self.clip.start_beat if self.clip else 0.0)
 
 
 class PianoRoll(QWidget):

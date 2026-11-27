@@ -7,8 +7,9 @@ Affiche :
 - VU-mètres stéréo de crête animés en temps réel
 - Accès rapide aux plugins chargés sur chaque piste
 """
+import math
 import os
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 import numpy as np
 
 from PySide6.QtWidgets import (
@@ -16,53 +17,183 @@ from PySide6.QtWidgets import (
     QSlider, QFrame, QScrollArea, QSizePolicy, QMenu
 )
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QPainter, QBrush, QColor, QFont, QLinearGradient, QPen
+from PySide6.QtGui import QPainter, QBrush, QColor, QFont, QLinearGradient, QPen, QPixmap
 
 from plugins.mixer.mixer_plugin import MixerPlugin
 from core.project import Project, Track
 from ui.track_header import ResetableSlider
 
 
-class VuMeterBar(QFrame):
-    """Bargraph vertical stéréo (Vert -> Jaune -> Rouge)"""
+class VuMeterBar(QWidget):
+    """Bargraph vertical stéréo (Vert -> Jaune -> Rouge) sans QSS ni allocations par trame"""
+
+    _BG_COLOR = QColor("#0b0d12")
+    _BORDER_PEN = QPen(QColor("#1f2430"), 1)
+    _ZERO_PEN = QPen(QColor(248, 113, 113), 1)
+    _C_GREEN = QColor(34, 197, 94)
+    _C_YELLOW = QColor(234, 179, 8)
+    _C_RED = QColor(239, 68, 68)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.setFixedWidth(14)
         self.setMinimumHeight(120)
         self.peak_left_db = -60.0
         self.peak_right_db = -60.0
-        self.setStyleSheet("background-color: #0b0d12; border: 1px solid #1f2430; border-radius: 2px;")
+        self._last_bars: Optional[Tuple[int, int]] = None
+        self._bar_pixmap: Optional[QPixmap] = None
+        self._bar_pixmap_size: Optional[Tuple[int, int]] = None
+
+    def resizeEvent(self, event):
+        self._last_bars = None
+        super().resizeEvent(event)
+
+    def _ensure_bar_pixmap(self, bar_w: int, usable_h: int) -> QPixmap:
+        key = (bar_w, usable_h)
+        if self._bar_pixmap is None or self._bar_pixmap_size != key:
+            pix = QPixmap(bar_w, usable_h)
+            p = QPainter(pix)
+            gradient = QLinearGradient(0, usable_h, 0, 0)
+            gradient.setColorAt(0.0, self._C_GREEN)   # Vert
+            gradient.setColorAt(0.7, self._C_YELLOW)  # Jaune (-6 dB)
+            gradient.setColorAt(1.0, self._C_RED)     # Rouge (+0 dB)
+            p.fillRect(0, 0, bar_w, usable_h, QBrush(gradient))
+            p.end()
+            self._bar_pixmap = pix
+            self._bar_pixmap_size = key
+        return self._bar_pixmap
+
+    @staticmethod
+    def _norm_db(db: float) -> float:
+        if not math.isfinite(db):
+            return 1.0 if db > 0.0 else 0.0
+        if db <= -48.0:
+            return 0.0
+        if db >= 3.0:
+            return 1.0
+        return (db + 48.0) / 51.0
 
     def set_levels(self, l_db: float, r_db: float):
-        self.peak_left_db = l_db
-        self.peak_right_db = r_db
-        self.update()
+        l_val = -60.0 if math.isnan(l_db) else float(l_db)
+        r_val = -60.0 if math.isnan(r_db) else float(r_db)
+        self.peak_left_db = l_val
+        self.peak_right_db = r_val
+        usable_h = max(0, self.height() - 4)
+        nl = self._norm_db(l_val)
+        nr = self._norm_db(r_val)
+        bars = (int(usable_h * nl), int(usable_h * nr))
+        if bars != self._last_bars:
+            self._last_bars = bars
+            self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         w = self.width()
         h = self.height()
+        painter.fillRect(0, 0, w, h, self._BG_COLOR)
+        painter.setPen(self._BORDER_PEN)
+        painter.drawRect(0, 0, w - 1, h - 1)
+
+        usable_h = h - 4
         bar_w = (w - 4) // 2
-
-        for ch_idx, db in enumerate([self.peak_left_db, self.peak_right_db]):
-            # Échelle de -48 dB à +3 dB
-            norm = max(0.0, min(1.0, (db + 48.0) / 51.0))
-            bar_h = int((h - 4) * norm)
-            x_pos = 2 + ch_idx * (bar_w + 1)
-            y_pos = h - 2 - bar_h
-
-            if bar_h > 0:
-                gradient = QLinearGradient(0, h - 2, 0, 2)
-                gradient.setColorAt(0.0, QColor(34, 197, 94))   # Vert
-                gradient.setColorAt(0.7, QColor(234, 179, 8))   # Jaune (-6 dB)
-                gradient.setColorAt(1.0, QColor(239, 68, 68))   # Rouge (+0 dB)
-                painter.fillRect(x_pos, y_pos, bar_w, bar_h, QBrush(gradient))
+        if usable_h > 0 and bar_w > 0:
+            pix = self._ensure_bar_pixmap(bar_w, usable_h)
+            for ch_idx, db in enumerate((self.peak_left_db, self.peak_right_db)):
+                # Échelle de -48 dB à +3 dB
+                norm = self._norm_db(db)
+                bar_h = int(usable_h * norm)
+                if bar_h > 0:
+                    x_pos = 2 + ch_idx * (bar_w + 1)
+                    y_pos = h - 2 - bar_h
+                    painter.drawPixmap(x_pos, y_pos, pix, 0, usable_h - bar_h, bar_w, bar_h)
 
         # Ligne de repère 0 dB (à environ 94% de la hauteur)
-        y_zero = int(h - 2 - (h - 4) * (48.0 / 51.0))
-        painter.setPen(QPen(QColor(248, 113, 113), 1))
+        y_zero = int(h - 2 - usable_h * (48.0 / 51.0))
+        painter.setPen(self._ZERO_PEN)
         painter.drawLine(1, y_zero, w - 2, y_zero)
+
+
+class PeakDbLabel(QWidget):
+    """Afficheur de crête en dB sans QSS ni recalcul de mise en page à 30 Hz"""
+
+    _C_SILENT = QColor("#64748b")
+    _C_CLIP = QColor("#ef4444")
+    _C_WARN = QColor("#f59e0b")
+    _C_NORM_STRIP = QColor("#38bdf8")
+    _C_NORM_MASTER = QColor("#fbbf24")
+
+    def __init__(
+        self,
+        text: str = "-∞ dB",
+        font_px: int = 9,
+        normal_color: str = "#38bdf8",
+        bg_normal: str = "#151822",
+        bg_selected: str = "#1b2030",
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self._text = text
+        self._alignment = Qt.AlignRight | Qt.AlignVCenter
+        self._font = QFont()
+        self._font.setPixelSize(font_px)
+        self._font.setBold(True)
+        self._color_norm = self._C_NORM_MASTER if normal_color == "#fbbf24" else (
+            self._C_NORM_STRIP if normal_color == "#38bdf8" else QColor(normal_color)
+        )
+        self._color = self._C_SILENT
+        self._bg_normal = QColor(bg_normal)
+        self._bg_selected = QColor(bg_selected)
+        self._is_selected = False
+        self.setFixedHeight(14 if font_px <= 9 else 15)
+        self.setMinimumWidth(44)
+
+    def text(self) -> str:
+        return self._text
+
+    def setText(self, text: str):
+        if text != self._text:
+            self._text = text
+            self.update()
+
+    def setAlignment(self, alignment):
+        if self._alignment != alignment:
+            self._alignment = alignment
+            self.update()
+
+    def set_background_selected(self, selected: bool):
+        if self._is_selected != selected:
+            self._is_selected = selected
+            self.update()
+
+    def set_level_db(self, pk_max: float):
+        if math.isnan(pk_max) or pk_max <= -50.0:
+            new_text = "-∞ dB"
+            new_color = self._C_SILENT
+        else:
+            if pk_max > 0.0:
+                new_text = f"{pk_max:+.1f} dB"
+                new_color = self._C_CLIP
+            elif pk_max > -6.0:
+                new_text = f"{pk_max:.1f} dB"
+                new_color = self._C_WARN
+            else:
+                new_text = f"{pk_max:.1f} dB"
+                new_color = self._color_norm
+
+        if new_text != self._text or new_color is not self._color:
+            self._text = new_text
+            self._color = new_color
+            self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        bg = self._bg_selected if self._is_selected else self._bg_normal
+        painter.fillRect(0, 0, self.width(), self.height(), bg)
+        painter.setFont(self._font)
+        painter.setPen(self._color)
+        painter.drawText(self.rect(), self._alignment, self._text)
 
 
 class MixerChannelStrip(QFrame):
@@ -115,6 +246,8 @@ class MixerChannelStrip(QFrame):
         if self.is_selected != selected:
             self.is_selected = selected
             self._apply_style(selected)
+            if hasattr(self, "lbl_peak_db"):
+                self.lbl_peak_db.set_background_selected(selected)
 
     def mousePressEvent(self, event):
         self.track_selected.emit(self.track.id)
@@ -183,6 +316,7 @@ class MixerChannelStrip(QFrame):
         # 1. Badge couleur & Nom
         self.color_tag = QFrame()
         self.color_tag.setFixedHeight(4)
+        self._last_tag_color = self.track.color
         self.color_tag.setStyleSheet(f"background-color: {self.track.color}; border-radius: 2px;")
         layout.addWidget(self.color_tag)
 
@@ -270,9 +404,14 @@ class MixerChannelStrip(QFrame):
         self.lbl_vol_db.setToolTip(f"Volume Fader : {vol_val}%")
         meter_info_layout.addWidget(self.lbl_vol_db)
 
-        self.lbl_peak_db = QLabel("-∞ dB")
-        self.lbl_peak_db.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.lbl_peak_db.setStyleSheet("font-size: 9px; font-weight: bold; color: #64748b;")
+        self.lbl_peak_db = PeakDbLabel(
+            "-∞ dB",
+            font_px=9,
+            normal_color="#38bdf8",
+            bg_normal="#151822",
+            bg_selected="#1b2030",
+            parent=self,
+        )
         self.lbl_peak_db.setToolTip("Niveau de crête réel en direct (dB)")
         meter_info_layout.addWidget(self.lbl_peak_db)
 
@@ -280,20 +419,11 @@ class MixerChannelStrip(QFrame):
 
     def set_levels(self, l_db: float, r_db: float):
         """Met à jour le VU-mètre et l'indicateur décibels (dB) en direct avec 1 décimale."""
-        self.vu_meter.set_levels(l_db, r_db)
-        pk_max = max(l_db, r_db)
+        l_val = -60.0 if math.isnan(l_db) else l_db
+        r_val = -60.0 if math.isnan(r_db) else r_db
+        self.vu_meter.set_levels(l_val, r_val)
         if hasattr(self, "lbl_peak_db"):
-            if pk_max <= -50.0:
-                self.lbl_peak_db.setText("-∞ dB")
-                self.lbl_peak_db.setStyleSheet("font-size: 9px; font-weight: bold; color: #64748b;")
-            else:
-                self.lbl_peak_db.setText(f"{pk_max:+.1f} dB" if pk_max > 0.0 else f"{pk_max:.1f} dB")
-                if pk_max > 0.0:
-                    self.lbl_peak_db.setStyleSheet("font-size: 9px; font-weight: bold; color: #ef4444;")
-                elif pk_max > -6.0:
-                    self.lbl_peak_db.setStyleSheet("font-size: 9px; font-weight: bold; color: #f59e0b;")
-                else:
-                    self.lbl_peak_db.setStyleSheet("font-size: 9px; font-weight: bold; color: #38bdf8;")
+            self.lbl_peak_db.set_level_db(max(l_val, r_val))
 
     def _update_pan_tooltip(self, val: int):
         pan_str = "C" if val == 0 else (f"L{abs(val)}" if val < 0 else f"R{val}")
@@ -377,7 +507,9 @@ class MixerChannelStrip(QFrame):
         self._update_pan_tooltip(pan_val)
 
         self._update_name_label()
-        self.color_tag.setStyleSheet(f"background-color: {self.track.color}; border-radius: 2px;")
+        if getattr(self, "_last_tag_color", None) != self.track.color:
+            self._last_tag_color = self.track.color
+            self.color_tag.setStyleSheet(f"background-color: {self.track.color}; border-radius: 2px;")
 
 
 class MixerConsoleWidget(QWidget):
@@ -392,6 +524,7 @@ class MixerConsoleWidget(QWidget):
         super().__init__(parent)
         self.mixer = mixer
         self._selected_track_id: Optional[str] = None
+        self._master_selected: Optional[bool] = None
         self.setObjectName("mixer_console")
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet("""
@@ -521,8 +654,13 @@ class MixerConsoleWidget(QWidget):
         """
 
     def _apply_master_style(self, selected: bool):
+        if self._master_selected == selected and hasattr(self, "master_frame"):
+            return
+        self._master_selected = selected
         if hasattr(self, "master_frame"):
             self.master_frame.setStyleSheet(self._get_master_frame_style(selected))
+        if hasattr(self, "lbl_master_peak_db"):
+            self.lbl_master_peak_db.set_background_selected(selected)
 
     def _on_master_strip_clicked(self, event):
         if self.mixer.project:
@@ -605,9 +743,14 @@ class MixerConsoleWidget(QWidget):
         self.lbl_master_db.setToolTip(f"Volume Master : {master_vol_val}%")
         master_info_layout.addWidget(self.lbl_master_db)
 
-        self.lbl_master_peak_db = QLabel("-∞ dB")
-        self.lbl_master_peak_db.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.lbl_master_peak_db.setStyleSheet("font-size: 10px; font-weight: bold; color: #64748b;")
+        self.lbl_master_peak_db = PeakDbLabel(
+            "-∞ dB",
+            font_px=10,
+            normal_color="#fbbf24",
+            bg_normal="#171a22",
+            bg_selected="#241e17",
+            parent=self,
+        )
         self.lbl_master_peak_db.setToolTip("Niveau Master réel en direct (dB)")
         master_info_layout.addWidget(self.lbl_master_peak_db)
 
@@ -833,33 +976,26 @@ class MixerConsoleWidget(QWidget):
     def _update_meters(self):
         """Mise à jour périodique des VU-mètres Master et Pistes (30 FPS)"""
         # Master VU-Meter et affichage dynamique dB avec décimales
-        self.master_vu.set_levels(self.mixer.peak_left_db, self.mixer.peak_right_db)
-        m_pk_max = max(self.mixer.peak_left_db, self.mixer.peak_right_db)
+        pk_ml = -60.0 if math.isnan(self.mixer.peak_left_db) else self.mixer.peak_left_db
+        pk_mr = -60.0 if math.isnan(self.mixer.peak_right_db) else self.mixer.peak_right_db
+        self.master_vu.set_levels(pk_ml, pk_mr)
         if hasattr(self, "lbl_master_peak_db"):
-            if m_pk_max <= -50.0:
-                self.lbl_master_peak_db.setText("-∞ dB")
-                self.lbl_master_peak_db.setStyleSheet("font-size: 10px; font-weight: bold; color: #64748b;")
-            else:
-                self.lbl_master_peak_db.setText(f"{m_pk_max:+.1f} dB" if m_pk_max > 0.0 else f"{m_pk_max:.1f} dB")
-                if m_pk_max > 0.0:
-                    self.lbl_master_peak_db.setStyleSheet("font-size: 10px; font-weight: bold; color: #ef4444;")
-                elif m_pk_max > -6.0:
-                    self.lbl_master_peak_db.setStyleSheet("font-size: 10px; font-weight: bold; color: #f59e0b;")
-                else:
-                    self.lbl_master_peak_db.setStyleSheet("font-size: 10px; font-weight: bold; color: #fbbf24;")
+            self.lbl_master_peak_db.set_level_db(max(pk_ml, pk_mr))
 
         # Décroissance douce des niveaux Master (~55 dB/s)
-        self.mixer.peak_left_db = max(-60.0, self.mixer.peak_left_db - 1.8)
-        self.mixer.peak_right_db = max(-60.0, self.mixer.peak_right_db - 1.8)
+        self.mixer.peak_left_db = max(-60.0, pk_ml - 1.8)
+        self.mixer.peak_right_db = max(-60.0, pk_mr - 1.8)
 
         # Mettre à jour toutes les tranches individuelles
         for track_id, strip in self.strips.items():
             if track_id in self.mixer.track_peaks:
                 pk_l, pk_r = self.mixer.track_peaks[track_id]
-                strip.set_levels(pk_l, pk_r)
+                pk_l_val = -60.0 if math.isnan(pk_l) else pk_l
+                pk_r_val = -60.0 if math.isnan(pk_r) else pk_r
+                strip.set_levels(pk_l_val, pk_r_val)
                 # Décroissance douce pour la piste
-                new_l = max(-60.0, pk_l - 1.8)
-                new_r = max(-60.0, pk_r - 1.8)
+                new_l = max(-60.0, pk_l_val - 1.8)
+                new_r = max(-60.0, pk_r_val - 1.8)
                 self.mixer.track_peaks[track_id] = (new_l, new_r)
             else:
                 strip.set_levels(-60.0, -60.0)

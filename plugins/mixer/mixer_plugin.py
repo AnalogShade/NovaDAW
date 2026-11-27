@@ -7,8 +7,11 @@ Plugin de mixage placé par défaut sur la piste Master :
 - Gère le fader Master et le niveau de sortie global
 - Totalement synchronisé avec le projet NovaDAW
 """
+import ctypes
 from typing import Dict, Any, Optional, List
 import numpy as np
+
+from core import dsp_native
 
 from plugins.base import BasePlugin
 from plugins.registry import register_plugin
@@ -76,9 +79,43 @@ class MixerPlugin(BasePlugin):
             return audio
 
         if audio.ndim == 1:
-            out = np.column_stack((audio, audio)).astype(np.float32)
+            in_c = np.column_stack((audio, audio)).astype(np.float32)
+        elif audio.ndim == 2 and audio.shape[1] == 1:
+            in_c = np.column_stack((audio[:, 0], audio[:, 0])).astype(np.float32)
+        elif audio.ndim == 2 and audio.shape[1] > 2:
+            in_c = np.ascontiguousarray(audio[:, :2], dtype=np.float32)
         else:
-            out = audio.copy().astype(np.float32)
+            in_c = np.ascontiguousarray(audio, dtype=np.float32)
+
+        if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_mixer_process is not None:
+            n_frames = len(in_c)
+            out = np.empty((n_frames, 2), dtype=np.float32)
+            pk_l = ctypes.c_float(float(self.peak_left_db))
+            pk_r = ctypes.c_float(float(self.peak_right_db))
+            rms_l = ctypes.c_float(-60.0)
+            rms_r = ctypes.c_float(-60.0)
+            dsp_native.nova_mixer_process(
+                in_c.ctypes.data_as(dsp_native.c_float_p),
+                out.ctypes.data_as(dsp_native.c_float_p),
+                int(n_frames),
+                int(sample_rate or 44100),
+                float(self.master_volume),
+                float(self.master_pan),
+                1 if self.mono_switch else 0,
+                1 if self.dim_switch else 0,
+                0,
+                ctypes.byref(pk_l),
+                ctypes.byref(pk_r),
+                ctypes.byref(rms_l),
+                ctypes.byref(rms_r),
+            )
+            self.peak_left_db = float(pk_l.value)
+            self.peak_right_db = float(pk_r.value)
+            self.rms_left_db = float(rms_l.value)
+            self.rms_right_db = float(rms_r.value)
+            return out
+
+        out = in_c.copy()
 
         # 1. Mode Mono (sommation L+R / 2 sur les deux canaux)
         if self.mono_switch:

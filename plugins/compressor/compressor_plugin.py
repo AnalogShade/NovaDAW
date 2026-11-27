@@ -12,8 +12,12 @@ Implémente un compresseur audio de qualité studio professionnelle (broadcast-g
 - Mesures en direct ultra-précises pour VU-mètre de Réduction de Gain (GR) et crêtes Entrée/Sortie
 """
 from typing import Dict, Any, Optional
+import ctypes
 import math
+import threading
 import numpy as np
+
+from core import dsp_native
 try:
     import scipy.signal
     HAS_SCIPY = True
@@ -127,6 +131,13 @@ class CompressorPlugin(BasePlugin):
         self.current_input_peak_db: float = -60.0
         self.current_output_peak_db: float = -60.0
 
+        self._lock = threading.RLock()
+        if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_comp_reset is not None:
+            self._c_state: Optional[dsp_native.NovaCompressorState] = dsp_native.NovaCompressorState()
+            dsp_native.nova_comp_reset(ctypes.byref(self._c_state))
+        else:
+            self._c_state = None
+
     def get_factory_presets(self) -> Dict[str, Dict[str, Any]]:
         return self.FACTORY_PRESETS
 
@@ -168,12 +179,15 @@ class CompressorPlugin(BasePlugin):
 
     def reset(self) -> None:
         """Réinitialise l'état dynamique interne et les indicateurs."""
-        self._env_peak = 0.0
-        self._env_gr_db = 0.0
-        self._hpf_zi = None
-        self.current_gain_reduction_db = 0.0
-        self.current_input_peak_db = -60.0
-        self.current_output_peak_db = -60.0
+        with self._lock:
+            if self._c_state is not None and dsp_native.nova_comp_reset is not None:
+                dsp_native.nova_comp_reset(ctypes.byref(self._c_state))
+            self._env_peak = 0.0
+            self._env_gr_db = 0.0
+            self._hpf_zi = None
+            self.current_gain_reduction_db = 0.0
+            self.current_input_peak_db = -60.0
+            self.current_output_peak_db = -60.0
 
     def decay_meters(self, rate_db: float = 1.8, gr_rate_db: float = 1.2) -> None:
         """
@@ -224,21 +238,63 @@ class CompressorPlugin(BasePlugin):
         # Formater en stéréo float32 contigu
         if audio.ndim == 1:
             in_buf = np.column_stack((audio, audio)).astype(np.float32)
+        elif audio.ndim == 2 and audio.shape[1] == 1:
+            in_buf = np.column_stack((audio[:, 0], audio[:, 0])).astype(np.float32)
+        elif audio.ndim == 2 and audio.shape[1] > 2:
+            in_buf = np.ascontiguousarray(audio[:, :2], dtype=np.float32)
         else:
             in_buf = np.ascontiguousarray(audio, dtype=np.float32)
 
         n_samples = len(in_buf)
 
-        # 1. Mesure du niveau de crête d'entrée
-        max_in = float(np.max(np.abs(in_buf))) if n_samples > 0 else 0.0
-        in_pk_db = 20.0 * math.log10(max(1e-5, max_in))
-        self.current_input_peak_db = in_pk_db
-
         # En mode Bypass : transmettre le signal audio transparent et mettre GR à 0
         if not self.enabled:
+            max_in = float(np.max(np.abs(in_buf))) if n_samples > 0 else 0.0
+            in_pk_db = 20.0 * math.log10(max(1e-5, max_in))
+            self.current_input_peak_db = in_pk_db
             self.current_gain_reduction_db = 0.0
             self.current_output_peak_db = in_pk_db
             return in_buf
+
+        if self._c_state is not None and dsp_native.nova_comp_process is not None:
+            out_buf = np.empty((n_samples, 2), dtype=np.float32)
+            in_pk = ctypes.c_float(-60.0)
+            out_pk = ctypes.c_float(-60.0)
+            gr_db = ctypes.c_float(0.0)
+            det_mode = 1 if str(self.detection_mode).lower() == "rms" else 0
+            with self._lock:
+                dsp_native.nova_comp_process(
+                    ctypes.byref(self._c_state),
+                    in_buf.ctypes.data_as(dsp_native.c_float_p),
+                    out_buf.ctypes.data_as(dsp_native.c_float_p),
+                    int(n_samples),
+                    int(sample_rate),
+                    float(self.threshold_db),
+                    float(self.ratio),
+                    float(self.attack_ms),
+                    float(self.release_ms),
+                    float(self.knee_db),
+                    float(self.makeup_gain_db),
+                    1 if self.auto_makeup else 0,
+                    float(self.mix),
+                    det_mode,
+                    float(self.sidechain_hpf_hz),
+                    1,
+                    ctypes.byref(in_pk),
+                    ctypes.byref(out_pk),
+                    ctypes.byref(gr_db),
+                )
+                self._env_peak = float(self._c_state.env_peak)
+                self._env_gr_db = float(self._c_state.env_gr_db)
+                self.current_input_peak_db = float(in_pk.value)
+                self.current_output_peak_db = float(out_pk.value)
+                self.current_gain_reduction_db = float(gr_db.value)
+            return out_buf
+
+        # 1. Mesure du niveau de crête d'entrée (repli Python/SciPy)
+        max_in = float(np.max(np.abs(in_buf))) if n_samples > 0 else 0.0
+        in_pk_db = 20.0 * math.log10(max(1e-5, max_in))
+        self.current_input_peak_db = in_pk_db
 
         # 2. Détection Sidechain (Max stéréo)
         sc = np.maximum(np.abs(in_buf[:, 0]), np.abs(in_buf[:, 1]))
@@ -252,8 +308,23 @@ class CompressorPlugin(BasePlugin):
                 sc, self._hpf_zi = scipy.signal.lfilter(b, a, sc, zi=self._hpf_zi)
                 sc = np.abs(sc)
             else:
-                # Fallback Direct Form II simple
-                sc = np.abs(sc)
+                b0, b1, b2 = float(b[0]), float(b[1]), float(b[2])
+                a1, a2 = float(a[1]), float(a[2])
+                if self._hpf_zi is None or len(self._hpf_zi) != 2:
+                    denom = 1.0 + a1 + a2
+                    y_ss = (b0 + b1 + b2) / denom if abs(denom) > 1e-12 else 0.0
+                    sc0 = float(sc[0])
+                    self._hpf_zi = np.array([(y_ss - b0) * sc0, (b2 - a2 * y_ss) * sc0], dtype=np.float64)
+                z0, z1 = float(self._hpf_zi[0]), float(self._hpf_zi[1])
+                sc_filt = np.empty(n_samples, dtype=np.float64)
+                for i in range(n_samples):
+                    x_s = float(sc[i])
+                    y_s = b0 * x_s + z0
+                    z0 = b1 * x_s - a1 * y_s + z1
+                    z1 = b2 * x_s - a2 * y_s
+                    sc_filt[i] = abs(y_s)
+                self._hpf_zi[0], self._hpf_zi[1] = z0, z1
+                sc = sc_filt
 
         # 3. Constantes de temps ballistiques (Attack / Release)
         att_sec = max(0.0001, self.attack_ms / 1000.0)

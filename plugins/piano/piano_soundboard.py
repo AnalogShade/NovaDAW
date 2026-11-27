@@ -1,9 +1,14 @@
 """Procedural pressure radiation from a shared, passive dispersive spruce piano soundboard."""
 
+import ctypes
 from functools import lru_cache
+import math
+import threading
 
 import numpy as np
 from scipy.signal import butter, lfilter, sosfilt
+
+from core import dsp_native
 
 
 # Successive bridge locations from the long copper-wound bass strings to the short treble.
@@ -253,18 +258,60 @@ class PianoSoundboard:
             [[0.80, 0.34], [0.76, 0.50], [0.67, 0.67], [0.50, 0.76], [0.34, 0.80]],
             dtype=np.float64,
         )
+        self._lock = threading.RLock()
+        self._native = None
+        if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_sb_create is not None:
+            plate_hz_c = np.ascontiguousarray(self.plate_hz, dtype=np.float64)
+            bridge_modes_c = np.ascontiguousarray(self.bridge_modes, dtype=np.float64)
+            mode_pressure_c = np.ascontiguousarray(self.mode_pressure, dtype=np.float64)
+            rad_c = np.ascontiguousarray(self.radiation, dtype=np.float64)
+            symp_bp_c = np.ascontiguousarray(self.symp_bp, dtype=np.float64)
+            body_lp_c = np.ascontiguousarray(self.body_lp, dtype=np.float64)
+            ap_l_c = np.ascontiguousarray(self.allpass_l, dtype=np.float64)
+            ap_r_c = np.ascontiguousarray(self.allpass_r, dtype=np.float64)
+            taps_c = np.ascontiguousarray(self.tap_delays, dtype=np.int32)
+            wg_c = np.ascontiguousarray(self.wg_delays, dtype=np.int32)
+            self._native = dsp_native.nova_sb_create(
+                int(sample_rate),
+                len(plate_hz_c),
+                plate_hz_c.ctypes.data_as(dsp_native.c_double_p),
+                bridge_modes_c.ctypes.data_as(dsp_native.c_double_p),
+                mode_pressure_c.ctypes.data_as(dsp_native.c_double_p),
+                rad_c.ctypes.data_as(dsp_native.c_double_p),
+                symp_bp_c.ctypes.data_as(dsp_native.c_double_p),
+                body_lp_c.ctypes.data_as(dsp_native.c_double_p),
+                len(ap_l_c),
+                ap_l_c.ctypes.data_as(dsp_native.c_double_p),
+                len(ap_r_c),
+                ap_r_c.ctypes.data_as(dsp_native.c_double_p),
+                taps_c.ctypes.data_as(dsp_native.c_int32_p),
+                int(self.max_delay),
+                wg_c.ctypes.data_as(dsp_native.c_int32_p),
+            )
+
+    def __del__(self):
+        native = getattr(self, "_native", None)
+        if native is not None and dsp_native is not None and dsp_native.nova_sb_destroy is not None:
+            try:
+                dsp_native.nova_sb_destroy(native)
+            except Exception:
+                pass
+            self._native = None
 
     def reset(self):
-        self.modal_state.fill(0.0)
-        self.radiation_state.fill(0.0)
-        self.chest_state.fill(0.0)
-        self.symp_bp_state.fill(0.0)
-        for st in self.wg_states:
-            st.fill(0.0)
-        self.allpass_state_l.fill(0.0)
-        self.allpass_state_r.fill(0.0)
-        self.body_lp_state.fill(0.0)
-        self.body_history.fill(0.0)
+        with self._lock:
+            if self._native is not None and dsp_native.nova_sb_reset is not None:
+                dsp_native.nova_sb_reset(self._native)
+            self.modal_state.fill(0.0)
+            self.radiation_state.fill(0.0)
+            self.chest_state.fill(0.0)
+            self.symp_bp_state.fill(0.0)
+            for st in self.wg_states:
+                st.fill(0.0)
+            self.allpass_state_l.fill(0.0)
+            self.allpass_state_r.fill(0.0)
+            self.body_lp_state.fill(0.0)
+            self.body_history.fill(0.0)
 
     def _early_body_reflections(self, stereo):
         """Block-invariant multi-tap open-lid and case-rim early reflections."""
@@ -285,12 +332,35 @@ class PianoSoundboard:
         return reflections
 
     def process(self, force, resonance):
+        if len(force) == 0:
+            return np.zeros((0, 2), dtype=np.float32)
+
+        if self._native is not None and dsp_native.nova_sb_process is not None:
+            in_c = np.ascontiguousarray(force, dtype=np.float32)
+            if in_c.ndim == 2 and in_c.shape[1] == BRIDGE_CHANNELS:
+                res_val = float(resonance)
+                res_val = 0.0 if not math.isfinite(res_val) else max(0.0, min(1.0, res_val))
+                frames = len(in_c)
+                out = np.empty((frames, 2), dtype=np.float32)
+                with self._lock:
+                    dsp_native.nova_sb_process(
+                        self._native,
+                        in_c.ctypes.data_as(dsp_native.c_float_p),
+                        out.ctypes.data_as(dsp_native.c_float_p),
+                        frames,
+                        res_val,
+                    )
+                return out
+
         force64 = np.asarray(force, dtype=np.float64)
         frames = len(force64)
         if frames == 0:
             return np.zeros((0, 2), dtype=np.float32)
+        if not np.all(np.isfinite(force64)):
+            force64 = np.nan_to_num(force64, nan=0.0, posinf=0.0, neginf=0.0)
 
-        res = float(np.clip(resonance, 0.0, 1.0))
+        res_val = float(resonance)
+        res = 0.0 if not math.isfinite(res_val) else max(0.0, min(1.0, res_val))
         res_key = round(res, 2)
         chest_sos, numerator, denominator, wg_pairs = _modal_resonators(self.sample_rate, res_key)
 

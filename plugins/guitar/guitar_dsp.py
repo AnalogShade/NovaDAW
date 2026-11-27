@@ -9,9 +9,12 @@ Licence MIT — Implémentation 100 % originale basée sur la physique des guide
 - Double polarisation couplée pour un battement et un sustain naturels
 - Étage de sortie commutable : Caisse acoustique modale (Nylon / Folk) ou Micro magnétique électrique (DI)
 """
+import ctypes
 import math
 from typing import Optional, Dict, Tuple, Any
 import numpy as np
+
+from core import dsp_native
 
 try:
     import scipy.signal as sig
@@ -135,21 +138,45 @@ def _lfilter_fast(b: np.ndarray, a: np.ndarray, x: np.ndarray, zi: np.ndarray) -
     if HAS_SCIPY:
         return sig.lfilter(b, a, x, zi=zi)
     # Repli Direct Form II Transposed en Python si SciPy absent
-    n = len(x)
-    order = len(a) - 1
+    b_arr = np.asarray(b, dtype=np.float64)
+    a_arr = np.asarray(a, dtype=np.float64)
+    a0 = float(a_arr[0])
+    if a0 != 1.0:
+        b_arr = b_arr / a0
+        a_arr = a_arr / a0
+    m = max(len(b_arr), len(a_arr))
+    order = m - 1
+    x_arr = np.asarray(x, dtype=np.float64)
+    n = len(x_arr)
+    if order == 0:
+        b0 = float(b_arr[0]) if len(b_arr) > 0 else 0.0
+        return b0 * x_arr, np.empty(0, dtype=np.float64)
+
+    if len(b_arr) < m:
+        b_pad = np.zeros(m, dtype=np.float64)
+        b_pad[:len(b_arr)] = b_arr
+    else:
+        b_pad = b_arr
+    if len(a_arr) < m:
+        a_pad = np.zeros(m, dtype=np.float64)
+        a_pad[:len(a_arr)] = a_arr
+    else:
+        a_pad = a_arr
+
     out = np.empty(n, dtype=np.float64)
-    z = zi.copy()
-    a1 = a[1:]
-    b0 = b[0]
-    b_rest = b[1:]
+    z = np.asarray(zi, dtype=np.float64).copy()
+    if len(z) != order:
+        raise ValueError(f"zi length {len(z)} does not match filter order {order}")
+    b0 = float(b_pad[0])
+    b_rest = b_pad[1:]
+    a_rest = a_pad[1:]
     for i in range(n):
-        xi = x[i]
+        xi = float(x_arr[i])
         yi = b0 * xi + z[0]
         out[i] = yi
         for k in range(order - 1):
-            z[k] = b_rest[k] * xi - a1[k] * yi + z[k + 1]
-        if order > 0:
-            z[order - 1] = b_rest[order - 1] * xi - a1[order - 1] * yi
+            z[k] = b_rest[k] * xi - a_rest[k] * yi + z[k + 1]
+        z[order - 1] = b_rest[order - 1] * xi - a_rest[order - 1] * yi
     return out, z
 
 
@@ -247,6 +274,28 @@ class WaveguideStringPlane:
         self.zi_loop = np.zeros(len(self.a_sustain) - 1, dtype=np.float64)
         self.zi_dc = np.zeros(1, dtype=np.float64)
         self.in_release = False
+        self._native = None
+        if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_guitar_plane_create is not None:
+            b_sus_c = np.ascontiguousarray(self.b_sustain, dtype=np.float64)
+            a_sus_c = np.ascontiguousarray(self.a_sustain, dtype=np.float64)
+            b_rel_c = np.ascontiguousarray(self.b_release, dtype=np.float64)
+            a_rel_c = np.ascontiguousarray(self.a_release, dtype=np.float64)
+            self._native = dsp_native.nova_guitar_plane_create(
+                int(self.n_int),
+                b_sus_c.ctypes.data_as(dsp_native.c_double_p),
+                a_sus_c.ctypes.data_as(dsp_native.c_double_p),
+                b_rel_c.ctypes.data_as(dsp_native.c_double_p),
+                a_rel_c.ctypes.data_as(dsp_native.c_double_p),
+            )
+
+    def __del__(self):
+        native = getattr(self, "_native", None)
+        if native is not None and dsp_native is not None and dsp_native.nova_guitar_plane_destroy is not None:
+            try:
+                dsp_native.nova_guitar_plane_destroy(native)
+            except Exception:
+                pass
+            self._native = None
 
     def _build_loop_coeffs(self, g: float, p: float) -> Tuple[np.ndarray, np.ndarray]:
         b_loss = np.array([g * (1.0 - p)], dtype=np.float64)
@@ -271,6 +320,18 @@ class WaveguideStringPlane:
 
         if is_released and not self.in_release:
             self.in_release = True
+
+        if self._native is not None and dsp_native.nova_guitar_plane_step is not None:
+            exc_c = np.ascontiguousarray(excitation, dtype=np.float64)
+            out = np.empty(n_out, dtype=np.float64)
+            dsp_native.nova_guitar_plane_step(
+                self._native,
+                exc_c.ctypes.data_as(dsp_native.c_double_p),
+                out.ctypes.data_as(dsp_native.c_double_p),
+                n_out,
+                1 if is_released else 0,
+            )
+            return out
 
         b, a = (self.b_release, self.a_release) if self.in_release else (self.b_sustain, self.a_sustain)
         out = np.empty(n_out, dtype=np.float64)
@@ -352,6 +413,8 @@ def generate_pluck_excitation(
     b_lp, a_lp = _biquad_lowpass(fc, 0.707, sample_rate)
     if HAS_SCIPY:
         noise_burst = sig.lfilter(b_lp, a_lp, noise_burst)
+    else:
+        noise_burst, _ = _lfilter_fast(b_lp, a_lp, noise_burst, np.zeros(2, dtype=np.float64))
 
     # Mélange impulsion + bruit
     exc = np.zeros(length_samples, dtype=np.float64)
@@ -377,6 +440,14 @@ def generate_pluck_excitation(
     return exc
 
 
+_GUITAR_MODE_MAP = {
+    "acoustic_steel": 0,
+    "acoustic_nylon": 1,
+    "electric_bass": 2,
+    "electric_clean": 3,
+}
+
+
 class GuitarBodyOrPickupProcessor:
     """
     Étage de coloration acoustique (caisse de résonance modale) ou électrique (micro magnétique).
@@ -388,11 +459,16 @@ class GuitarBodyOrPickupProcessor:
         self._filters: list = []
         self._cached_key: Optional[Tuple[Any, ...]] = None
         self._pickup_delay_buf = np.zeros(128, dtype=np.float64)
+        self._native_state = dsp_native.NovaGuitarBodyState()
 
     def reset(self):
         for f in self._filters:
             f["zi"] = np.zeros(len(f["a"]) - 1, dtype=np.float64)
         self._pickup_delay_buf.fill(0.0)
+        if dsp_native.nova_guitar_body_reset is not None:
+            dsp_native.nova_guitar_body_reset(ctypes.byref(self._native_state))
+        else:
+            ctypes.memset(ctypes.byref(self._native_state), 0, ctypes.sizeof(self._native_state))
 
     def _ensure_filters(self, mode: str, body_res: float, pickup_pos: float, sr: int):
         key = (mode, round(body_res, 3), round(pickup_pos, 3), sr)
@@ -476,6 +552,21 @@ class GuitarBodyOrPickupProcessor:
     ) -> np.ndarray:
         if len(signal) == 0:
             return signal
+        if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_guitar_body_process is not None:
+            x_c = np.ascontiguousarray(signal, dtype=np.float64)
+            out = np.empty(len(x_c), dtype=np.float64)
+            mode_id = _GUITAR_MODE_MAP.get(mode, 3)
+            dsp_native.nova_guitar_body_process(
+                ctypes.byref(self._native_state),
+                x_c.ctypes.data_as(dsp_native.c_double_p),
+                out.ctypes.data_as(dsp_native.c_double_p),
+                len(x_c),
+                mode_id,
+                float(body_resonance),
+                float(pickup_position),
+                int(sample_rate),
+            )
+            return out
         self._ensure_filters(mode, body_resonance, pickup_position, sample_rate)
         x = signal.astype(np.float64, copy=False)
 
@@ -580,12 +671,59 @@ class GuitarStringVoice:
             guitar_mode=guitar_mode,
             rng=rng,
         )
+        self._exc_c = np.ascontiguousarray(self.excitation, dtype=np.float64)
         self.rendered_samples = 0
+
+    def skip_samples(self, count: int) -> None:
+        """Avance rapide sans allouer de tampon de sortie."""
+        if count <= 0:
+            return
+        if (
+            self.plane_a._native is not None
+            and (self.plane_b is None or self.plane_b._native is not None)
+            and dsp_native.nova_guitar_voice_render is not None
+        ):
+            dsp_native.nova_guitar_voice_render(
+                self.plane_a._native,
+                self.plane_b._native if self.plane_b is not None else None,
+                self._exc_c.ctypes.data_as(dsp_native.c_double_p),
+                len(self._exc_c),
+                self.rendered_samples,
+                self.note_dur_samples,
+                None,
+                int(count),
+            )
+            self.rendered_samples += int(count)
+            return
+        skip = count
+        while skip > 0:
+            step = min(4096, skip)
+            self.render_samples(step)
+            skip -= step
 
     def render_samples(self, count: int) -> np.ndarray:
         """Rend `count` échantillons mono en continu à partir de `self.rendered_samples`."""
         if count <= 0:
             return np.empty(0, dtype=np.float64)
+
+        if (
+            self.plane_a._native is not None
+            and (self.plane_b is None or self.plane_b._native is not None)
+            and dsp_native.nova_guitar_voice_render is not None
+        ):
+            out = np.empty(count, dtype=np.float64)
+            dsp_native.nova_guitar_voice_render(
+                self.plane_a._native,
+                self.plane_b._native if self.plane_b is not None else None,
+                self._exc_c.ctypes.data_as(dsp_native.c_double_p),
+                len(self._exc_c),
+                self.rendered_samples,
+                self.note_dur_samples,
+                out.ctypes.data_as(dsp_native.c_double_p),
+                count,
+            )
+            self.rendered_samples += count
+            return out
 
         start = self.rendered_samples
         end = start + count
@@ -636,6 +774,7 @@ class GuitarStereoWidener:
     def __init__(self) -> None:
         self._stages_a = self._build_stages(self._COEFFS_A, with_delay=True)
         self._stages_b = self._build_stages(self._COEFFS_B, with_delay=False)
+        self._native_state = dsp_native.NovaGuitarWidenerState()
 
     @staticmethod
     def _build_stages(coeffs: Tuple[float, ...], with_delay: bool) -> list:
@@ -660,11 +799,30 @@ class GuitarStereoWidener:
             st["zi"].fill(0.0)
         for st in self._stages_b:
             st["zi"].fill(0.0)
+        if dsp_native.nova_guitar_widener_reset is not None:
+            dsp_native.nova_guitar_widener_reset(ctypes.byref(self._native_state))
+        else:
+            ctypes.memset(ctypes.byref(self._native_state), 0, ctypes.sizeof(self._native_state))
 
     def process(self, mono: np.ndarray, stereo_width: float) -> Tuple[np.ndarray, np.ndarray]:
         w = max(0.0, min(1.0, float(stereo_width)))
         if len(mono) == 0 or w <= 0.001:
             return mono, mono
+
+        if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_guitar_widener_process is not None:
+            x_c = np.ascontiguousarray(mono, dtype=np.float64)
+            n = len(x_c)
+            out_l = np.empty(n, dtype=np.float64)
+            out_r = np.empty(n, dtype=np.float64)
+            dsp_native.nova_guitar_widener_process(
+                ctypes.byref(self._native_state),
+                x_c.ctypes.data_as(dsp_native.c_double_p),
+                out_l.ctypes.data_as(dsp_native.c_double_p),
+                out_r.ctypes.data_as(dsp_native.c_double_p),
+                n,
+                w,
+            )
+            return out_l, out_r
 
         x = mono.astype(np.float64, copy=False)
         sig_i = x

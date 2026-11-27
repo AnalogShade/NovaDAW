@@ -6,8 +6,11 @@ biquad standards (RBJ Audio EQ Cookbook) : Peaking, Low-Shelf, High-Shelf, High-
 Maintient l'état du filtre (Direct Form II Transposed) entre les blocs audio pour éviter
 tout clic ou discontinuité sonore lors du traitement temps réel.
 """
+import threading
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
+
+from core import dsp_native
 
 try:
     from scipy.signal import lfilter, lfilter_zi
@@ -36,7 +39,9 @@ class EqualizerBand:
         self._gain_db = float(gain_db)      # -24 dB à +24 dB
         self._q = float(q)                  # 0.1 à 10.0
         self._filter_type = str(filter_type) # "peaking", "low_shelf", "high_shelf", "low_pass", "high_pass"
-        self.enabled = enabled
+        self._enabled = bool(enabled)
+        self._version: int = 0
+        self._zi_epoch: int = 0
 
         # Coefficients de biquad mis en cache
         self._cached_sr: Optional[int] = None
@@ -46,6 +51,17 @@ class EqualizerBand:
         # État des mémoires de délai pour le lissage des blocs audio (stéréo)
         self.zi_left: Optional[np.ndarray] = None
         self.zi_right: Optional[np.ndarray] = None
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    @enabled.setter
+    def enabled(self, val: bool):
+        v = bool(val)
+        if self._enabled != v:
+            self._enabled = v
+            self._version += 1
 
     @property
     def frequency(self) -> float:
@@ -95,6 +111,8 @@ class EqualizerBand:
     def reset_state(self):
         self.zi_left = None
         self.zi_right = None
+        self._zi_epoch += 1
+        self._version += 1
 
     def compute_coefficients(self, sample_rate: int) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -188,6 +206,8 @@ class EqualizerBand:
         self._cached_a = None
         self.zi_left = None
         self.zi_right = None
+        self._zi_epoch += 1
+        self._version += 1
 
     def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
         """Applique le filtre biquad sur le buffer stéréo (N, 2) de manière ultra-rapide"""
@@ -294,7 +314,25 @@ class EqualizerPlugin(BasePlugin):
         self.master_gain_db: float = 0.0
         self.preset_name: str = "Flat"
         self.bands: List[EqualizerBand] = []
+        self._lock = threading.RLock()
+        self._native = (
+            dsp_native.nova_eq_create(max(1, min(32, int(band_count))))
+            if dsp_native.NATIVE_AVAILABLE and dsp_native.nova_eq_create is not None
+            else None
+        )
+        self._native_sr: Optional[int] = None
+        self._native_band_count: int = 0
+        self._native_band_meta: List[Optional[Tuple[int, int, int]]] = [None] * 32
         self.set_band_count(band_count)
+
+    def __del__(self):
+        native = getattr(self, "_native", None)
+        if native is not None and dsp_native is not None and dsp_native.nova_eq_destroy is not None:
+            try:
+                dsp_native.nova_eq_destroy(native)
+            except Exception:
+                pass
+            self._native = None
 
     FACTORY_PRESETS: Dict[str, Dict[str, Any]] = {
         "Flat": {"preset_key": "flat"},
@@ -395,29 +433,30 @@ class EqualizerPlugin(BasePlugin):
         count = max(1, min(32, count))
         frequencies, types, default_qs = self._get_default_frequencies_for_count(count)
 
-        new_bands = []
-        for i in range(count):
-            freq = frequencies[i]
-            ftype = types[i]
-            q_val = default_qs[i]
-            gain = 0.0
+        with self._lock:
+            new_bands = []
+            for i in range(count):
+                freq = frequencies[i]
+                ftype = types[i]
+                q_val = default_qs[i]
+                gain = 0.0
 
-            # Si on a déjà une bande existante à cet index, reprendre son gain si pertinent
-            if i < len(self.bands):
-                gain = self.bands[i].gain_db
+                # Si on a déjà une bande existante à cet index, reprendre son gain si pertinent
+                if i < len(self.bands):
+                    gain = self.bands[i].gain_db
 
-            band = EqualizerBand(
-                band_id=i + 1,
-                frequency=freq,
-                gain_db=gain,
-                q=q_val,
-                filter_type=ftype,
-                enabled=True
-            )
-            new_bands.append(band)
+                band = EqualizerBand(
+                    band_id=i + 1,
+                    frequency=freq,
+                    gain_db=gain,
+                    q=q_val,
+                    filter_type=ftype,
+                    enabled=True
+                )
+                new_bands.append(band)
 
-        self.bands = new_bands
-        self.reset()
+            self.bands = new_bands
+            self.reset()
 
     @staticmethod
     def _get_default_frequencies_for_count(count: int) -> Tuple[List[float], List[str], List[float]]:
@@ -461,23 +500,24 @@ class EqualizerPlugin(BasePlugin):
 
     def apply_bass_cut(self, cutoff_freq: float = 120.0, enabled: bool = True):
         """Active ou désactive un filtre passe-haut (High-Pass) coupe-bas propre sur la première bande."""
-        if not self.bands:
-            return
-        b1 = self.bands[0]
-        if enabled:
-            b1.filter_type = "high_pass"
-            b1.frequency = float(cutoff_freq)
-            b1.q = 0.707
-            b1.gain_db = 0.0
-            b1.enabled = True
-        else:
-            b1.filter_type = "low_shelf"
-            b1.frequency = 31.25 if len(self.bands) == 10 else (100.0 if len(self.bands) == 3 else 32.0)
-            b1.q = 1.414 if len(self.bands) == 10 else 0.707
-            b1.gain_db = 0.0
-            b1.enabled = True
-        b1.invalidate_cache()
-        self.reset()
+        with self._lock:
+            if not self.bands:
+                return
+            b1 = self.bands[0]
+            if enabled:
+                b1.filter_type = "high_pass"
+                b1.frequency = float(cutoff_freq)
+                b1.q = 0.707
+                b1.gain_db = 0.0
+                b1.enabled = True
+            else:
+                b1.filter_type = "low_shelf"
+                b1.frequency = 31.25 if len(self.bands) == 10 else (100.0 if len(self.bands) == 3 else 32.0)
+                b1.q = 1.414 if len(self.bands) == 10 else 0.707
+                b1.gain_db = 0.0
+                b1.enabled = True
+            b1.invalidate_cache()
+            self.reset()
 
     def process(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
         """Traite le buffer audio au travers de toutes les bandes actives de l'égaliseur"""
@@ -488,9 +528,100 @@ class EqualizerPlugin(BasePlugin):
         if self.is_flat():
             return audio
 
-        # Assurer format float32 2D stéréo
+        if self._native is not None and dsp_native.nova_eq_process is not None:
+            if audio.ndim == 1:
+                in_c = np.column_stack((audio, audio)).astype(np.float32)
+            elif audio.ndim == 2 and audio.shape[1] == 1:
+                in_c = np.column_stack((audio[:, 0], audio[:, 0])).astype(np.float32)
+            elif audio.ndim == 2 and audio.shape[1] > 2:
+                in_c = np.ascontiguousarray(audio[:, :2], dtype=np.float32)
+            else:
+                in_c = np.ascontiguousarray(audio, dtype=np.float32)
+
+            n_samples = len(in_c)
+            out = np.empty((n_samples, 2), dtype=np.float32)
+            sr = int(sample_rate)
+
+            with self._lock:
+                n_bands = min(32, len(self.bands))
+                sr_changed = (self._native_sr != sr)
+                if n_bands != self._native_band_count:
+                    dsp_native.nova_eq_set_num_bands(self._native, n_bands)
+                    self._native_band_count = n_bands
+
+                for idx in range(n_bands):
+                    band = self.bands[idx]
+                    meta = (id(band), band._version, band._zi_epoch)
+                    prev_meta = self._native_band_meta[idx]
+                    if sr_changed or prev_meta != meta:
+                        reset_zi = (
+                            1
+                            if (
+                                prev_meta is None
+                                or prev_meta[0] != meta[0]
+                                or prev_meta[2] != meta[2]
+                                or sr_changed
+                            )
+                            else 0
+                        )
+                        active = 1 if (band.enabled and not band.is_neutral) else 0
+                        if active:
+                            b, a = band.compute_coefficients(sr)
+                            if (
+                                abs(float(b[0]) - 1.0) < 1e-12
+                                and abs(float(b[1])) < 1e-12
+                                and abs(float(b[2])) < 1e-12
+                                and abs(float(a[1])) < 1e-12
+                                and abs(float(a[2])) < 1e-12
+                            ):
+                                active = 0
+                            dsp_native.nova_eq_set_band(
+                                self._native,
+                                idx,
+                                float(b[0]),
+                                float(b[1]),
+                                float(b[2]),
+                                float(a[1]),
+                                float(a[2]),
+                                active,
+                                reset_zi,
+                            )
+                        else:
+                            dsp_native.nova_eq_set_band(
+                                self._native,
+                                idx,
+                                1.0,
+                                0.0,
+                                0.0,
+                                0.0,
+                                0.0,
+                                0,
+                                reset_zi,
+                            )
+                        self._native_band_meta[idx] = meta
+                self._native_sr = sr
+
+                master_gain_lin = (
+                    float(10.0 ** (self.master_gain_db / 20.0))
+                    if abs(self.master_gain_db) > 0.01
+                    else 1.0
+                )
+                dsp_native.nova_eq_process(
+                    self._native,
+                    in_c.ctypes.data_as(dsp_native.c_float_p),
+                    out.ctypes.data_as(dsp_native.c_float_p),
+                    n_samples,
+                    master_gain_lin,
+                )
+            return out
+
+        # Assurer format float32 2D stéréo (repli Python/SciPy)
         if audio.ndim == 1:
             out = np.column_stack((audio, audio)).astype(np.float32)
+        elif audio.ndim == 2 and audio.shape[1] == 1:
+            out = np.column_stack((audio[:, 0], audio[:, 0])).astype(np.float32)
+        elif audio.ndim == 2 and audio.shape[1] > 2:
+            out = audio[:, :2].copy().astype(np.float32)
         else:
             out = audio.copy().astype(np.float32)
 
@@ -508,8 +639,12 @@ class EqualizerPlugin(BasePlugin):
 
     def reset(self) -> None:
         """Réinitialise les mémoires de filtrage de toutes les bandes"""
-        for band in self.bands:
-            band.reset_state()
+        with self._lock:
+            for band in self.bands:
+                band.reset_state()
+            if self._native is not None and dsp_native.nova_eq_reset is not None:
+                dsp_native.nova_eq_reset(self._native)
+                self._native_band_meta = [None] * 32
 
     def compute_magnitude_response(self, frequencies: np.ndarray, sample_rate: int = 44100) -> np.ndarray:
         """
@@ -549,19 +684,20 @@ class EqualizerPlugin(BasePlugin):
         }
 
     def set_state(self, state: Dict[str, Any]) -> None:
-        if "enabled" in state:
-            self.enabled = bool(state["enabled"])
-        if "preset_name" in state:
-            self.preset_name = str(state["preset_name"])
-        if "master_gain_db" in state:
-            self.master_gain_db = float(state["master_gain_db"])
-        saved_bands = state.get("bands", [])
-        target_count = state.get("band_count")
-        if target_count is not None and (not saved_bands or int(target_count) != len(saved_bands)):
-            self.set_band_count(int(target_count))
-        elif saved_bands:
-            self.bands = [EqualizerBand.from_dict(d) for d in saved_bands]
-        self.reset()
+        with self._lock:
+            if "enabled" in state:
+                self.enabled = bool(state["enabled"])
+            if "preset_name" in state:
+                self.preset_name = str(state["preset_name"])
+            if "master_gain_db" in state:
+                self.master_gain_db = float(state["master_gain_db"])
+            saved_bands = state.get("bands", [])
+            target_count = state.get("band_count")
+            if target_count is not None and (not saved_bands or int(target_count) != len(saved_bands)):
+                self.set_band_count(int(target_count))
+            elif saved_bands:
+                self.bands = [EqualizerBand.from_dict(d) for d in saved_bands]
+            self.reset()
 
     def create_editor(self, parent=None):
         from plugins.equalizer.equalizer_gui import EqualizerPluginWidget

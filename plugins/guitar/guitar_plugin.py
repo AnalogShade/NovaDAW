@@ -426,11 +426,7 @@ class NovaGuitarPlugin(BasePlugin):
             # Avance rapide si on démarre en milieu de note (seek)
             if desired_voice_sample > voice.rendered_samples:
                 skip = desired_voice_sample - voice.rendered_samples
-                # Avancer par blocs de 4096 pour rester léger en mémoire
-                while skip > 0:
-                    step = min(4096, skip)
-                    voice.render_samples(step)
-                    skip -= step
+                voice.skip_samples(skip)
 
             voice_mono = voice.render_samples(render_count)
 
